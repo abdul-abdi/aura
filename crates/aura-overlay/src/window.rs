@@ -21,6 +21,8 @@ impl OverlayWindow {
         if let Some(ref window) = self.window {
             window.set_visible(true);
             self.visible = true;
+        } else {
+            tracing::warn!("Cannot show overlay: window not yet created");
         }
     }
 
@@ -28,6 +30,8 @@ impl OverlayWindow {
         if let Some(ref window) = self.window {
             window.set_visible(false);
             self.visible = false;
+        } else {
+            tracing::warn!("Cannot hide overlay: window not yet created");
         }
     }
 
