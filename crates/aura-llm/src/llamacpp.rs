@@ -6,7 +6,25 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+const DEFAULT_MODEL_FILENAME: &str = "intent-model.gguf";
+const DEFAULT_N_CTX: u32 = 2048;
+const DEFAULT_N_THREADS: u32 = 4;
+const DEFAULT_MAX_TOKENS: u32 = 256;
+
+static BACKEND: OnceLock<Mutex<Result<Arc<LlamaBackend>>>> = OnceLock::new();
+
+fn get_backend() -> Result<Arc<LlamaBackend>> {
+    let cell = BACKEND.get_or_init(|| {
+        Mutex::new(LlamaBackend::init().map(Arc::new).map_err(|e| anyhow::anyhow!("{e}")))
+    });
+    let guard = cell.lock().expect("backend mutex poisoned");
+    match guard.as_ref() {
+        Ok(backend) => Ok(Arc::clone(backend)),
+        Err(e) => Err(anyhow::anyhow!("Backend init failed: {e}")),
+    }
+}
 
 pub struct LlamaCppConfig {
     pub model_path: PathBuf,
@@ -17,15 +35,20 @@ pub struct LlamaCppConfig {
 
 impl Default for LlamaCppConfig {
     fn default() -> Self {
+        let model_path = dirs::data_local_dir()
+            .unwrap_or_else(|| {
+                tracing::warn!("Could not determine local data directory, falling back to '.'");
+                PathBuf::from(".")
+            })
+            .join("aura")
+            .join("models")
+            .join(DEFAULT_MODEL_FILENAME);
+
         Self {
-            model_path: dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("aura")
-                .join("models")
-                .join("intent-model.gguf"),
-            n_ctx: 2048,
-            n_threads: 4,
-            max_tokens: 256,
+            model_path,
+            n_ctx: DEFAULT_N_CTX,
+            n_threads: DEFAULT_N_THREADS,
+            max_tokens: DEFAULT_MAX_TOKENS,
         }
     }
 }
@@ -38,7 +61,7 @@ pub struct LlamaCppProvider {
 
 impl LlamaCppProvider {
     pub fn new(config: LlamaCppConfig) -> Result<Self> {
-        let backend = LlamaBackend::init()?;
+        let backend = get_backend()?;
 
         let model_params = LlamaModelParams::default();
         let model = LlamaModel::load_from_file(
@@ -50,7 +73,7 @@ impl LlamaCppProvider {
 
         Ok(Self {
             model: Arc::new(model),
-            backend: Arc::new(backend),
+            backend,
             config,
         })
     }
@@ -72,8 +95,8 @@ impl LlmProvider for LlamaCppProvider {
             .str_to_token(prompt, llama_cpp_2::model::AddBos::Always)?;
 
         tracing::debug!(
-            "LlamaCpp inference with {} input tokens",
-            tokens.len()
+            token_count = tokens.len(),
+            "LlamaCpp inference started"
         );
 
         // TODO: implement actual token generation loop

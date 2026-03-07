@@ -7,7 +7,7 @@ edition.workspace = true
 aura-voice = { path = "../aura-voice" }
 aura-overlay = { path = "../aura-overlay" }
 aura-screen = { path = "../aura-screen" }
-aura-llm = { path = "../aura-llm" }
+aura-llm = { path = "../aura-llm", features = ["llamacpp"] }
 aura-bridge = { path = "../aura-bridge" }
 serde.workspace = true
 serde_json.workspace = true

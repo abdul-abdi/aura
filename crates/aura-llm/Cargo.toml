@@ -5,6 +5,7 @@ edition.workspace = true
 
 [features]
 test-support = []
+llamacpp = ["dep:llama-cpp-2", "dep:dirs"]
 
 [dev-dependencies]
 aura-llm = { path = ".", features = ["test-support"] }
@@ -16,5 +17,5 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait = "0.1"
-llama-cpp-2 = "0.1"
-dirs = "6"
+llama-cpp-2 = { version = "0.1", optional = true }
+dirs = { version = "6", optional = true }
