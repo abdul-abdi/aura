@@ -14,6 +14,18 @@ async fn test_ollama_provider_connection_refused() {
 }
 
 #[tokio::test]
+async fn test_ollama_health_check_connection_refused() {
+    let config = OllamaConfig {
+        base_url: "http://localhost:1".into(),
+        model: "test".into(),
+        timeout_secs: 2,
+    };
+    let provider = OllamaProvider::new(config).unwrap();
+    let result = provider.health_check().await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn test_ollama_config_defaults() {
     let config = OllamaConfig::default();
     assert_eq!(config.base_url, "http://localhost:11434");

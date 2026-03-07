@@ -147,6 +147,13 @@ async fn run_processor(
 ) -> Result<()> {
     let provider =
         OllamaProvider::new(OllamaConfig::default()).context("Failed to create Ollama provider")?;
+
+    // Health check
+    if let Err(e) = provider.health_check().await {
+        tracing::warn!("Ollama health check failed: {e}");
+        tracing::warn!("Intent parsing will fail until Ollama is available");
+    }
+
     let parser = IntentParser::new(Box::new(provider));
 
     #[cfg(target_os = "macos")]
