@@ -15,6 +15,9 @@ impl Daemon {
         tracing::info!("Aura daemon running");
         let mut rx = self.bus.subscribe();
 
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+
         loop {
             tokio::select! {
                 event = rx.recv() => {
@@ -26,12 +29,16 @@ impl Daemon {
                         Ok(event) => {
                             tracing::debug!(?event, "Event received");
                         }
-                        Err(e) => {
-                            tracing::warn!("Event bus error: {e}");
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Event bus lagged, skipped {n} events");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::error!("Event bus closed unexpectedly");
+                            break;
                         }
                     }
                 }
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut ctrl_c => {
                     tracing::info!("Ctrl+C received, shutting down");
                     break;
                 }
