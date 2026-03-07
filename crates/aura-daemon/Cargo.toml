@@ -23,3 +23,5 @@ which = "7"
 
 [dev-dependencies]
 tempfile = "3"
+aura-llm = { path = "../aura-llm", features = ["test-support"] }
+aura-bridge = { path = "../aura-bridge", features = ["test-support"] }
