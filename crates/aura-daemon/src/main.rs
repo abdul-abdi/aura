@@ -1,4 +1,5 @@
 use anyhow::Result;
+use aura_daemon::bus;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -9,8 +10,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("Aura daemon starting...");
 
-    // TODO: Initialize subsystems
-    // TODO: Run event loop
+    let _bus = bus::EventBus::new(64);
 
     tracing::info!("Aura daemon shutting down.");
     Ok(())

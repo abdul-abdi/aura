@@ -9,6 +9,8 @@ aura-overlay = { path = "../aura-overlay" }
 aura-screen = { path = "../aura-screen" }
 aura-llm = { path = "../aura-llm" }
 aura-bridge = { path = "../aura-bridge" }
+serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
