@@ -1,6 +1,11 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+const DEFAULT_WAKE_THRESHOLD: f32 = 0.5;
+const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 2_000;
+const DEFAULT_MAX_LISTEN_MS: u64 = 10_000;
+
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
     WakeWordDetected,
@@ -20,16 +25,16 @@ pub struct VoicePipelineConfig {
 impl Default for VoicePipelineConfig {
     fn default() -> Self {
         Self {
-            sample_rate: 16000,
-            wake_threshold: 0.5,
-            silence_timeout_ms: 2000,
-            max_listen_ms: 10000,
+            sample_rate: DEFAULT_SAMPLE_RATE,
+            wake_threshold: DEFAULT_WAKE_THRESHOLD,
+            silence_timeout_ms: DEFAULT_SILENCE_TIMEOUT_MS,
+            max_listen_ms: DEFAULT_MAX_LISTEN_MS,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PipelineState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineState {
     Idle,
     Listening,
     Processing,
@@ -50,22 +55,21 @@ impl VoicePipeline {
         }
     }
 
-    pub fn state(&self) -> &str {
-        match self.state {
-            PipelineState::Idle => "idle",
-            PipelineState::Listening => "listening",
-            PipelineState::Processing => "processing",
-        }
+    pub fn state(&self) -> PipelineState {
+        self.state
     }
 
     pub async fn on_wake_word_detected(&mut self) -> Result<()> {
+        if self.state != PipelineState::Idle {
+            anyhow::bail!("Cannot start listening from state: {:?}", self.state);
+        }
         self.state = PipelineState::Listening;
         self.event_tx.send(VoiceEvent::WakeWordDetected).await?;
         self.event_tx.send(VoiceEvent::ListeningStarted).await?;
         Ok(())
     }
 
-    pub async fn on_audio_captured(&mut self, _audio: Vec<f32>) -> Result<()> {
+    pub async fn on_audio_captured(&mut self, _audio: &[f32]) -> Result<()> {
         if self.state != PipelineState::Listening {
             return Ok(());
         }
@@ -78,9 +82,8 @@ impl VoicePipeline {
                 text: String::new(),
             })
             .await?;
-
-        self.state = PipelineState::Idle;
         self.event_tx.send(VoiceEvent::ListeningStopped).await?;
+        self.state = PipelineState::Idle;
 
         Ok(())
     }
