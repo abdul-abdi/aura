@@ -2,6 +2,11 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+const DEFAULT_MODEL_FILENAME: &str = "ggml-base.en.bin";
+const DEFAULT_MODEL_DIR: &str = "aura";
+const DEFAULT_MODELS_SUBDIR: &str = "models";
+const DEFAULT_LANGUAGE: &str = "en";
+
 pub struct SttConfig {
     pub model_path: PathBuf,
     pub language: String,
@@ -13,10 +18,10 @@ impl Default for SttConfig {
         Self {
             model_path: dirs::data_local_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("aura")
-                .join("models")
-                .join("ggml-base.en.bin"),
-            language: "en".into(),
+                .join(DEFAULT_MODEL_DIR)
+                .join(DEFAULT_MODELS_SUBDIR)
+                .join(DEFAULT_MODEL_FILENAME),
+            language: DEFAULT_LANGUAGE.into(),
             translate: false,
         }
     }
@@ -59,9 +64,10 @@ impl SpeechToText {
         let num_segments = state.full_n_segments()?;
         let mut text = String::new();
         for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
-            }
+            let segment = state
+                .full_get_segment_text(i)
+                .context(format!("Failed to get segment {i} text"))?;
+            text.push_str(&segment);
         }
 
         Ok(text.trim().to_string())
