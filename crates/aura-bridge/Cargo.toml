@@ -3,7 +3,20 @@ name = "aura-bridge"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
+[dev-dependencies]
+aura-bridge = { path = ".", features = ["test-support"] }
+
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"

@@ -141,6 +141,12 @@ name = "aura-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "aura-bridge",
+ "cocoa",
+ "objc",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
