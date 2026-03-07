@@ -3,7 +3,6 @@
 /// Computes RMS energy per audio chunk and compares against a threshold.
 /// Uses a simple state machine: silence -> speaking -> silence, with
 /// hold-off to avoid cutting off mid-word.
-
 const DEFAULT_ENERGY_THRESHOLD: f32 = 0.02;
 const DEFAULT_SILENCE_FRAMES: usize = 30; // ~30 chunks of silence before stopping
 

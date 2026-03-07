@@ -516,7 +516,7 @@ impl OverlayRenderer {
         let mut glass_paint = Paint::default();
         glass_paint.set_anti_alias(true);
         glass_paint.set_color4f(Color4f::new(gr, gg, gb, ga * card_opacity), None);
-        canvas.draw_rrect(&card_rrect, &glass_paint);
+        canvas.draw_rrect(card_rrect, &glass_paint);
 
         // Luminous border
         let mut border_paint = Paint::default();
@@ -524,7 +524,7 @@ impl OverlayRenderer {
         border_paint.set_style(paint::Style::Stroke);
         border_paint.set_stroke_width(1.0);
         border_paint.set_color4f(Color4f::new(cr, cg, cb, 0.3 * card_opacity), None);
-        canvas.draw_rrect(&card_rrect, &border_paint);
+        canvas.draw_rrect(card_rrect, &border_paint);
 
         // Outer glow on border
         let mut border_glow = Paint::default();
@@ -533,7 +533,7 @@ impl OverlayRenderer {
         border_glow.set_stroke_width(2.0);
         border_glow.set_color4f(Color4f::new(cr, cg, cb, 0.1 * card_opacity), None);
         border_glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 4.0, None));
-        canvas.draw_rrect(&card_rrect, &border_glow);
+        canvas.draw_rrect(card_rrect, &border_glow);
 
         // Text rendering
         let font = self.make_font(AuraTypography::SIZE_RESPONSE);
@@ -605,7 +605,7 @@ impl OverlayRenderer {
             Color4f::new(gr + 0.02, gg, gb + 0.02, ga * card_opacity),
             None,
         );
-        canvas.draw_rrect(&card_rrect, &glass_paint);
+        canvas.draw_rrect(card_rrect, &glass_paint);
 
         // Pulsing violet border
         let pulse = AuraEasing::breathe(pulse_phase / AuraTiming::ERROR_PULSE_SECS);
@@ -616,7 +616,7 @@ impl OverlayRenderer {
         border_paint.set_style(paint::Style::Stroke);
         border_paint.set_stroke_width(1.0);
         border_paint.set_color4f(Color4f::new(vr, vg, vb, border_alpha), None);
-        canvas.draw_rrect(&card_rrect, &border_paint);
+        canvas.draw_rrect(card_rrect, &border_paint);
 
         // Border glow
         let mut border_glow = Paint::default();
@@ -625,7 +625,7 @@ impl OverlayRenderer {
         border_glow.set_stroke_width(2.0);
         border_glow.set_color4f(Color4f::new(vr, vg, vb, 0.1 * card_opacity * (1.0 + pulse)), None);
         border_glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 4.0, None));
-        canvas.draw_rrect(&card_rrect, &border_glow);
+        canvas.draw_rrect(card_rrect, &border_glow);
 
         // Violet indicator dot
         let dot_x = center_x - card_width / 2.0 + padding;

@@ -39,6 +39,12 @@ pub struct OverlayWindow {
     last_frame: Instant,
 }
 
+impl Default for OverlayWindow {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OverlayWindow {
     pub fn new() -> Self {
         Self {
@@ -221,10 +227,10 @@ impl ApplicationHandler<OverlayMessage> for OverlayWindow {
             OverlayMessage::Hide => self.hide(),
             OverlayMessage::SetState(state) => {
                 self.state = state;
-                if self.visible {
-                    if let Some(ref window) = self.window {
-                        window.request_redraw();
-                    }
+                if self.visible
+                    && let Some(ref window) = self.window
+                {
+                    window.request_redraw();
                 }
             }
             OverlayMessage::Shutdown => {
