@@ -1,91 +1,133 @@
-use anyhow::Result;
-use tokio::sync::mpsc;
+use std::sync::Arc;
 
-use crate::audio::SAMPLE_RATE;
-const DEFAULT_WAKE_THRESHOLD: f32 = 0.5;
-const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 2_000;
-const DEFAULT_MAX_LISTEN_MS: u64 = 10_000;
+use anyhow::{Context, Result};
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+
+use crate::audio::AudioCapture;
+use crate::stt::{SpeechToText, SttConfig};
+use crate::vad::{VadConfig, VadState, VoiceActivityDetector};
 
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
-    WakeWordDetected,
     ListeningStarted,
     Transcription { text: String },
     ListeningStopped,
     Error { message: String },
 }
 
-#[derive(Debug, Clone)]
-pub struct VoicePipelineConfig {
-    pub sample_rate: u32,
-    pub wake_threshold: f32,
-    pub silence_timeout_ms: u64,
-    pub max_listen_ms: u64,
-}
+/// Run the voice capture → VAD → STT pipeline as a long-lived async task.
+///
+/// Audio is captured from the microphone via cpal (which uses std::sync::mpsc).
+/// A bridge thread forwards chunks to a tokio::sync::mpsc channel.
+/// VAD detects speech boundaries, and STT transcribes the accumulated audio.
+/// Results are published via the broadcast sender.
+pub async fn run_voice_task(
+    stt_config: SttConfig,
+    vad_config: VadConfig,
+    event_tx: broadcast::Sender<VoiceEvent>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    // Initialize STT (heavy — load whisper model)
+    let stt = Arc::new(
+        tokio::task::spawn_blocking(move || SpeechToText::new(stt_config))
+            .await
+            .context("STT init panicked")?
+            .context("Failed to initialize STT")?,
+    );
 
-impl Default for VoicePipelineConfig {
-    fn default() -> Self {
-        Self {
-            sample_rate: SAMPLE_RATE,
-            wake_threshold: DEFAULT_WAKE_THRESHOLD,
-            silence_timeout_ms: DEFAULT_SILENCE_TIMEOUT_MS,
-            max_listen_ms: DEFAULT_MAX_LISTEN_MS,
+    // Set up audio capture
+    let capture = AudioCapture::new(None).context("Failed to open microphone")?;
+
+    // Bridge: cpal's std::sync::mpsc -> tokio::sync::mpsc
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let (tok_tx, mut tok_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
+
+    // Start cpal stream (must keep `_stream` alive)
+    let _stream = capture.start(std_tx).context("Failed to start audio stream")?;
+
+    // Bridge thread: forward from std channel to tokio channel
+    let bridge_cancel = cancel.clone();
+    std::thread::spawn(move || {
+        while !bridge_cancel.is_cancelled() {
+            match std_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(chunk) => {
+                    if tok_tx.blocking_send(chunk).is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+
+    tracing::info!("Voice pipeline running");
+
+    let mut vad = VoiceActivityDetector::new(vad_config);
+    let mut audio_buffer: Vec<f32> = Vec::new();
+    let mut was_speaking = false;
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("Voice pipeline shutting down");
+                break;
+            }
+            chunk = tok_rx.recv() => {
+                let Some(chunk) = chunk else { break };
+
+                let state = vad.process(&chunk);
+
+                match state {
+                    VadState::Speaking => {
+                        if !was_speaking {
+                            tracing::info!("Speech detected — listening");
+                            let _ = event_tx.send(VoiceEvent::ListeningStarted);
+                            audio_buffer.clear();
+                            was_speaking = true;
+                        }
+                        audio_buffer.extend_from_slice(&chunk);
+                    }
+                    VadState::Silent => {
+                        if was_speaking {
+                            tracing::info!(
+                                samples = audio_buffer.len(),
+                                "Speech ended — transcribing"
+                            );
+                            was_speaking = false;
+                            let _ = event_tx.send(VoiceEvent::ListeningStopped);
+
+                            // Transcribe in background
+                            let stt = Arc::clone(&stt);
+                            let audio = std::mem::take(&mut audio_buffer);
+                            let tx = event_tx.clone();
+
+                            tokio::task::spawn_blocking(move || {
+                                match stt.transcribe(&audio) {
+                                    Ok(text) if !text.is_empty() => {
+                                        tracing::info!(text = %text, "Transcription complete");
+                                        let _ = tx.send(VoiceEvent::Transcription { text });
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!("Empty transcription, ignoring");
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("STT error: {e}");
+                                        let _ = tx.send(VoiceEvent::Error {
+                                            message: format!("STT failed: {e}"),
+                                        });
+                                    }
+                                }
+                            });
+
+                            vad.reset();
+                        }
+                    }
+                }
+            }
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipelineState {
-    Idle,
-    Listening,
-    Processing,
-}
-
-pub struct VoicePipeline {
-    config: VoicePipelineConfig,
-    state: PipelineState,
-    event_tx: mpsc::Sender<VoiceEvent>,
-}
-
-impl VoicePipeline {
-    pub fn new(config: VoicePipelineConfig, event_tx: mpsc::Sender<VoiceEvent>) -> Self {
-        Self {
-            config,
-            state: PipelineState::Idle,
-            event_tx,
-        }
-    }
-
-    pub fn state(&self) -> PipelineState {
-        self.state
-    }
-
-    pub async fn on_wake_word_detected(&mut self) -> Result<()> {
-        if self.state != PipelineState::Idle {
-            anyhow::bail!("Cannot start listening from state: {:?}", self.state);
-        }
-        self.event_tx.send(VoiceEvent::WakeWordDetected).await?;
-        self.event_tx.send(VoiceEvent::ListeningStarted).await?;
-        self.state = PipelineState::Listening;
-        Ok(())
-    }
-
-    pub async fn on_audio_captured(&mut self, _audio: &[f32]) -> Result<()> {
-        if self.state != PipelineState::Listening {
-            return Ok(());
-        }
-
-        self.state = PipelineState::Processing;
-
-        // STT will be integrated here -- for now emit placeholder
-        self.event_tx
-            .send(VoiceEvent::Transcription {
-                text: String::new(),
-            })
-            .await?;
-        self.event_tx.send(VoiceEvent::ListeningStopped).await?;
-        self.state = PipelineState::Idle;
-
-        Ok(())
-    }
+    Ok(())
 }
