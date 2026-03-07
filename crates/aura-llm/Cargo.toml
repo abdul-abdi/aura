@@ -3,6 +3,12 @@ name = "aura-llm"
 version.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
+[dev-dependencies]
+aura-llm = { path = ".", features = ["test-support"] }
+
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true

@@ -6,11 +6,13 @@ pub trait LlmProvider: Send + Sync {
     async fn complete(&self, prompt: &str) -> Result<String>;
 }
 
-/// Mock provider for testing
+/// Mock provider for testing — only available in test builds.
+#[cfg(any(test, feature = "test-support"))]
 pub struct MockProvider {
     responses: Vec<(String, String)>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl MockProvider {
     pub fn new(responses: Vec<(&str, &str)>) -> Self {
         Self {
@@ -22,6 +24,7 @@ impl MockProvider {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl LlmProvider for MockProvider {
     async fn complete(&self, prompt: &str) -> Result<String> {

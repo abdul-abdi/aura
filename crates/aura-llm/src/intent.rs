@@ -2,7 +2,7 @@ use crate::provider::LlmProvider;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Intent {
     OpenApp { name: String },
@@ -38,7 +38,14 @@ impl IntentParser {
         let prompt = format!("{SYSTEM_PROMPT}\n\nUser command: {text}\n\nJSON:");
         let response = self.provider.complete(&prompt).await?;
 
-        let intent: Intent = serde_json::from_str(response.trim())?;
+        tracing::debug!(raw_response = %response, "LLM response for intent parsing");
+
+        let intent: Intent = serde_json::from_str(response.trim()).unwrap_or_else(|err| {
+            tracing::warn!(%err, "Failed to parse LLM response as Intent, falling back to Unknown");
+            Intent::Unknown {
+                raw: text.to_string(),
+            }
+        });
         Ok(intent)
     }
 }
