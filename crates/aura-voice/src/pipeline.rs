@@ -63,9 +63,9 @@ impl VoicePipeline {
         if self.state != PipelineState::Idle {
             anyhow::bail!("Cannot start listening from state: {:?}", self.state);
         }
-        self.state = PipelineState::Listening;
         self.event_tx.send(VoiceEvent::WakeWordDetected).await?;
         self.event_tx.send(VoiceEvent::ListeningStarted).await?;
+        self.state = PipelineState::Listening;
         Ok(())
     }
 

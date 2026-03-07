@@ -59,3 +59,13 @@ async fn test_pipeline_ignores_audio_when_idle() {
     // No events should have been sent
     assert!(rx.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn test_wake_word_rejected_when_not_idle() {
+    let (tx, _rx) = mpsc::channel::<VoiceEvent>(16);
+    let config = VoicePipelineConfig::default();
+    let mut pipeline = VoicePipeline::new(config, tx);
+    pipeline.on_wake_word_detected().await.unwrap();
+    assert!(pipeline.on_wake_word_detected().await.is_err());
+    assert_eq!(pipeline.state(), PipelineState::Listening);
+}
