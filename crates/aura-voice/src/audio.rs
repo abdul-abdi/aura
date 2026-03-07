@@ -3,6 +3,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Stream, StreamConfig};
 use std::sync::mpsc;
 
+pub const SAMPLE_RATE: u32 = 16_000;
+pub const CHANNELS: u16 = 1;
+
 pub struct AudioCapture {
     device: Device,
     config: StreamConfig,
@@ -23,8 +26,8 @@ impl AudioCapture {
         };
 
         let config = StreamConfig {
-            channels: 1,
-            sample_rate: cpal::SampleRate(16000),
+            channels: CHANNELS,
+            sample_rate: cpal::SampleRate(SAMPLE_RATE),
             buffer_size: cpal::BufferSize::Default,
         };
 
@@ -50,11 +53,13 @@ impl AudioCapture {
         let stream = self.device.build_input_stream(
             &self.config,
             move |data: &[f32], _| {
-                let _ = sender.send(data.to_vec());
+                if sender.send(data.to_vec()).is_err() {
+                    tracing::warn!("Audio receiver dropped, data lost");
+                }
             },
             err_fn,
             None,
-        )?;
+        ).context("Device does not support 16kHz mono f32 input")?;
 
         stream.play()?;
         Ok(stream)
