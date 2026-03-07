@@ -2,6 +2,7 @@ use crate::bus::EventBus;
 use crate::event::{AuraEvent, OverlayContent};
 use anyhow::Result;
 use std::time::Duration;
+use tokio::task::AbortHandle;
 
 /// Delay before auto-hiding the overlay after a successful action.
 const OVERLAY_AUTO_HIDE_DELAY: Duration = Duration::from_secs(3);
@@ -20,6 +21,7 @@ impl Daemon {
 
         let mut rx = self.bus.subscribe();
         let bus = self.bus.clone();
+        let mut auto_hide_handle: Option<AbortHandle> = None;
 
         loop {
             tokio::select! {
@@ -27,42 +29,43 @@ impl Daemon {
                     match event {
                         Ok(AuraEvent::Shutdown) => {
                             tracing::info!("Shutdown signal received");
+                            if let Some(h) = auto_hide_handle.take() { h.abort(); }
                             break;
                         }
                         Ok(AuraEvent::WakeWordDetected) => {
                             tracing::info!("Wake word detected — listening");
-                            let _ = bus.send(AuraEvent::ShowOverlay {
+                            if let Some(h) = auto_hide_handle.take() { h.abort(); }
+                            send_event(&bus, AuraEvent::ShowOverlay {
                                 content: OverlayContent::Listening,
                             }).await;
                         }
                         Ok(AuraEvent::VoiceCommand { text }) => {
                             tracing::info!(command = %text, "Voice command received");
-                            let _ = bus.send(AuraEvent::ShowOverlay {
+                            if let Some(h) = auto_hide_handle.take() { h.abort(); }
+                            send_event(&bus, AuraEvent::ShowOverlay {
                                 content: OverlayContent::Processing,
                             }).await;
-                            // Intent parsing will happen here
                         }
                         Ok(AuraEvent::IntentParsed { intent }) => {
                             tracing::info!(?intent, "Intent parsed");
-                            // Action execution will happen here
                         }
                         Ok(AuraEvent::ActionExecuted { description }) => {
                             tracing::info!(%description, "Action executed");
-                            let _ = bus.send(AuraEvent::ShowOverlay {
+                            send_event(&bus, AuraEvent::ShowOverlay {
                                 content: OverlayContent::Response {
                                     text: description,
                                 },
                             }).await;
-                            // Auto-hide after delay
+                            if let Some(h) = auto_hide_handle.take() { h.abort(); }
                             let hide_bus = bus.clone();
-                            tokio::spawn(async move {
+                            auto_hide_handle = Some(tokio::spawn(async move {
                                 tokio::time::sleep(OVERLAY_AUTO_HIDE_DELAY).await;
-                                let _ = hide_bus.send(AuraEvent::HideOverlay).await;
-                            });
+                                send_event(&hide_bus, AuraEvent::HideOverlay).await;
+                            }).abort_handle());
                         }
                         Ok(AuraEvent::ActionFailed { description, error }) => {
                             tracing::warn!(%description, %error, "Action failed");
-                            let _ = bus.send(AuraEvent::ShowOverlay {
+                            send_event(&bus, AuraEvent::ShowOverlay {
                                 content: OverlayContent::Error {
                                     message: error,
                                 },
@@ -78,12 +81,19 @@ impl Daemon {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Ctrl+C received, shutting down");
-                    let _ = bus.send(AuraEvent::Shutdown).await;
+                    if let Some(h) = auto_hide_handle.take() { h.abort(); }
+                    send_event(&bus, AuraEvent::Shutdown).await;
                     break;
                 }
             }
         }
 
         Ok(())
+    }
+}
+
+async fn send_event(bus: &EventBus, event: AuraEvent) {
+    if let Err(e) = bus.send(event).await {
+        tracing::warn!("Failed to send event: {e}");
     }
 }
