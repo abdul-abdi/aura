@@ -15,3 +15,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+dirs = "6"
+which = "7"
+
+[dev-dependencies]
+tempfile = "3"
