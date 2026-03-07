@@ -8,6 +8,7 @@ tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 skia-safe = "0.82"
+softbuffer = "0.4"
 raw-window-handle = "0.6"
 winit = { version = "0.30", features = ["rwh_06"] }
 
