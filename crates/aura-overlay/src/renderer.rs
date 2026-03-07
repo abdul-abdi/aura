@@ -55,6 +55,7 @@ pub struct OverlayRenderer {
     width: f32,
     height: f32,
     particles: ParticleSystem,
+    font_mgr: FontMgr,
 }
 
 impl OverlayRenderer {
@@ -65,6 +66,7 @@ impl OverlayRenderer {
             width,
             height,
             particles: ParticleSystem::new(Self::MAX_PARTICLES),
+            font_mgr: FontMgr::default(),
         }
     }
 
@@ -118,15 +120,19 @@ impl OverlayRenderer {
                 focal_x,
                 focal_y,
             } => {
+                // Guard against nested Dissolving — don't recurse infinitely
+                if matches!(previous_state.as_ref(), OverlayState::Dissolving { .. }) {
+                    return;
+                }
+
                 let scale = AuraEasing::dissolve(*progress);
                 let alpha = scale;
                 canvas.save();
                 canvas.translate((*focal_x * (1.0 - scale), *focal_y * (1.0 - scale)));
                 canvas.scale((scale, scale));
 
-                // Re-render the previous state at shrinking scale
-                let prev = previous_state.as_ref().clone();
-                self.render(canvas, &prev, 0.0);
+                // Re-render the previous state at shrinking scale (borrow, no clone)
+                self.render_inner(canvas, previous_state.as_ref());
 
                 canvas.restore();
 
@@ -144,6 +150,44 @@ impl OverlayRenderer {
         }
 
         self.draw_particles(canvas);
+    }
+
+    /// Render a state without updating particles or drawing them.
+    /// Used by Dissolving to render the previous state without cloning.
+    fn render_inner(&self, canvas: &Canvas, state: &OverlayState) {
+        match state {
+            OverlayState::Idle { breath_phase } => {
+                self.draw_idle_edge(canvas, *breath_phase);
+            }
+            OverlayState::Listening {
+                audio_levels,
+                phase,
+                transition,
+            } => {
+                // Use immutable draw (no particle spawn) for dissolving snapshots
+                self.draw_listening_waveform_static(canvas, audio_levels, *phase, *transition);
+            }
+            OverlayState::Processing { phase, transition } => {
+                self.draw_processing_orb(canvas, *phase, *transition);
+            }
+            OverlayState::Response {
+                text,
+                chars_revealed,
+                card_opacity,
+            } => {
+                self.draw_response_card(canvas, text, *chars_revealed, *card_opacity);
+            }
+            OverlayState::Error {
+                message,
+                card_opacity,
+                pulse_phase,
+            } => {
+                self.draw_error_card(canvas, message, *card_opacity, *pulse_phase);
+            }
+            OverlayState::Dissolving { .. } => {
+                // Nested dissolving is guarded in render() — should not reach here
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -201,19 +245,12 @@ impl OverlayRenderer {
     // Listening: organic multi-layer waveform + particles
     // ------------------------------------------------------------------
 
-    fn draw_listening_waveform(
-        &mut self,
-        canvas: &Canvas,
-        audio_levels: &[f32],
-        phase: f32,
-        transition: f32,
-    ) {
+    /// Build the waveform path and return (path, peak_x, peak_y).
+    fn build_wave_path(&self, audio_levels: &[f32], phase: f32, transition: f32) -> (Path, f32, f32) {
         let num_points: usize = 120;
         let base_y = self.height * 0.70;
         let max_amplitude = 60.0 * transition;
-        let (cr, cg, cb) = AuraColors::GLOW_CYAN;
 
-        // Build wave path
         let mut path = Path::new();
         let mut first = true;
         let mut peak_x = 0.0_f32;
@@ -223,10 +260,8 @@ impl OverlayRenderer {
             let t = i as f32 / (num_points - 1) as f32;
             let x = t * self.width;
 
-            // Edge fade via sqrt(sin)
             let edge_fade = (t * PI).sin().sqrt();
 
-            // Sample audio level (interpolate)
             let audio_idx = t * (audio_levels.len().max(1) - 1) as f32;
             let ai = audio_idx.floor() as usize;
             let frac = audio_idx - ai as f32;
@@ -238,7 +273,6 @@ impl OverlayRenderer {
                 a + (b - a) * frac
             };
 
-            // Three layered sine waves
             let w1 = (t * 4.0 * PI + phase).sin();
             let w2 = (t * 7.0 * PI + phase * 1.3).sin() * 0.5;
             let w3 = (t * 13.0 * PI + phase * 0.7).sin() * 0.25;
@@ -258,6 +292,15 @@ impl OverlayRenderer {
                 peak_x = x;
             }
         }
+
+        (path, peak_x, peak_y)
+    }
+
+    /// Draw waveform strokes and fill from a pre-built path.
+    fn draw_wave_strokes(&self, canvas: &Canvas, path: &Path, transition: f32) {
+        let base_y = self.height * 0.70;
+        let max_amplitude = 60.0 * transition;
+        let (cr, cg, cb) = AuraColors::GLOW_CYAN;
 
         // Gradient fill: close path to screen bottom
         let mut fill_path = path.clone();
@@ -295,7 +338,7 @@ impl OverlayRenderer {
         glow.set_stroke_width(4.0);
         glow.set_color4f(Color4f::new(cr, cg, cb, 0.25 * transition), None);
         glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 6.0, None));
-        canvas.draw_path(&path, &glow);
+        canvas.draw_path(path, &glow);
 
         // Crisp stroke
         let mut stroke = Paint::default();
@@ -303,12 +346,35 @@ impl OverlayRenderer {
         stroke.set_style(paint::Style::Stroke);
         stroke.set_stroke_width(1.5);
         stroke.set_color4f(Color4f::new(cr, cg, cb, 0.8 * transition), None);
-        canvas.draw_path(&path, &stroke);
+        canvas.draw_path(path, &stroke);
+    }
+
+    fn draw_listening_waveform(
+        &mut self,
+        canvas: &Canvas,
+        audio_levels: &[f32],
+        phase: f32,
+        transition: f32,
+    ) {
+        let (path, peak_x, peak_y) = self.build_wave_path(audio_levels, phase, transition);
+        self.draw_wave_strokes(canvas, &path, transition);
 
         // Spawn particles at wave peaks
         if transition > 0.5 {
             self.particles.spawn(peak_x, peak_y, transition);
         }
+    }
+
+    /// Static version for dissolving — no particle spawn, takes &self.
+    fn draw_listening_waveform_static(
+        &self,
+        canvas: &Canvas,
+        audio_levels: &[f32],
+        phase: f32,
+        transition: f32,
+    ) {
+        let (path, _, _) = self.build_wave_path(audio_levels, phase, transition);
+        self.draw_wave_strokes(canvas, &path, transition);
     }
 
     // ------------------------------------------------------------------
@@ -601,14 +667,14 @@ impl OverlayRenderer {
     // ------------------------------------------------------------------
 
     fn make_font(&self, size: f32) -> Font {
-        let font_mgr = FontMgr::default();
         let style = FontStyle::new(
             Weight::from(AuraTypography::WEIGHT_LIGHT),
             Width::NORMAL,
             Slant::Upright,
         );
         if let Some(typeface) =
-            font_mgr.match_family_style(AuraTypography::FACE_PRIMARY, style)
+            self.font_mgr
+                .match_family_style(AuraTypography::FACE_PRIMARY, style)
         {
             Font::new(typeface, size)
         } else {
