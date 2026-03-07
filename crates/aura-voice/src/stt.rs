@@ -7,6 +7,7 @@ const DEFAULT_MODEL_DIR: &str = "aura";
 const DEFAULT_MODELS_SUBDIR: &str = "models";
 const DEFAULT_LANGUAGE: &str = "en";
 
+#[derive(Debug, Clone)]
 pub struct SttConfig {
     pub model_path: PathBuf,
     pub language: String,

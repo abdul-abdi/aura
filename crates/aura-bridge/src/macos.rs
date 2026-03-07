@@ -30,35 +30,42 @@ impl ActionExecutor for MacOSExecutor {
     }
 }
 
+fn run_command(cmd: &mut Command, context: &str) -> Result<std::process::Output, ActionResult> {
+    match cmd.output() {
+        Ok(output) if output.status.success() => Ok(output),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(%context, %stderr, "Command failed");
+            Err(ActionResult {
+                success: false,
+                description: format!("{context}: {stderr}"),
+                data: None,
+            })
+        }
+        Err(e) => Err(ActionResult {
+            success: false,
+            description: format!("Failed to run command for {context}: {e}"),
+            data: None,
+        }),
+    }
+}
+
 fn open_app(name: &str) -> ActionResult {
     info!(app = %name, "Opening application");
-    match Command::new("open").arg("-a").arg(name).output() {
-        Ok(output) if output.status.success() => ActionResult {
+    match run_command(Command::new("open").arg("-a").arg(name), &format!("open {name}")) {
+        Ok(_) => ActionResult {
             success: true,
             description: format!("Opened {name}"),
             data: None,
         },
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(app = %name, %stderr, "Failed to open application");
-            ActionResult {
-                success: false,
-                description: format!("Failed to open {name}: {stderr}"),
-                data: None,
-            }
-        }
-        Err(e) => ActionResult {
-            success: false,
-            description: format!("Failed to run open command: {e}"),
-            data: None,
-        },
+        Err(r) => r,
     }
 }
 
 fn search_files(query: &str) -> ActionResult {
     info!(query = %query, "Searching files with mdfind");
-    match Command::new("mdfind").arg(query).output() {
-        Ok(output) if output.status.success() => {
+    match run_command(Command::new("mdfind").arg(query), &format!("search '{query}'")) {
+        Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let results: Vec<&str> = stdout.lines().take(MAX_SEARCH_RESULTS).collect();
             let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
@@ -68,20 +75,7 @@ fn search_files(query: &str) -> ActionResult {
                 data: Some(json),
             }
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(query = %query, %stderr, "mdfind failed");
-            ActionResult {
-                success: false,
-                description: format!("Search failed: {stderr}"),
-                data: None,
-            }
-        }
-        Err(e) => ActionResult {
-            success: false,
-            description: format!("Failed to run mdfind: {e}"),
-            data: None,
-        },
+        Err(r) => r,
     }
 }
 
@@ -114,26 +108,16 @@ fn tile_windows(layout: &str) -> ActionResult {
         }
     };
 
-    match Command::new("osascript").arg("-e").arg(script).output() {
-        Ok(output) if output.status.success() => ActionResult {
+    match run_command(
+        Command::new("osascript").arg("-e").arg(script),
+        &format!("tile windows ({layout})"),
+    ) {
+        Ok(_) => ActionResult {
             success: true,
             description: format!("Tiled windows: {layout}"),
             data: None,
         },
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(layout = %layout, %stderr, "AppleScript tiling failed");
-            ActionResult {
-                success: false,
-                description: format!("Tiling failed: {stderr}"),
-                data: None,
-            }
-        }
-        Err(e) => ActionResult {
-            success: false,
-            description: format!("Failed to run osascript: {e}"),
-            data: None,
-        },
+        Err(r) => r,
     }
 }
 
@@ -148,26 +132,13 @@ fn launch_url(url: &str) -> ActionResult {
         };
     }
 
-    match Command::new("open").arg(url).output() {
-        Ok(output) if output.status.success() => ActionResult {
+    match run_command(Command::new("open").arg(url), &format!("launch {url}")) {
+        Ok(_) => ActionResult {
             success: true,
             description: format!("Launched {url}"),
             data: None,
         },
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(url = %url, %stderr, "Failed to launch URL");
-            ActionResult {
-                success: false,
-                description: format!("Failed to launch {url}: {stderr}"),
-                data: None,
-            }
-        }
-        Err(e) => ActionResult {
-            success: false,
-            description: format!("Failed to run open command: {e}"),
-            data: None,
-        },
+        Err(r) => r,
     }
 }
 
@@ -185,25 +156,15 @@ fn type_text(text: &str) -> ActionResult {
     let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(r#"tell application "System Events" to keystroke "{escaped}""#);
 
-    match Command::new("osascript").arg("-e").arg(&script).output() {
-        Ok(output) if output.status.success() => ActionResult {
+    match run_command(
+        Command::new("osascript").arg("-e").arg(&script),
+        "type text",
+    ) {
+        Ok(_) => ActionResult {
             success: true,
             description: format!("Typed {} chars", text.len()),
             data: None,
         },
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(%stderr, "Failed to type text");
-            ActionResult {
-                success: false,
-                description: format!("Failed to type text: {stderr}"),
-                data: None,
-            }
-        }
-        Err(e) => ActionResult {
-            success: false,
-            description: format!("Failed to run osascript: {e}"),
-            data: None,
-        },
+        Err(r) => r,
     }
 }

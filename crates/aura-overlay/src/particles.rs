@@ -1,14 +1,15 @@
 /// Particle system for bioluminescent visual effects.
 
+#[derive(Debug, Clone)]
 pub struct Particle {
-    pub x: f32,
-    pub y: f32,
-    pub vx: f32,
-    pub vy: f32,
-    pub life: f32,
-    pub max_life: f32,
-    pub size: f32,
-    pub hue_shift: f32,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) vx: f32,
+    pub(crate) vy: f32,
+    pub(crate) life: f32,
+    pub(crate) max_life: f32,
+    pub(crate) size: f32,
+    pub(crate) hue_shift: f32,
 }
 
 pub struct ParticleSystem {

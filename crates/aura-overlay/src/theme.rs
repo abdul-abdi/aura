@@ -1,5 +1,7 @@
 /// Aura color system: bioluminescent depth aesthetic.
 /// All colors are (r, g, b) or (r, g, b, a) as f32 0.0..1.0.
+/// Design system — not all constants are used yet.
+#[allow(dead_code)]
 pub struct AuraColors;
 
 impl AuraColors {
@@ -15,6 +17,7 @@ impl AuraColors {
     pub const TEXT_DIM: (f32, f32, f32) = (0.420, 0.447, 0.502);
 }
 
+#[allow(dead_code)]
 pub struct AuraTypography;
 
 impl AuraTypography {
@@ -30,6 +33,7 @@ impl AuraTypography {
     pub const TRACKING_LABEL: f32 = 1.2;
 }
 
+#[allow(dead_code)]
 pub struct AuraTiming;
 
 impl AuraTiming {

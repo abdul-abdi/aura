@@ -56,17 +56,36 @@ pub struct OverlayRenderer {
     height: f32,
     particles: ParticleSystem,
     font_mgr: FontMgr,
+    cached_font: Font,
 }
 
 impl OverlayRenderer {
     const MAX_PARTICLES: usize = 256;
 
     pub fn new(width: f32, height: f32) -> Self {
+        let font_mgr = FontMgr::default();
+        let cached_font = Self::resolve_font(&font_mgr, AuraTypography::SIZE_RESPONSE);
         Self {
             width,
             height,
             particles: ParticleSystem::new(Self::MAX_PARTICLES),
-            font_mgr: FontMgr::default(),
+            font_mgr,
+            cached_font,
+        }
+    }
+
+    fn resolve_font(font_mgr: &FontMgr, size: f32) -> Font {
+        let style = FontStyle::new(
+            Weight::from(AuraTypography::WEIGHT_LIGHT),
+            Width::NORMAL,
+            Slant::Upright,
+        );
+        if let Some(typeface) = font_mgr.match_family_style(AuraTypography::FACE_PRIMARY, style) {
+            Font::new(typeface, size)
+        } else {
+            let mut font = Font::default();
+            font.set_size(size);
+            font
         }
     }
 
@@ -667,20 +686,9 @@ impl OverlayRenderer {
     // ------------------------------------------------------------------
 
     fn make_font(&self, size: f32) -> Font {
-        let style = FontStyle::new(
-            Weight::from(AuraTypography::WEIGHT_LIGHT),
-            Width::NORMAL,
-            Slant::Upright,
-        );
-        if let Some(typeface) =
-            self.font_mgr
-                .match_family_style(AuraTypography::FACE_PRIMARY, style)
-        {
-            Font::new(typeface, size)
-        } else {
-            let mut font = Font::default();
-            font.set_size(size);
-            font
+        if (size - AuraTypography::SIZE_RESPONSE).abs() < f32::EPSILON {
+            return self.cached_font.clone();
         }
+        Self::resolve_font(&self.font_mgr, size)
     }
 }

@@ -1,3 +1,4 @@
+use aura_llm::intent::Intent;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,16 +22,6 @@ pub enum AuraEvent {
 
     // System
     Shutdown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Intent {
-    OpenApp { name: String },
-    SearchFiles { query: String },
-    TileWindows { layout: String },
-    SummarizeScreen,
-    LaunchUrl { url: String },
-    Unknown { raw: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

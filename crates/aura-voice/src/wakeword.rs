@@ -5,6 +5,7 @@ use crate::audio::{CHANNELS, SAMPLE_RATE};
 
 const WAKEWORD_NAME: &str = "hey_aura";
 
+#[derive(Debug, Clone)]
 pub struct WakeWordConfig {
     pub threshold: f32,
     pub avg_threshold: f32,

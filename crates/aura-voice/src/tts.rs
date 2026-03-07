@@ -10,6 +10,7 @@ const APP_DATA_DIR: &str = "aura";
 const MODELS_SUBDIR: &str = "models";
 const BIN_SUBDIR: &str = "bin";
 
+#[derive(Debug, Clone)]
 pub struct TtsConfig {
     pub model_path: PathBuf,
     /// Sample rate of the output audio (used by downstream audio pipeline).

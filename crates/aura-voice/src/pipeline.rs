@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+use crate::audio::SAMPLE_RATE;
 const DEFAULT_WAKE_THRESHOLD: f32 = 0.5;
 const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_MAX_LISTEN_MS: u64 = 10_000;
@@ -15,6 +15,7 @@ pub enum VoiceEvent {
     Error { message: String },
 }
 
+#[derive(Debug, Clone)]
 pub struct VoicePipelineConfig {
     pub sample_rate: u32,
     pub wake_threshold: f32,
@@ -25,7 +26,7 @@ pub struct VoicePipelineConfig {
 impl Default for VoicePipelineConfig {
     fn default() -> Self {
         Self {
-            sample_rate: DEFAULT_SAMPLE_RATE,
+            sample_rate: SAMPLE_RATE,
             wake_threshold: DEFAULT_WAKE_THRESHOLD,
             silence_timeout_ms: DEFAULT_SILENCE_TIMEOUT_MS,
             max_listen_ms: DEFAULT_MAX_LISTEN_MS,
