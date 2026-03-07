@@ -9,3 +9,5 @@ tracing.workspace = true
 anyhow.workspace = true
 cpal = "0.15"
 rustpotter = "3"
+whisper-rs = "0.12"
+dirs = "6"
