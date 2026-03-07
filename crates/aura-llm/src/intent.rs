@@ -35,7 +35,13 @@ impl IntentParser {
     }
 
     pub async fn parse(&self, text: &str) -> Result<Intent> {
-        let prompt = format!("{SYSTEM_PROMPT}\n\nUser command: {text}\n\nJSON:");
+        const MAX_INPUT_LEN: usize = 500;
+        let truncated = if text.len() > MAX_INPUT_LEN {
+            &text[..text.floor_char_boundary(MAX_INPUT_LEN)]
+        } else {
+            text
+        };
+        let prompt = format!("{SYSTEM_PROMPT}\n\nUser command: {truncated}\n\nJSON:");
         let response = self.provider.complete(&prompt).await?;
 
         tracing::debug!(raw_response = %response, "LLM response for intent parsing");

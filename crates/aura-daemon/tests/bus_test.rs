@@ -6,7 +6,7 @@ async fn test_event_bus_send_receive() {
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe();
 
-    bus.send(AuraEvent::WakeWordDetected).await.unwrap();
+    bus.send(AuraEvent::WakeWordDetected).unwrap();
 
     let event = rx.recv().await.unwrap();
     assert!(matches!(event, AuraEvent::WakeWordDetected));
@@ -21,7 +21,6 @@ async fn test_event_bus_multiple_subscribers() {
     bus.send(AuraEvent::VoiceCommand {
         text: "open safari".into(),
     })
-    .await
     .unwrap();
 
     let e1 = rx1.recv().await.unwrap();

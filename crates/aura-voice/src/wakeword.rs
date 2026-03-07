@@ -52,11 +52,17 @@ impl WakeWordDetector {
             return false;
         }
 
+        // Cap buffer to 5 seconds of audio to prevent unbounded growth
+        const MAX_BUFFER_SAMPLES: usize = 16_000 * 5;
         self.buffer.extend_from_slice(audio);
+        if self.buffer.len() > MAX_BUFFER_SAMPLES {
+            self.buffer.drain(..self.buffer.len() - MAX_BUFFER_SAMPLES);
+        }
 
         while self.buffer.len() >= frame_size {
             let frame: Vec<f32> = self.buffer.drain(..frame_size).collect();
             if self.rustpotter.process_samples(frame).is_some() {
+                self.buffer.clear();
                 return true;
             }
         }

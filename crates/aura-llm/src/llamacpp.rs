@@ -6,26 +6,28 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 const DEFAULT_MODEL_FILENAME: &str = "intent-model.gguf";
 const DEFAULT_N_CTX: u32 = 2048;
 const DEFAULT_N_THREADS: u32 = 4;
 const DEFAULT_MAX_TOKENS: u32 = 256;
 
-static BACKEND: OnceLock<Mutex<Result<Arc<LlamaBackend>>>> = OnceLock::new();
+static BACKEND: OnceLock<Result<Arc<LlamaBackend>, String>> = OnceLock::new();
 
 fn get_backend() -> Result<Arc<LlamaBackend>> {
-    let cell = BACKEND.get_or_init(|| {
-        Mutex::new(LlamaBackend::init().map(Arc::new).map_err(|e| anyhow::anyhow!("{e}")))
+    let result = BACKEND.get_or_init(|| {
+        LlamaBackend::init()
+            .map(Arc::new)
+            .map_err(|e| format!("{e}"))
     });
-    let guard = cell.lock().expect("backend mutex poisoned");
-    match guard.as_ref() {
+    match result {
         Ok(backend) => Ok(Arc::clone(backend)),
         Err(e) => Err(anyhow::anyhow!("Backend init failed: {e}")),
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct LlamaCppConfig {
     pub model_path: PathBuf,
     pub n_ctx: u32,

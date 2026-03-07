@@ -13,7 +13,7 @@ impl EventBus {
         Self { tx }
     }
 
-    pub async fn send(&self, event: AuraEvent) -> Result<()> {
+    pub fn send(&self, event: AuraEvent) -> Result<()> {
         self.tx.send(event)?;
         Ok(())
     }

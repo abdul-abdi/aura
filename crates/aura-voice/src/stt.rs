@@ -67,7 +67,7 @@ impl SpeechToText {
         for i in 0..num_segments {
             let segment = state
                 .full_get_segment_text(i)
-                .context(format!("Failed to get segment {i} text"))?;
+                .with_context(|| format!("Failed to get segment {i} text"))?;
             text.push_str(&segment);
         }
 

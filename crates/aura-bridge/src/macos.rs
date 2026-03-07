@@ -20,13 +20,20 @@ impl MacOSExecutor {
 #[async_trait]
 impl ActionExecutor for MacOSExecutor {
     async fn execute(&self, action: &Action) -> ActionResult {
-        match action {
+        let action = action.clone();
+        tokio::task::spawn_blocking(move || match &action {
             Action::OpenApp { name } => open_app(name),
             Action::SearchFiles { query } => search_files(query),
             Action::TileWindows { layout } => tile_windows(layout),
             Action::LaunchUrl { url } => launch_url(url),
             Action::TypeText { text } => type_text(text),
-        }
+        })
+        .await
+        .unwrap_or_else(|e| ActionResult {
+            success: false,
+            description: format!("Action task panicked: {e}"),
+            data: None,
+        })
     }
 }
 
@@ -145,7 +152,7 @@ fn launch_url(url: &str) -> ActionResult {
 fn type_text(text: &str) -> ActionResult {
     info!(len = text.len(), "Typing text via System Events");
 
-    if text.chars().any(|c| c.is_control() && c != '\t') {
+    if text.chars().any(|c| c.is_control()) {
         return ActionResult {
             success: false,
             description: "Text contains control characters (newlines, etc.) which are not supported".into(),

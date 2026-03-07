@@ -37,14 +37,14 @@ impl Daemon {
                             if let Some(h) = auto_hide_handle.take() { h.abort(); }
                             send_event(&bus, AuraEvent::ShowOverlay {
                                 content: OverlayContent::Listening,
-                            }).await;
+                            });
                         }
                         Ok(AuraEvent::VoiceCommand { text }) => {
                             tracing::info!(command = %text, "Voice command received");
                             if let Some(h) = auto_hide_handle.take() { h.abort(); }
                             send_event(&bus, AuraEvent::ShowOverlay {
                                 content: OverlayContent::Processing,
-                            }).await;
+                            });
                         }
                         Ok(AuraEvent::IntentParsed { intent }) => {
                             tracing::info!(?intent, "Intent parsed");
@@ -55,12 +55,12 @@ impl Daemon {
                                 content: OverlayContent::Response {
                                     text: description,
                                 },
-                            }).await;
+                            });
                             if let Some(h) = auto_hide_handle.take() { h.abort(); }
                             let hide_bus = bus.clone();
                             auto_hide_handle = Some(tokio::spawn(async move {
                                 tokio::time::sleep(OVERLAY_AUTO_HIDE_DELAY).await;
-                                send_event(&hide_bus, AuraEvent::HideOverlay).await;
+                                send_event(&hide_bus, AuraEvent::HideOverlay);
                             }).abort_handle());
                         }
                         Ok(AuraEvent::ActionFailed { description, error }) => {
@@ -69,7 +69,7 @@ impl Daemon {
                                 content: OverlayContent::Error {
                                     message: error,
                                 },
-                            }).await;
+                            });
                         }
                         Ok(event) => {
                             tracing::debug!(?event, "Unhandled event");
@@ -82,7 +82,7 @@ impl Daemon {
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Ctrl+C received, shutting down");
                     if let Some(h) = auto_hide_handle.take() { h.abort(); }
-                    send_event(&bus, AuraEvent::Shutdown).await;
+                    send_event(&bus, AuraEvent::Shutdown);
                     break;
                 }
             }
@@ -92,8 +92,8 @@ impl Daemon {
     }
 }
 
-async fn send_event(bus: &EventBus, event: AuraEvent) {
-    if let Err(e) = bus.send(event).await {
+fn send_event(bus: &EventBus, event: AuraEvent) {
+    if let Err(e) = bus.send(event) {
         tracing::warn!("Failed to send event: {e}");
     }
 }

@@ -16,7 +16,7 @@ async fn test_daemon_starts_and_shuts_down() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send shutdown
-    bus.send(AuraEvent::Shutdown).await.unwrap();
+    bus.send(AuraEvent::Shutdown).unwrap();
 
     // Should exit cleanly
     let result = tokio::time::timeout(Duration::from_secs(2), handle).await;

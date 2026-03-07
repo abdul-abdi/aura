@@ -72,8 +72,16 @@ impl AuraSetup {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Create the data dir itself with restricted permissions
+        std::fs::create_dir_all(&self.data_dir)?;
+        std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700))?;
+
         for dir in REQUIRED_DIRS {
-            std::fs::create_dir_all(self.data_dir.join(dir))?;
+            let path = self.data_dir.join(dir);
+            std::fs::create_dir_all(&path)?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         }
         Ok(())
     }
