@@ -16,6 +16,8 @@ pub struct SetupStatus {
 }
 
 impl SetupStatus {
+    /// Returns true when core components are ready.
+    /// Wake word is excluded — the daemon can start without it (uses push-to-talk fallback).
     pub fn is_ready(&self) -> bool {
         self.whisper_model_ready && self.llm_model_ready && self.piper_ready
     }
@@ -49,7 +51,10 @@ impl AuraSetup {
 
     pub fn default_data_dir() -> PathBuf {
         dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| {
+                tracing::warn!("Could not determine local data directory, falling back to '.'");
+                PathBuf::from(".")
+            })
             .join("aura")
     }
 
