@@ -19,11 +19,12 @@ pub struct ActionResult {
 
 #[async_trait]
 pub trait ActionExecutor: Send + Sync {
-    async fn execute(&self, action: Action) -> ActionResult;
+    async fn execute(&self, action: &Action) -> ActionResult;
 }
 
 /// Mock executor for testing.
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
 pub struct MockExecutor;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -36,7 +37,7 @@ impl MockExecutor {
 #[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl ActionExecutor for MockExecutor {
-    async fn execute(&self, action: Action) -> ActionResult {
+    async fn execute(&self, action: &Action) -> ActionResult {
         match action {
             Action::OpenApp { name } => ActionResult {
                 success: true,

@@ -5,7 +5,10 @@ use tracing::{info, warn};
 
 use crate::actions::{Action, ActionExecutor, ActionResult};
 
+const MAX_SEARCH_RESULTS: usize = 10;
+
 /// Executes actions using real macOS system commands.
+#[derive(Default)]
 pub struct MacOSExecutor;
 
 impl MacOSExecutor {
@@ -16,13 +19,13 @@ impl MacOSExecutor {
 
 #[async_trait]
 impl ActionExecutor for MacOSExecutor {
-    async fn execute(&self, action: Action) -> ActionResult {
+    async fn execute(&self, action: &Action) -> ActionResult {
         match action {
-            Action::OpenApp { name } => open_app(&name),
-            Action::SearchFiles { query } => search_files(&query),
-            Action::TileWindows { layout } => tile_windows(&layout),
-            Action::LaunchUrl { url } => launch_url(&url),
-            Action::TypeText { text } => type_text(&text),
+            Action::OpenApp { name } => open_app(name),
+            Action::SearchFiles { query } => search_files(query),
+            Action::TileWindows { layout } => tile_windows(layout),
+            Action::LaunchUrl { url } => launch_url(url),
+            Action::TypeText { text } => type_text(text),
         }
     }
 }
@@ -57,7 +60,7 @@ fn search_files(query: &str) -> ActionResult {
     match Command::new("mdfind").arg(query).output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let results: Vec<&str> = stdout.lines().take(10).collect();
+            let results: Vec<&str> = stdout.lines().take(MAX_SEARCH_RESULTS).collect();
             let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
             ActionResult {
                 success: true,
@@ -136,6 +139,15 @@ fn tile_windows(layout: &str) -> ActionResult {
 
 fn launch_url(url: &str) -> ActionResult {
     info!(url = %url, "Launching URL");
+
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return ActionResult {
+            success: false,
+            description: format!("Invalid URL scheme: only http/https allowed, got '{url}'"),
+            data: None,
+        };
+    }
+
     match Command::new("open").arg(url).output() {
         Ok(output) if output.status.success() => ActionResult {
             success: true,
@@ -161,6 +173,14 @@ fn launch_url(url: &str) -> ActionResult {
 
 fn type_text(text: &str) -> ActionResult {
     info!(len = text.len(), "Typing text via System Events");
+
+    if text.chars().any(|c| c.is_control() && c != '\t') {
+        return ActionResult {
+            success: false,
+            description: "Text contains control characters (newlines, etc.) which are not supported".into(),
+            data: None,
+        };
+    }
 
     let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(r#"tell application "System Events" to keystroke "{escaped}""#);

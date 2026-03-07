@@ -4,7 +4,7 @@ use aura_bridge::actions::{Action, ActionExecutor, MockExecutor};
 async fn test_open_app_action() {
     let executor = MockExecutor::new();
     let result = executor
-        .execute(Action::OpenApp {
+        .execute(&Action::OpenApp {
             name: "Safari".into(),
         })
         .await;
@@ -16,7 +16,7 @@ async fn test_open_app_action() {
 async fn test_search_files_action() {
     let executor = MockExecutor::new();
     let result = executor
-        .execute(Action::SearchFiles {
+        .execute(&Action::SearchFiles {
             query: "resume.pdf".into(),
         })
         .await;
@@ -28,7 +28,7 @@ async fn test_search_files_action() {
 async fn test_tile_windows_action() {
     let executor = MockExecutor::new();
     let result = executor
-        .execute(Action::TileWindows {
+        .execute(&Action::TileWindows {
             layout: "left-right".into(),
         })
         .await;
@@ -40,7 +40,7 @@ async fn test_tile_windows_action() {
 async fn test_launch_url_action() {
     let executor = MockExecutor::new();
     let result = executor
-        .execute(Action::LaunchUrl {
+        .execute(&Action::LaunchUrl {
             url: "https://example.com".into(),
         })
         .await;
@@ -52,7 +52,7 @@ async fn test_launch_url_action() {
 async fn test_type_text_action() {
     let executor = MockExecutor::new();
     let result = executor
-        .execute(Action::TypeText {
+        .execute(&Action::TypeText {
             text: "hello".into(),
         })
         .await;
