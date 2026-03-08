@@ -1,7 +1,8 @@
-use crate::provider::LlmProvider;
+use crate::provider::{LlmProvider, TokenStream};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "qwen3.5:4b";
@@ -125,6 +126,63 @@ impl OllamaProvider {
 
         Ok(parsed.message.content)
     }
+
+    async fn stream_chat(&self, prompt: &str) -> Result<TokenStream> {
+        let url = format!("{}/api/chat", self.config.base_url);
+        let body = ChatRequest {
+            model: &self.config.model,
+            messages: vec![ChatMessage {
+                role: "user",
+                content: prompt,
+            }],
+            stream: true,
+            think: false,
+        };
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to reach Ollama")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama returned {status}: {text}");
+        }
+
+        // Parse NDJSON stream from Ollama
+        let byte_stream = resp.bytes_stream();
+        let stream = async_stream::stream! {
+            let mut byte_stream = std::pin::pin!(byte_stream);
+            let mut buffer = String::new();
+
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = chunk.context("Stream read error")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].trim().to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if let Ok(parsed) = serde_json::from_str::<ChatResponse>(&line) {
+                        let content = parsed.message.content;
+                        if !content.is_empty() {
+                            yield Ok(content);
+                        }
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
 }
 
 #[async_trait]
@@ -159,5 +217,9 @@ impl LlmProvider for OllamaProvider {
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Ollama request failed")))
+    }
+
+    async fn stream(&self, prompt: &str) -> Result<TokenStream> {
+        self.stream_chat(prompt).await
     }
 }
