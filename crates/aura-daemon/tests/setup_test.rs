@@ -42,7 +42,7 @@ fn test_is_ready_with_models_present() {
     setup.ensure_dirs().unwrap();
 
     // Create fake model files
-    std::fs::write(tmp.path().join("models/ggml-base.en.bin"), b"fake").unwrap();
+    std::fs::write(tmp.path().join("models/ggml-small.en.bin"), b"fake").unwrap();
     std::fs::write(tmp.path().join("models/intent-model.gguf"), b"fake").unwrap();
     std::fs::write(tmp.path().join("bin/piper"), b"fake").unwrap();
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-const WHISPER_MODEL: &str = "ggml-base.en.bin";
+const WHISPER_MODEL: &str = "ggml-small.en.bin";
 const LLM_MODEL: &str = "intent-model.gguf";
 const PIPER_BINARY: &str = "piper";
 const WAKEWORD_MODEL: &str = "hey-aura.rpw";
@@ -25,7 +25,7 @@ impl SetupStatus {
     pub fn missing_components(&self) -> Vec<&str> {
         let mut missing = Vec::new();
         if !self.whisper_model_ready {
-            missing.push("Whisper STT model (ggml-base.en.bin)");
+            missing.push("Whisper STT model (ggml-small.en.bin)");
         }
         if !self.llm_model_ready {
             missing.push("LLM model (intent-model.gguf)");

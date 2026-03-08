@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
-const DEFAULT_MODEL_FILENAME: &str = "ggml-base.en.bin";
+const DEFAULT_MODEL_FILENAME: &str = "ggml-small.en.bin";
 const DEFAULT_MODEL_DIR: &str = "aura";
 const DEFAULT_MODELS_SUBDIR: &str = "models";
 const DEFAULT_LANGUAGE: &str = "en";
