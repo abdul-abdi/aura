@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use crate::audio::AudioCapture;
+use crate::audio::{AudioCapture, SAMPLE_RATE};
 use crate::stt::{SpeechToText, SttConfig};
 use crate::vad::{VadConfig, VadState, VoiceActivityDetector};
 
@@ -91,12 +91,27 @@ pub async fn run_voice_task(
                     }
                     VadState::Silent => {
                         if was_speaking {
-                            tracing::info!(
-                                samples = audio_buffer.len(),
-                                "Speech ended — transcribing"
-                            );
                             was_speaking = false;
                             let _ = event_tx.send(VoiceEvent::ListeningStopped);
+
+                            // Skip very short audio (< 1s at 16kHz)
+                            let min_samples = SAMPLE_RATE as usize;
+                            if audio_buffer.len() < min_samples {
+                                tracing::debug!(
+                                    samples = audio_buffer.len(),
+                                    min = min_samples,
+                                    "Audio too short, skipping transcription"
+                                );
+                                audio_buffer.clear();
+                                vad.reset();
+                                continue;
+                            }
+
+                            tracing::info!(
+                                samples = audio_buffer.len(),
+                                duration_ms = audio_buffer.len() as u64 * 1000 / SAMPLE_RATE as u64,
+                                "Speech ended — transcribing"
+                            );
 
                             // Transcribe in background
                             let stt = Arc::clone(&stt);
