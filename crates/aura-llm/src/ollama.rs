@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "qwen3.5:4b";
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct OllamaConfig {
