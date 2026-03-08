@@ -16,6 +16,10 @@ pub enum AuraEvent {
     ActionExecuted { description: String },
     ActionFailed { description: String, error: String },
 
+    // Conversation
+    AssistantSpeaking { text: String },
+    BargeIn,
+
     // Overlay
     ShowOverlay { content: OverlayContent },
     HideOverlay,

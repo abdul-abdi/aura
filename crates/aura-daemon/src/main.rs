@@ -9,12 +9,15 @@ use aura_daemon::bus::EventBus;
 use aura_daemon::daemon::Daemon;
 use aura_daemon::event::{AuraEvent, OverlayContent};
 use aura_daemon::setup::AuraSetup;
+use aura_llm::conversation::Conversation;
 use aura_llm::intent::{Intent, IntentParser};
 use aura_llm::ollama::{OllamaConfig, OllamaProvider};
 use aura_overlay::renderer::OverlayState;
 use aura_overlay::window::{create_event_loop, OverlayMessage, OverlayWindow};
 use aura_voice::pipeline::{run_voice_task, VoiceEvent};
+use aura_voice::playback::AudioPlayer;
 use aura_voice::stt::SttConfig;
+use aura_voice::tts::{TextToSpeech, TtsConfig};
 use aura_voice::vad::VadConfig;
 use tracing_subscriber::EnvFilter;
 
@@ -145,21 +148,45 @@ async fn run_processor(
     voice_rx: &mut tokio::sync::broadcast::Receiver<VoiceEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let provider =
+    // Intent parsing provider
+    let intent_provider =
         OllamaProvider::new(OllamaConfig::default()).context("Failed to create Ollama provider")?;
 
-    // Health check
-    if let Err(e) = provider.health_check().await {
+    if let Err(e) = intent_provider.health_check().await {
         tracing::warn!("Ollama health check failed: {e}");
         tracing::warn!("Intent parsing will fail until Ollama is available");
     }
 
-    let parser = IntentParser::new(Box::new(provider));
+    let parser = IntentParser::new(Box::new(intent_provider));
+
+    // Conversation provider (separate instance for chat history)
+    let conv_provider =
+        OllamaProvider::new(OllamaConfig::default()).context("Failed to create conversation provider")?;
+    let conversation = Conversation::new(Box::new(conv_provider));
+
+    // TTS + audio playback
+    let tts = match TextToSpeech::new(TtsConfig::default()).await {
+        Ok(tts) => {
+            tracing::info!("TTS engine ready");
+            Some(tts)
+        }
+        Err(e) => {
+            tracing::warn!("TTS unavailable (voice responses disabled): {e}");
+            None
+        }
+    };
+    let player = match AudioPlayer::new() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!("Audio playback unavailable: {e}");
+            None
+        }
+    };
 
     #[cfg(target_os = "macos")]
     let executor = aura_bridge::macos::MacOSExecutor::new();
 
-    tracing::info!("Processor task running");
+    tracing::info!("Processor task running (conversational mode enabled)");
 
     loop {
         tokio::select! {
@@ -167,6 +194,14 @@ async fn run_processor(
             event = voice_rx.recv() => {
                 match event {
                     Ok(VoiceEvent::ListeningStarted) => {
+                        // Barge-in: stop playback if assistant is speaking
+                        if let Some(p) = &player {
+                            if p.is_playing() {
+                                p.stop();
+                                tracing::info!("Barge-in: stopped assistant speech");
+                                let _ = bus.send(AuraEvent::BargeIn);
+                            }
+                        }
                         let _ = bus.send(AuraEvent::WakeWordDetected);
                     }
                     Ok(VoiceEvent::Transcription { text }) => {
@@ -203,10 +238,36 @@ async fn run_processor(
                                 } else {
                                     match intent {
                                         Intent::Unknown { raw } => {
-                                            let _ = bus.send(AuraEvent::ActionFailed {
-                                                description: "Unknown command".into(),
-                                                error: format!("Could not understand: {raw}"),
-                                            });
+                                            // Conversational response
+                                            match conversation.chat(&raw).await {
+                                                Ok(response) => {
+                                                    tracing::info!(response = %response, "Aura response");
+                                                    let _ = bus.send(AuraEvent::AssistantSpeaking {
+                                                        text: response.clone(),
+                                                    });
+
+                                                    // Synthesize and play
+                                                    if let (Some(tts), Some(player)) = (&tts, &player) {
+                                                        match tts.synthesize(&response).await {
+                                                            Ok(audio) => {
+                                                                if let Err(e) = player.play(audio, tts.sample_rate()) {
+                                                                    tracing::error!("Playback failed: {e}");
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::error!("TTS synthesis failed: {e}");
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Conversation failed: {e}");
+                                                    let _ = bus.send(AuraEvent::ActionFailed {
+                                                        description: "Conversation".into(),
+                                                        error: format!("Failed to get response: {e}"),
+                                                    });
+                                                }
+                                            }
                                         }
                                         Intent::SummarizeScreen => {
                                             let _ = bus.send(AuraEvent::ActionFailed {
@@ -291,6 +352,21 @@ async fn run_overlay_bridge(
                     }
                     Ok(AuraEvent::HideOverlay) => {
                         let _ = proxy.send_event(OverlayMessage::Hide);
+                    }
+                    Ok(AuraEvent::AssistantSpeaking { text }) => {
+                        let _ = proxy.send_event(OverlayMessage::Show);
+                        let _ = proxy.send_event(OverlayMessage::SetState(OverlayState::Response {
+                            chars_revealed: text.len(),
+                            text,
+                            card_opacity: 1.0,
+                        }));
+                    }
+                    Ok(AuraEvent::BargeIn) => {
+                        let _ = proxy.send_event(OverlayMessage::SetState(OverlayState::Listening {
+                            audio_levels: vec![0.5; 64],
+                            phase: 0.0,
+                            transition: 1.0,
+                        }));
                     }
                     Ok(AuraEvent::Shutdown) => {
                         let _ = proxy.send_event(OverlayMessage::Shutdown);
