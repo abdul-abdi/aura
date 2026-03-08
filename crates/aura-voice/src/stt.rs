@@ -1,11 +1,15 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::sync::Mutex;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 const DEFAULT_MODEL_FILENAME: &str = "ggml-base.en.bin";
 const DEFAULT_MODEL_DIR: &str = "aura";
 const DEFAULT_MODELS_SUBDIR: &str = "models";
 const DEFAULT_LANGUAGE: &str = "en";
+
+/// Whisper markers that indicate no real speech was detected.
+const BLANK_MARKERS: &[&str] = &["[BLANK_AUDIO]", "(blank audio)", "[silence]", "(silence)"];
 
 #[derive(Debug, Clone)]
 pub struct SttConfig {
@@ -29,7 +33,10 @@ impl Default for SttConfig {
 }
 
 pub struct SpeechToText {
+    #[allow(dead_code)] // Kept alive so the state (which borrows from it) remains valid
     ctx: WhisperContext,
+    /// Cached whisper state — avoids reloading CoreML model on every transcription.
+    state: Mutex<WhisperState>,
     language: String,
     translate: bool,
 }
@@ -42,8 +49,12 @@ impl SpeechToText {
         )
         .context("Failed to load whisper model")?;
 
+        let state = ctx.create_state()?;
+        tracing::info!("Whisper state created and cached (CoreML loaded once)");
+
         Ok(Self {
             ctx,
+            state: Mutex::new(state),
             language: config.language,
             translate: config.translate,
         })
@@ -59,7 +70,7 @@ impl SpeechToText {
         params.set_print_progress(false);
         params.set_print_realtime(false);
 
-        let mut state = self.ctx.create_state()?;
+        let mut state = self.state.lock().map_err(|e| anyhow::anyhow!("STT lock poisoned: {e}"))?;
         state.full(params, audio)?;
 
         let num_segments = state.full_n_segments()?;
@@ -71,6 +82,13 @@ impl SpeechToText {
             text.push_str(&segment);
         }
 
-        Ok(text.trim().to_string())
+        let text = text.trim().to_string();
+
+        // Filter out Whisper blank/silence markers
+        if BLANK_MARKERS.iter().any(|m| text.eq_ignore_ascii_case(m)) {
+            return Ok(String::new());
+        }
+
+        Ok(text)
     }
 }
