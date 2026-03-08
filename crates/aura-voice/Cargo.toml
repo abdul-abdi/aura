@@ -9,7 +9,7 @@ tracing.workspace = true
 anyhow.workspace = true
 cpal = "0.15"
 rustpotter = "3"
-whisper-rs = "0.12"
+whisper-rs = { version = "0.12", features = ["coreml"] }
 dirs = "6"
 which = "7"
 tokio-util = "0.7"
