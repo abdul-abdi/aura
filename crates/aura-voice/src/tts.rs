@@ -1,21 +1,18 @@
 use anyhow::{Context, Result};
-use std::io::Write;
+use kokoro_tts::{KokoroTts, Voice};
 use std::path::PathBuf;
-use std::process::Command;
+use std::sync::Arc;
 
-const DEFAULT_MODEL_FILENAME: &str = "piper-en-us.onnx";
-const DEFAULT_SAMPLE_RATE: u32 = 22050;
-const PIPER_BINARY_NAME: &str = "piper";
+const DEFAULT_MODEL_FILENAME: &str = "kokoro-v1.0.int8.onnx";
+const DEFAULT_VOICES_FILENAME: &str = "voices.bin";
 const APP_DATA_DIR: &str = "aura";
 const MODELS_SUBDIR: &str = "models";
-const BIN_SUBDIR: &str = "bin";
+const KOKORO_SAMPLE_RATE: u32 = 24000;
 
 #[derive(Debug, Clone)]
 pub struct TtsConfig {
     pub model_path: PathBuf,
-    /// Sample rate of the output audio (used by downstream audio pipeline).
-    pub sample_rate: u32,
-    pub speaker_id: Option<u32>,
+    pub voices_path: PathBuf,
 }
 
 impl Default for TtsConfig {
@@ -24,79 +21,53 @@ impl Default for TtsConfig {
             tracing::warn!("Could not determine local data directory, falling back to '.'");
             PathBuf::from(".")
         });
+        let models_dir = data_dir.join(APP_DATA_DIR).join(MODELS_SUBDIR);
 
         Self {
-            model_path: data_dir
-                .join(APP_DATA_DIR)
-                .join(MODELS_SUBDIR)
-                .join(DEFAULT_MODEL_FILENAME),
-            sample_rate: DEFAULT_SAMPLE_RATE,
-            speaker_id: None,
+            model_path: models_dir.join(DEFAULT_MODEL_FILENAME),
+            voices_path: models_dir.join(DEFAULT_VOICES_FILENAME),
         }
     }
 }
 
-/// Synthesizes speech from text using the Piper TTS engine.
+/// Synthesizes speech from text using the Kokoro TTS engine (82M param neural model).
 ///
-/// Note: `synthesize()` is synchronous and blocks on the subprocess.
-/// Callers in async contexts should use `tokio::task::spawn_blocking`.
+/// Outputs 24kHz mono f32 PCM audio.
 pub struct TextToSpeech {
-    config: TtsConfig,
-    piper_path: PathBuf,
+    engine: Arc<KokoroTts>,
 }
 
 impl TextToSpeech {
-    pub fn new(config: TtsConfig) -> Result<Self> {
-        let piper_path = which::which(PIPER_BINARY_NAME)
-            .or_else(|_| {
-                let local = dirs::data_local_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(APP_DATA_DIR)
-                    .join(BIN_SUBDIR)
-                    .join(PIPER_BINARY_NAME);
-                if local.exists() {
-                    Ok(local)
-                } else {
-                    Err(which::Error::CannotFindBinaryPath)
-                }
-            })
-            .context(
-                "Piper binary not found. Install piper or place it in ~/.local/share/aura/bin/",
-            )?;
+    pub async fn new(config: TtsConfig) -> Result<Self> {
+        let engine = KokoroTts::new(&config.model_path, &config.voices_path)
+            .await
+            .context("Failed to initialize Kokoro TTS — download models with: curl -L -o ~/Library/Application\\ Support/aura/models/kokoro-v1.0.int8.onnx https://github.com/mzdk100/kokoro/releases/download/V1.0/kokoro-v1.0.int8.onnx")?;
+
+        tracing::info!("Kokoro TTS engine initialized");
 
         Ok(Self {
-            config,
-            piper_path,
+            engine: Arc::new(engine),
         })
     }
 
-    pub fn synthesize(&self, text: &str) -> Result<Vec<u8>> {
-        let mut cmd = Command::new(&self.piper_path);
-        cmd.arg("--model")
-            .arg(&self.config.model_path)
-            .arg("--output-raw")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
+    pub fn sample_rate(&self) -> u32 {
+        KOKORO_SAMPLE_RATE
+    }
 
-        if let Some(speaker) = self.config.speaker_id {
-            cmd.arg("--speaker").arg(speaker.to_string());
-        }
+    /// Synthesize text to f32 PCM audio samples at 24kHz.
+    pub async fn synthesize(&self, text: &str) -> Result<Vec<f32>> {
+        let (samples, took) = self
+            .engine
+            .synth(text, Voice::AfHeart(1.0))
+            .await
+            .context("TTS synthesis failed")?;
 
-        let mut child = cmd.spawn().context("Failed to start piper")?;
+        tracing::debug!(
+            samples = samples.len(),
+            duration_ms = took.as_millis(),
+            "TTS synthesis complete"
+        );
 
-        let mut stdin = child.stdin.take().context("Failed to open piper stdin")?;
-        stdin.write_all(text.as_bytes())?;
-        drop(stdin);
-
-        let output = child.wait_with_output()?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Piper failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        Ok(output.stdout)
+        Ok(samples)
     }
 }

@@ -11,6 +11,7 @@ cpal = "0.15"
 rustpotter = "3"
 whisper-rs = { version = "0.12", features = ["coreml"] }
 voice_activity_detector = "0.2"
+kokoro-tts = "0.3"
 dirs = "6"
 which = "7"
 tokio-util = "0.7"

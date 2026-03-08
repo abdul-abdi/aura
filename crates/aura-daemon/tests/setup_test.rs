@@ -44,11 +44,12 @@ fn test_is_ready_with_models_present() {
     // Create fake model files
     std::fs::write(tmp.path().join("models/ggml-small.en.bin"), b"fake").unwrap();
     std::fs::write(tmp.path().join("models/intent-model.gguf"), b"fake").unwrap();
-    std::fs::write(tmp.path().join("bin/piper"), b"fake").unwrap();
+    std::fs::write(tmp.path().join("models/kokoro-v1.0.int8.onnx"), b"fake").unwrap();
+    std::fs::write(tmp.path().join("models/voices.bin"), b"fake").unwrap();
 
     let status = setup.check();
     assert!(status.whisper_model_ready);
     assert!(status.llm_model_ready);
-    assert!(status.piper_ready);
+    assert!(status.tts_ready);
     assert!(status.is_ready());
 }

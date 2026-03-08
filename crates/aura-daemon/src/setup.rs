@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 const WHISPER_MODEL: &str = "ggml-small.en.bin";
 const LLM_MODEL: &str = "intent-model.gguf";
-const PIPER_BINARY: &str = "piper";
+const KOKORO_MODEL: &str = "kokoro-v1.0.int8.onnx";
+const KOKORO_VOICES: &str = "voices.bin";
 const WAKEWORD_MODEL: &str = "hey-aura.rpw";
 
 const REQUIRED_DIRS: &[&str] = &["models", "bin", "config", "logs"];
@@ -11,7 +12,7 @@ const REQUIRED_DIRS: &[&str] = &["models", "bin", "config", "logs"];
 pub struct SetupStatus {
     pub whisper_model_ready: bool,
     pub llm_model_ready: bool,
-    pub piper_ready: bool,
+    pub tts_ready: bool,
     pub wakeword_model_ready: bool,
 }
 
@@ -19,7 +20,7 @@ impl SetupStatus {
     /// Returns true when core components are ready.
     /// Wake word is excluded — the daemon can start without it (uses push-to-talk fallback).
     pub fn is_ready(&self) -> bool {
-        self.whisper_model_ready && self.llm_model_ready && self.piper_ready
+        self.whisper_model_ready && self.llm_model_ready && self.tts_ready
     }
 
     pub fn missing_components(&self) -> Vec<&str> {
@@ -30,8 +31,8 @@ impl SetupStatus {
         if !self.llm_model_ready {
             missing.push("LLM model (intent-model.gguf)");
         }
-        if !self.piper_ready {
-            missing.push("Piper TTS (piper binary + voice model)");
+        if !self.tts_ready {
+            missing.push("Kokoro TTS (kokoro-v1.0.int8.onnx + voices.bin)");
         }
         if !self.wakeword_model_ready {
             missing.push("Wake word model (hey-aura.rpw)");
@@ -60,13 +61,12 @@ impl AuraSetup {
 
     pub fn check(&self) -> SetupStatus {
         let models_dir = self.data_dir.join("models");
-        let bin_dir = self.data_dir.join("bin");
 
         SetupStatus {
             whisper_model_ready: models_dir.join(WHISPER_MODEL).exists(),
             llm_model_ready: models_dir.join(LLM_MODEL).exists(),
-            piper_ready: bin_dir.join(PIPER_BINARY).exists()
-                || which::which(PIPER_BINARY).is_ok(),
+            tts_ready: models_dir.join(KOKORO_MODEL).exists()
+                && models_dir.join(KOKORO_VOICES).exists(),
             wakeword_model_ready: models_dir.join(WAKEWORD_MODEL).exists(),
         }
     }
