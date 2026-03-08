@@ -30,5 +30,5 @@ async fn test_ollama_config_defaults() {
     let config = OllamaConfig::default();
     assert_eq!(config.base_url, "http://localhost:11434");
     assert_eq!(config.model, "qwen3.5:4b");
-    assert_eq!(config.timeout_secs, 60);
+    assert_eq!(config.timeout_secs, 30);
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "qwen3.5:4b";
-const DEFAULT_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct OllamaConfig {
@@ -24,16 +24,30 @@ impl Default for OllamaConfig {
     }
 }
 
+/// Chat API request body — uses /api/chat with thinking disabled for fast responses.
 #[derive(Serialize)]
-struct GenerateRequest<'a> {
+struct ChatRequest<'a> {
     model: &'a str,
-    prompt: &'a str,
+    messages: Vec<ChatMessage<'a>>,
     stream: bool,
+    /// Disable chain-of-thought for thinking models (qwen3.5, etc.)
+    think: bool,
+}
+
+#[derive(Serialize)]
+struct ChatMessage<'a> {
+    role: &'a str,
+    content: &'a str,
 }
 
 #[derive(Deserialize)]
-struct GenerateResponse {
-    response: String,
+struct ChatResponse {
+    message: ChatResponseMessage,
+}
+
+#[derive(Deserialize)]
+struct ChatResponseMessage {
+    content: String,
 }
 
 pub struct OllamaProvider {
@@ -89,7 +103,7 @@ impl OllamaProvider {
         Ok(())
     }
 
-    async fn try_complete(&self, url: &str, body: &GenerateRequest<'_>) -> Result<String> {
+    async fn try_chat(&self, url: &str, body: &ChatRequest<'_>) -> Result<String> {
         let resp = self
             .client
             .post(url)
@@ -104,23 +118,27 @@ impl OllamaProvider {
             anyhow::bail!("Ollama returned {status}: {text}");
         }
 
-        let parsed: GenerateResponse = resp
+        let parsed: ChatResponse = resp
             .json()
             .await
             .context("Failed to parse Ollama response")?;
 
-        Ok(parsed.response)
+        Ok(parsed.message.content)
     }
 }
 
 #[async_trait]
 impl LlmProvider for OllamaProvider {
     async fn complete(&self, prompt: &str) -> Result<String> {
-        let url = format!("{}/api/generate", self.config.base_url);
-        let body = GenerateRequest {
+        let url = format!("{}/api/chat", self.config.base_url);
+        let body = ChatRequest {
             model: &self.config.model,
-            prompt,
+            messages: vec![ChatMessage {
+                role: "user",
+                content: prompt,
+            }],
             stream: false,
+            think: false,
         };
 
         let mut last_error = None;
@@ -131,7 +149,7 @@ impl LlmProvider for OllamaProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            match self.try_complete(&url, &body).await {
+            match self.try_chat(&url, &body).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
                     tracing::warn!(attempt, "Ollama request failed: {e}");

@@ -94,10 +94,10 @@ pub async fn run_voice_task(
                             was_speaking = false;
                             let _ = event_tx.send(VoiceEvent::ListeningStopped);
 
-                            // Skip very short audio (< 1s at 16kHz)
-                            let min_samples = SAMPLE_RATE as usize;
+                            // Skip very short audio (< 0.5s at 16kHz)
+                            let min_samples = SAMPLE_RATE as usize / 2;
                             if audio_buffer.len() < min_samples {
-                                tracing::debug!(
+                                tracing::info!(
                                     samples = audio_buffer.len(),
                                     min = min_samples,
                                     "Audio too short, skipping transcription"

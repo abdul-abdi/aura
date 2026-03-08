@@ -3,8 +3,8 @@
 /// Computes RMS energy per audio chunk and compares against a threshold.
 /// Uses a simple state machine: silence -> speaking -> silence, with
 /// hold-off to avoid cutting off mid-word.
-const DEFAULT_ENERGY_THRESHOLD: f32 = 0.03;
-const DEFAULT_SILENCE_FRAMES: usize = 30; // ~30 chunks of silence before stopping
+const DEFAULT_ENERGY_THRESHOLD: f32 = 0.02;
+const DEFAULT_SILENCE_FRAMES: usize = 120; // ~1.3s of silence before ending speech
 
 #[derive(Debug, Clone)]
 pub struct VadConfig {
