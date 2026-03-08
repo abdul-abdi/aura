@@ -64,7 +64,8 @@ pub async fn run_voice_task(
 
     tracing::info!("Voice pipeline running");
 
-    let mut vad = VoiceActivityDetector::new(vad_config);
+    let mut vad = VoiceActivityDetector::new(vad_config)
+        .context("Failed to initialize VAD")?;
     let mut audio_buffer: Vec<f32> = Vec::new();
     let mut was_speaking = false;
 
