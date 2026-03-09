@@ -31,6 +31,7 @@ pub enum GeminiEvent {
     AudioResponse { samples: Vec<f32> },
     ToolCall { id: String, name: String, args: serde_json::Value },
     Interrupted,
+    ToolCallCancellation { ids: Vec<String> },
     Transcription { text: String },
     TurnComplete,
     Error { message: String },
@@ -121,6 +122,13 @@ struct SessionState {
     resumption_handle: Arc<Mutex<Option<String>>>,
 }
 
+/// Outcome of a single connection attempt.
+struct StreamOutcome {
+    /// Whether setupComplete was received before the error.
+    was_connected: bool,
+    error: anyhow::Error,
+}
+
 /// Main connection loop with reconnection logic.
 async fn connection_loop(
     state: SessionState,
@@ -150,16 +158,25 @@ async fn connection_loop(
                 let _ = event_tx.send(GeminiEvent::Disconnected);
                 break;
             }
-            Err(e) => {
+            Err(outcome) => {
+                // Reset counter if we had a successful session — transient drops
+                // hours apart should not accumulate toward the max.
+                if outcome.was_connected {
+                    attempt = 0;
+                }
+
                 attempt += 1;
                 if attempt > MAX_RECONNECT_ATTEMPTS {
                     let _ = event_tx.send(GeminiEvent::Error {
-                        message: format!("Max reconnection attempts exceeded: {e}"),
+                        message: format!(
+                            "Max reconnection attempts exceeded: {}",
+                            outcome.error
+                        ),
                     });
                     break;
                 }
 
-                tracing::warn!(attempt, error = %e, "Connection lost, reconnecting");
+                tracing::warn!(attempt, error = %outcome.error, "Connection lost, reconnecting");
                 let _ = event_tx.send(GeminiEvent::Reconnecting { attempt });
 
                 let backoff = Duration::from_millis(
@@ -181,6 +198,35 @@ async fn connect_and_stream(
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
+) -> std::result::Result<(), StreamOutcome> {
+    let mut was_connected = false;
+
+    let result = connect_and_stream_inner(
+        state,
+        audio_rx,
+        tool_response_rx,
+        event_tx,
+        cancel,
+        &mut was_connected,
+    )
+    .await;
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(StreamOutcome {
+            was_connected,
+            error,
+        }),
+    }
+}
+
+async fn connect_and_stream_inner(
+    state: &SessionState,
+    audio_rx: &mut mpsc::Receiver<Vec<f32>>,
+    tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
+    event_tx: &broadcast::Sender<GeminiEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+    was_connected: &mut bool,
 ) -> Result<()> {
     let url = state.config.websocket_url();
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
@@ -193,7 +239,7 @@ async fn connect_and_stream(
     let resumption_handle = state.resumption_handle.lock().await.clone();
     let setup = build_setup_message(&state.config, resumption_handle);
     let setup_json = serde_json::to_string(&setup)?;
-    ws_sink.send(Message::Text(setup_json.into())).await?;
+    ws_sink.send(Message::Text(setup_json)).await?;
 
     // Wait for setupComplete
     loop {
@@ -211,24 +257,22 @@ async fn connect_and_stream(
         }
     }
 
+    *was_connected = true;
     let _ = event_tx.send(GeminiEvent::Connected);
     tracing::info!("Gemini Live session connected");
 
-    // Wrap sink in Arc<Mutex> for shared access
     let ws_sink = Arc::new(Mutex::new(ws_sink));
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
 
-            // Forward mic audio to Gemini
             Some(pcm) = audio_rx.recv() => {
                 let msg = encode_audio_message(&pcm);
                 let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json.into())).await?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
             }
 
-            // Forward tool responses to Gemini
             Some((id, name, response)) = tool_response_rx.recv() => {
                 let msg = ToolResponseMessage {
                     tool_response: ToolResponse {
@@ -236,10 +280,9 @@ async fn connect_and_stream(
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json.into())).await?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
             }
 
-            // Receive messages from Gemini
             msg = ws_source.next() => {
                 let Some(msg) = msg else {
                     return Err(anyhow::anyhow!("WebSocket connection closed"));
@@ -249,44 +292,53 @@ async fn connect_and_stream(
                 match msg {
                     Message::Text(text) => {
                         let server_msg: ServerMessage = serde_json::from_str(&text)?;
-                        handle_server_message(server_msg, event_tx, state).await;
+                        if handle_server_message(server_msg, event_tx, state).await {
+                            return Err(anyhow::anyhow!("goAway: server requested reconnection"));
+                        }
                     }
                     Message::Close(_) => {
                         return Err(anyhow::anyhow!("Server closed connection"));
                     }
-                    _ => {} // ignore ping/pong/binary
+                    _ => {}
                 }
             }
         }
     }
 }
 
+/// Handle a server message. Returns `true` if the caller should reconnect (goAway).
 async fn handle_server_message(
     msg: ServerMessage,
     event_tx: &broadcast::Sender<GeminiEvent>,
     state: &SessionState,
-) {
+) -> bool {
     // Session resumption token update
     if let Some(update) = msg.session_resumption_update {
         let mut handle = state.resumption_handle.lock().await;
         *handle = Some(update.new_handle);
-        return;
+        return false;
     }
 
     // Server content (audio response, interruption, turn complete)
     if let Some(content) = msg.server_content {
         if content.interrupted == Some(true) {
             let _ = event_tx.send(GeminiEvent::Interrupted);
-            return;
+            return false;
         }
 
         if let Some(model_turn) = content.model_turn {
             for part in model_turn.parts {
-                if let Some(blob) = part.inline_data {
-                    if blob.mime_type.starts_with("audio/") {
-                        if let Ok(bytes) = BASE64.decode(&blob.data) {
+                if let Some(blob) = part.inline_data
+                    && blob.mime_type.starts_with("audio/")
+                {
+                    match BASE64.decode(&blob.data) {
+                        Ok(bytes) => {
                             let samples = pcm_bytes_to_f32(&bytes);
-                            let _ = event_tx.send(GeminiEvent::AudioResponse { samples });
+                            let _ =
+                                event_tx.send(GeminiEvent::AudioResponse { samples });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to decode audio base64: {e}");
                         }
                     }
                 }
@@ -299,7 +351,7 @@ async fn handle_server_message(
         if content.turn_complete == Some(true) {
             let _ = event_tx.send(GeminiEvent::TurnComplete);
         }
-        return;
+        return false;
     }
 
     // Tool call
@@ -311,14 +363,24 @@ async fn handle_server_message(
                 args: fc.args,
             });
         }
-        return;
+        return false;
     }
 
-    // Go away (server requesting disconnect)
-    if msg.go_away.is_some() {
-        tracing::info!("Received goAway from server");
-        // The connection loop will handle reconnection
+    // Tool call cancellation
+    if let Some(cancellation) = msg.tool_call_cancellation {
+        let _ = event_tx.send(GeminiEvent::ToolCallCancellation {
+            ids: cancellation.ids,
+        });
+        return false;
     }
+
+    // Go away — server requesting reconnection
+    if msg.go_away.is_some() {
+        tracing::info!("Received goAway from server, triggering reconnection");
+        return true;
+    }
+
+    false
 }
 
 fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>) -> SetupMessage {

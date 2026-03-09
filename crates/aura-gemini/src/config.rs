@@ -12,7 +12,7 @@ pub struct GeminiConfig {
     pub model: String,
     pub voice: String,
     pub system_prompt: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub ws_url_override: Option<String>,
 }
 

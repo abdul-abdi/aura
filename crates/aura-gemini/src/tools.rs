@@ -100,6 +100,8 @@ pub fn function_call_to_action(name: &str, args: &serde_json::Value) -> Option<A
         "launch_url" => Some(Action::LaunchUrl {
             url: args["url"].as_str()?.to_string(),
         }),
+        // summarize_screen is handled specially by the caller (requires screen capture)
+        "summarize_screen" => None,
         _ => None,
     }
 }
