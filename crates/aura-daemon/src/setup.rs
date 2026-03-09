@@ -1,41 +1,26 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
-const WHISPER_MODEL: &str = "ggml-small.en.bin";
-const LLM_MODEL: &str = "intent-model.gguf";
-const KOKORO_MODEL: &str = "kokoro-v1.0.int8.onnx";
-const KOKORO_VOICES: &str = "voices.bin";
 const WAKEWORD_MODEL: &str = "hey-aura.rpw";
 
 const REQUIRED_DIRS: &[&str] = &["models", "bin", "config", "logs"];
 
 pub struct SetupStatus {
-    pub whisper_model_ready: bool,
-    pub llm_model_ready: bool,
-    pub tts_ready: bool,
     pub wakeword_model_ready: bool,
 }
 
 impl SetupStatus {
     /// Returns true when core components are ready.
-    /// Wake word is excluded — the daemon can start without it (uses push-to-talk fallback).
+    /// With Gemini Live API, no local models are needed for STT/LLM/TTS.
+    /// Wake word is optional — the daemon can start without it (uses always-on mic).
     pub fn is_ready(&self) -> bool {
-        self.whisper_model_ready && self.llm_model_ready && self.tts_ready
+        true
     }
 
     pub fn missing_components(&self) -> Vec<&str> {
         let mut missing = Vec::new();
-        if !self.whisper_model_ready {
-            missing.push("Whisper STT model (ggml-small.en.bin)");
-        }
-        if !self.llm_model_ready {
-            missing.push("LLM model (intent-model.gguf)");
-        }
-        if !self.tts_ready {
-            missing.push("Kokoro TTS (kokoro-v1.0.int8.onnx + voices.bin)");
-        }
         if !self.wakeword_model_ready {
-            missing.push("Wake word model (hey-aura.rpw)");
+            missing.push("Wake word model (hey-aura.rpw) — optional");
         }
         missing
     }
@@ -63,10 +48,6 @@ impl AuraSetup {
         let models_dir = self.data_dir.join("models");
 
         SetupStatus {
-            whisper_model_ready: models_dir.join(WHISPER_MODEL).exists(),
-            llm_model_ready: models_dir.join(LLM_MODEL).exists(),
-            tts_ready: models_dir.join(KOKORO_MODEL).exists()
-                && models_dir.join(KOKORO_VOICES).exists(),
             wakeword_model_ready: models_dir.join(WAKEWORD_MODEL).exists(),
         }
     }
@@ -88,12 +69,13 @@ impl AuraSetup {
 
     pub fn print_status(&self) {
         let status = self.check();
-        if status.is_ready() {
+        let missing = status.missing_components();
+        if missing.is_empty() {
             tracing::info!("All components ready");
         } else {
-            tracing::warn!("Missing components:");
-            for component in status.missing_components() {
-                tracing::warn!("  - {component}");
+            tracing::info!("Optional components not found:");
+            for component in missing {
+                tracing::info!("  - {component}");
             }
         }
     }

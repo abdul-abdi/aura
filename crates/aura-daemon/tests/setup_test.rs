@@ -2,13 +2,11 @@ use aura_daemon::setup::AuraSetup;
 use tempfile::TempDir;
 
 #[test]
-fn test_setup_detects_missing_models() {
+fn test_setup_detects_missing_wakeword() {
     let tmp = TempDir::new().unwrap();
     let setup = AuraSetup::new(tmp.path().to_path_buf());
     let status = setup.check();
 
-    assert!(!status.whisper_model_ready);
-    assert!(!status.llm_model_ready);
     assert!(!status.wakeword_model_ready);
 }
 
@@ -25,31 +23,35 @@ fn test_setup_creates_directories() {
 }
 
 #[test]
-fn test_missing_components_lists_all() {
+fn test_is_ready_without_local_models() {
+    // With Gemini, is_ready() should return true even without local models
+    let tmp = TempDir::new().unwrap();
+    let setup = AuraSetup::new(tmp.path().to_path_buf());
+    let status = setup.check();
+
+    assert!(status.is_ready(), "Should be ready — no local models needed with Gemini");
+}
+
+#[test]
+fn test_wakeword_detected_when_present() {
+    let tmp = TempDir::new().unwrap();
+    let setup = AuraSetup::new(tmp.path().to_path_buf());
+    setup.ensure_dirs().unwrap();
+
+    std::fs::write(tmp.path().join("models/hey-aura.rpw"), b"fake").unwrap();
+
+    let status = setup.check();
+    assert!(status.wakeword_model_ready);
+}
+
+#[test]
+fn test_missing_components_lists_optional() {
     let tmp = TempDir::new().unwrap();
     let setup = AuraSetup::new(tmp.path().to_path_buf());
     let status = setup.check();
     let missing = status.missing_components();
 
-    assert!(missing.len() >= 3);
-    assert!(!status.is_ready());
-}
-
-#[test]
-fn test_is_ready_with_models_present() {
-    let tmp = TempDir::new().unwrap();
-    let setup = AuraSetup::new(tmp.path().to_path_buf());
-    setup.ensure_dirs().unwrap();
-
-    // Create fake model files
-    std::fs::write(tmp.path().join("models/ggml-small.en.bin"), b"fake").unwrap();
-    std::fs::write(tmp.path().join("models/intent-model.gguf"), b"fake").unwrap();
-    std::fs::write(tmp.path().join("models/kokoro-v1.0.int8.onnx"), b"fake").unwrap();
-    std::fs::write(tmp.path().join("models/voices.bin"), b"fake").unwrap();
-
-    let status = setup.check();
-    assert!(status.whisper_model_ready);
-    assert!(status.llm_model_ready);
-    assert!(status.tts_ready);
-    assert!(status.is_ready());
+    // Only wakeword is missing, and it's optional
+    assert_eq!(missing.len(), 1);
+    assert!(missing[0].contains("hey-aura.rpw"));
 }

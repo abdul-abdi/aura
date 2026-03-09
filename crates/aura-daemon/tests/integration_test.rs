@@ -1,51 +1,8 @@
 use std::time::Duration;
 
-use aura_bridge::actions::{ActionExecutor, MockExecutor};
-use aura_bridge::mapper::intent_to_action;
 use aura_daemon::bus::EventBus;
 use aura_daemon::daemon::Daemon;
 use aura_daemon::event::{AuraEvent, OverlayContent};
-use aura_llm::intent::IntentParser;
-use aura_llm::provider::MockProvider;
-
-#[tokio::test]
-async fn test_full_voice_to_action_flow() {
-    // Simulate the full pipeline: voice command -> intent -> action -> result
-    let bus = EventBus::new(64);
-    let mut rx = bus.subscribe();
-
-    // Create mock LLM that returns "open Safari" intent
-    let provider = MockProvider::new(vec![(
-        "open safari",
-        r#"{"type":"open_app","name":"Safari"}"#,
-    )]);
-    let parser = IntentParser::new(Box::new(provider));
-    let executor = MockExecutor::new();
-
-    // Parse intent from voice command
-    let intent = parser.parse("open safari").await.unwrap();
-    bus.send(AuraEvent::IntentParsed {
-        intent: intent.clone(),
-    })
-    .unwrap();
-
-    // Map and execute
-    let action = intent_to_action(&intent).unwrap();
-    let result = executor.execute(&action).await;
-    assert!(result.success);
-
-    bus.send(AuraEvent::ActionExecuted {
-        description: result.description,
-    })
-    .unwrap();
-
-    // Verify events were published
-    let event1 = rx.recv().await.unwrap();
-    assert!(matches!(event1, AuraEvent::IntentParsed { .. }));
-
-    let event2 = rx.recv().await.unwrap();
-    assert!(matches!(event2, AuraEvent::ActionExecuted { .. }));
-}
 
 #[tokio::test]
 async fn test_daemon_processes_voice_command() {
@@ -191,9 +148,23 @@ async fn test_daemon_shows_error_on_action_failed() {
 }
 
 #[tokio::test]
-async fn test_unknown_intent_parse() {
-    let provider = MockProvider::new(vec![]);
-    let parser = IntentParser::new(Box::new(provider));
-    let intent = parser.parse("gibberish command").await.unwrap();
-    assert!(matches!(intent, aura_llm::intent::Intent::Unknown { .. }));
+async fn test_gemini_tool_call_to_action_mapping() {
+    use aura_gemini::tools::function_call_to_action;
+    use serde_json::json;
+
+    // open_app maps correctly
+    let action = function_call_to_action("open_app", &json!({"app_name": "Safari"}));
+    assert!(action.is_some());
+
+    // search_files maps correctly
+    let action = function_call_to_action("search_files", &json!({"query": "readme"}));
+    assert!(action.is_some());
+
+    // summarize_screen returns None (handled specially)
+    let action = function_call_to_action("summarize_screen", &json!({}));
+    assert!(action.is_none());
+
+    // unknown function returns None
+    let action = function_call_to_action("unknown_func", &json!({}));
+    assert!(action.is_none());
 }

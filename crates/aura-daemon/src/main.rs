@@ -1,27 +1,26 @@
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use winit::event_loop::EventLoopProxy;
 
 use aura_bridge::actions::ActionExecutor;
-use aura_bridge::mapper::intent_to_action;
 use aura_daemon::bus::EventBus;
 use aura_daemon::daemon::Daemon;
 use aura_daemon::event::{AuraEvent, OverlayContent};
 use aura_daemon::setup::AuraSetup;
-use aura_llm::conversation::Conversation;
-use aura_llm::intent::{Intent, IntentParser};
-use aura_llm::ollama::{OllamaConfig, OllamaProvider};
+use aura_gemini::config::GeminiConfig;
+use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
+use aura_gemini::tools::function_call_to_action;
 use aura_overlay::renderer::OverlayState;
 use aura_overlay::window::{create_event_loop, OverlayMessage, OverlayWindow};
-use aura_voice::pipeline::{run_voice_task, VoiceEvent};
+use aura_voice::audio::AudioCapture;
 use aura_voice::playback::AudioPlayer;
-use aura_voice::stt::SttConfig;
-use aura_voice::tts::{TextToSpeech, TtsConfig};
-use aura_voice::vad::VadConfig;
 use tracing_subscriber::EnvFilter;
 
 const EVENT_BUS_CAPACITY: usize = 64;
+const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
 #[derive(Parser)]
 #[command(name = "aura", about = "Voice-first AI desktop companion")]
@@ -46,6 +45,12 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Validate GEMINI_API_KEY early before doing anything else
+    let gemini_config = GeminiConfig::from_env().context(
+        "GEMINI_API_KEY must be set. Get one at https://aistudio.google.com/apikey",
+    )?;
+    tracing::info!("Gemini API key validated");
+
     // First-run setup
     let setup = AuraSetup::new(AuraSetup::default_data_dir());
     setup.ensure_dirs()?;
@@ -57,7 +62,7 @@ fn main() -> Result<()> {
     if cli.no_overlay {
         // No overlay — run tokio directly
         let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(run_daemon(bus, cancel))?;
+        rt.block_on(run_daemon(gemini_config, bus, cancel))?;
     } else {
         // Create the event loop BEFORE starting tokio (winit must own the main thread)
         let event_loop = create_event_loop().context("Failed to create overlay event loop")?;
@@ -78,7 +83,7 @@ fn main() -> Result<()> {
                     run_overlay_bridge(bridge_bus, bridge_proxy, bridge_cancel).await;
                 });
 
-                if let Err(e) = run_daemon(bg_bus, bg_cancel).await {
+                if let Err(e) = run_daemon(gemini_config, bg_bus, bg_cancel).await {
                     tracing::error!("Daemon error: {e}");
                 }
 
@@ -95,38 +100,75 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_daemon(bus: EventBus, cancel: CancellationToken) -> Result<()> {
-    // Start voice pipeline on a dedicated thread (cpal's Stream is !Send)
-    let voice_cancel = cancel.clone();
-    let (voice_tx, _) = tokio::sync::broadcast::channel::<VoiceEvent>(64);
-    let voice_tx2 = voice_tx.clone();
+async fn run_daemon(
+    gemini_config: GeminiConfig,
+    bus: EventBus,
+    cancel: CancellationToken,
+) -> Result<()> {
+    // Connect to Gemini Live API
+    let session = GeminiLiveSession::connect(gemini_config)
+        .await
+        .context("Failed to connect Gemini Live session")?;
 
-    let voice_handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create voice runtime");
-        rt.block_on(async move {
-            if let Err(e) = run_voice_task(
-                SttConfig::default(),
-                VadConfig::default(),
-                voice_tx2,
-                voice_cancel,
-            )
-            .await
-            {
-                tracing::error!("Voice pipeline error: {e}");
+    let session = Arc::new(session);
+
+    // Set up mic capture on a dedicated std::thread (cpal's Stream is !Send)
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+
+    let capture = AudioCapture::new(None).context("Failed to initialize audio capture")?;
+    let _mic_thread = std::thread::Builder::new()
+        .name("aura-mic-capture".into())
+        .spawn(move || {
+            // start() returns a Stream that must be kept alive
+            let _stream = match capture.start(std_tx) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    tracing::error!("Failed to start audio capture: {e}");
+                    return;
+                }
+            };
+            tracing::info!("Mic capture started");
+            // Block this thread forever — dropping _stream stops capture
+            loop {
+                std::thread::park();
+            }
+        })?;
+
+    // Bridge std::sync::mpsc -> tokio -> session.send_audio()
+    let audio_session = Arc::clone(&session);
+    let audio_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
+
+        // Spawn a blocking task to drain the std::sync::mpsc channel
+        let bridge_tx = tokio_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            while let Ok(samples) = std_rx.recv() {
+                if bridge_tx.blocking_send(samples).is_err() {
+                    break;
+                }
             }
         });
+
+        loop {
+            tokio::select! {
+                _ = audio_cancel.cancelled() => break,
+                Some(samples) = tokio_rx.recv() => {
+                    if let Err(e) = audio_session.send_audio(&samples).await {
+                        tracing::warn!("Failed to send audio to Gemini: {e}");
+                        break;
+                    }
+                }
+            }
+        }
     });
 
-    // Start processor task (voice events -> intent -> action -> bus events)
+    // Spawn event processor
+    let proc_session = Arc::clone(&session);
     let proc_bus = bus.clone();
     let proc_cancel = cancel.clone();
-    let mut voice_rx = voice_tx.subscribe();
-
     let processor_handle = tokio::spawn(async move {
-        if let Err(e) = run_processor(proc_bus, &mut voice_rx, proc_cancel).await {
+        if let Err(e) = run_processor(proc_session, proc_bus, proc_cancel).await {
             tracing::error!("Processor error: {e}");
         }
     });
@@ -137,168 +179,141 @@ async fn run_daemon(bus: EventBus, cancel: CancellationToken) -> Result<()> {
 
     // Shutdown
     cancel.cancel();
+    session.disconnect();
     let _ = processor_handle.await;
-    let _ = voice_handle.join();
 
     Ok(())
 }
 
 async fn run_processor(
+    session: Arc<GeminiLiveSession>,
     bus: EventBus,
-    voice_rx: &mut tokio::sync::broadcast::Receiver<VoiceEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    // Intent parsing provider
-    let intent_provider =
-        OllamaProvider::new(OllamaConfig::default()).context("Failed to create Ollama provider")?;
+    let mut events = session.subscribe();
 
-    if let Err(e) = intent_provider.health_check().await {
-        tracing::warn!("Ollama health check failed: {e}");
-        tracing::warn!("Intent parsing will fail until Ollama is available");
-    }
-
-    let parser = IntentParser::new(Box::new(intent_provider));
-
-    // Conversation provider (separate instance for chat history)
-    let conv_provider =
-        OllamaProvider::new(OllamaConfig::default()).context("Failed to create conversation provider")?;
-    let conversation = Conversation::new(Box::new(conv_provider));
-
-    // TTS + audio playback
-    let tts = match TextToSpeech::new(TtsConfig::default()).await {
-        Ok(tts) => {
-            tracing::info!("TTS engine ready");
-            Some(tts)
-        }
-        Err(e) => {
-            tracing::warn!("TTS unavailable (voice responses disabled): {e}");
-            None
-        }
-    };
+    // Audio playback (optional — warn if unavailable)
     let player = match AudioPlayer::new() {
-        Ok(p) => Some(p),
+        Ok(p) => {
+            tracing::info!("Audio playback ready");
+            Some(p)
+        }
         Err(e) => {
             tracing::warn!("Audio playback unavailable: {e}");
             None
         }
     };
 
+    // macOS action executor
     #[cfg(target_os = "macos")]
     let executor = aura_bridge::macos::MacOSExecutor::new();
 
-    tracing::info!("Processor task running (conversational mode enabled)");
+    tracing::info!("Gemini event processor running");
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
-            event = voice_rx.recv() => {
+            event = events.recv() => {
                 match event {
-                    Ok(VoiceEvent::ListeningStarted) => {
-                        // Barge-in: stop playback if assistant is speaking
-                        if let Some(p) = &player {
-                            if p.is_playing() {
-                                p.stop();
-                                tracing::info!("Barge-in: stopped assistant speech");
-                                let _ = bus.send(AuraEvent::BargeIn);
+                    Ok(GeminiEvent::Connected) => {
+                        tracing::info!("Gemini session connected");
+                        let _ = bus.send(AuraEvent::GeminiConnected);
+                    }
+                    Ok(GeminiEvent::AudioResponse { samples }) => {
+                        if let Some(ref p) = player {
+                            if let Err(e) = p.play(samples, OUTPUT_SAMPLE_RATE) {
+                                tracing::error!("Audio playback failed: {e}");
                             }
                         }
-                        let _ = bus.send(AuraEvent::WakeWordDetected);
                     }
-                    Ok(VoiceEvent::Transcription { text }) => {
-                        let _ = bus.send(AuraEvent::VoiceCommand { text: text.clone() });
+                    Ok(GeminiEvent::ToolCall { id, name, args }) => {
+                        tracing::info!(name = %name, "Tool call received");
 
-                        // Parse intent
-                        match parser.parse(&text).await {
-                            Ok(intent) => {
-                                let _ = bus.send(AuraEvent::IntentParsed { intent: intent.clone() });
-
-                                // Map intent to action and execute
-                                if let Some(action) = intent_to_action(&intent) {
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let result = executor.execute(&action).await;
-                                        if result.success {
-                                            let _ = bus.send(AuraEvent::ActionExecuted {
-                                                description: result.description,
-                                            });
-                                        } else {
-                                            let _ = bus.send(AuraEvent::ActionFailed {
-                                                description: result.description.clone(),
-                                                error: result.description,
-                                            });
-                                        }
-                                    }
-                                    #[cfg(not(target_os = "macos"))]
-                                    {
-                                        let _ = bus.send(AuraEvent::ActionFailed {
-                                            description: format!("{action:?}"),
-                                            error: "Platform not supported".into(),
-                                        });
-                                    }
+                        let response = if let Some(action) = function_call_to_action(&name, &args) {
+                            #[cfg(target_os = "macos")]
+                            {
+                                let result = executor.execute(&action).await;
+                                if result.success {
+                                    let _ = bus.send(AuraEvent::ActionExecuted {
+                                        description: result.description.clone(),
+                                    });
                                 } else {
-                                    match intent {
-                                        Intent::Unknown { raw } => {
-                                            // Conversational response
-                                            match conversation.chat(&raw).await {
-                                                Ok(response) => {
-                                                    tracing::info!(response = %response, "Aura response");
-                                                    let _ = bus.send(AuraEvent::AssistantSpeaking {
-                                                        text: response.clone(),
-                                                    });
-
-                                                    // Synthesize and play
-                                                    if let (Some(tts), Some(player)) = (&tts, &player) {
-                                                        match tts.synthesize(&response).await {
-                                                            Ok(audio) => {
-                                                                if let Err(e) = player.play(audio, tts.sample_rate()) {
-                                                                    tracing::error!("Playback failed: {e}");
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                tracing::error!("TTS synthesis failed: {e}");
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!("Conversation failed: {e}");
-                                                    let _ = bus.send(AuraEvent::ActionFailed {
-                                                        description: "Conversation".into(),
-                                                        error: format!("Failed to get response: {e}"),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        Intent::SummarizeScreen => {
-                                            let _ = bus.send(AuraEvent::ActionFailed {
-                                                description: "Summarize screen".into(),
-                                                error: "Screen summarization not yet implemented".into(),
-                                            });
-                                        }
-                                        _ => {}
-                                    }
+                                    let _ = bus.send(AuraEvent::ActionFailed {
+                                        description: result.description.clone(),
+                                        error: result.description.clone(),
+                                    });
                                 }
+                                serde_json::json!({
+                                    "success": result.success,
+                                    "description": result.description,
+                                    "data": result.data,
+                                })
                             }
-                            Err(e) => {
-                                tracing::error!("Intent parsing failed: {e}");
+                            #[cfg(not(target_os = "macos"))]
+                            {
                                 let _ = bus.send(AuraEvent::ActionFailed {
-                                    description: "Intent parsing".into(),
-                                    error: format!("Failed to parse intent: {e}"),
+                                    description: format!("{action:?}"),
+                                    error: "Platform not supported".into(),
                                 });
+                                serde_json::json!({
+                                    "success": false,
+                                    "error": "Platform not supported",
+                                })
                             }
+                        } else if name == "summarize_screen" {
+                            // TODO: implement screen capture + send to Gemini
+                            let _ = bus.send(AuraEvent::ActionFailed {
+                                description: "Summarize screen".into(),
+                                error: "Screen summarization not yet implemented".into(),
+                            });
+                            serde_json::json!({
+                                "success": false,
+                                "error": "Screen summarization not yet implemented",
+                            })
+                        } else {
+                            serde_json::json!({
+                                "success": false,
+                                "error": format!("Unknown function: {name}"),
+                            })
+                        };
+
+                        if let Err(e) = session.send_tool_response(id, name, response).await {
+                            tracing::error!("Failed to send tool response: {e}");
                         }
                     }
-                    Ok(VoiceEvent::ListeningStopped) => {
-                        let _ = bus.send(AuraEvent::ListeningStopped);
+                    Ok(GeminiEvent::ToolCallCancellation { ids }) => {
+                        tracing::info!(?ids, "Tool call(s) cancelled");
                     }
-                    Ok(VoiceEvent::Error { message }) => {
+                    Ok(GeminiEvent::Interrupted) => {
+                        tracing::info!("Gemini interrupted — stopping playback");
+                        if let Some(ref p) = player {
+                            p.stop();
+                        }
+                        let _ = bus.send(AuraEvent::BargeIn);
+                    }
+                    Ok(GeminiEvent::Transcription { text }) => {
+                        let _ = bus.send(AuraEvent::AssistantSpeaking { text });
+                    }
+                    Ok(GeminiEvent::TurnComplete) => {
+                        tracing::debug!("Turn complete");
+                    }
+                    Ok(GeminiEvent::Error { message }) => {
+                        tracing::error!(%message, "Gemini error");
                         let _ = bus.send(AuraEvent::ActionFailed {
-                            description: "Voice pipeline".into(),
+                            description: "Gemini session".into(),
                             error: message,
                         });
                     }
+                    Ok(GeminiEvent::Reconnecting { attempt }) => {
+                        tracing::warn!(attempt, "Gemini reconnecting");
+                        let _ = bus.send(AuraEvent::GeminiReconnecting { attempt });
+                    }
+                    Ok(GeminiEvent::Disconnected) => {
+                        tracing::info!("Gemini session disconnected");
+                        break;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Processor lagged by {n} voice events");
+                        tracing::warn!("Processor lagged by {n} Gemini events");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -366,6 +381,23 @@ async fn run_overlay_bridge(
                             audio_levels: vec![0.5; 64],
                             phase: 0.0,
                             transition: 1.0,
+                        }));
+                    }
+                    Ok(AuraEvent::GeminiConnected) => {
+                        tracing::info!("Overlay: Gemini connected");
+                        let _ = proxy.send_event(OverlayMessage::Show);
+                        let _ = proxy.send_event(OverlayMessage::SetState(OverlayState::Listening {
+                            audio_levels: vec![0.3; 64],
+                            phase: 0.0,
+                            transition: 1.0,
+                        }));
+                    }
+                    Ok(AuraEvent::GeminiReconnecting { attempt }) => {
+                        tracing::warn!(attempt, "Overlay: Gemini reconnecting");
+                        let _ = proxy.send_event(OverlayMessage::SetState(OverlayState::Error {
+                            message: format!("Reconnecting to Gemini (attempt {attempt})..."),
+                            card_opacity: 1.0,
+                            pulse_phase: 0.0,
                         }));
                     }
                     Ok(AuraEvent::Shutdown) => {

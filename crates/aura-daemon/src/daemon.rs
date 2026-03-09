@@ -46,9 +46,6 @@ impl Daemon {
                                 content: OverlayContent::Processing,
                             });
                         }
-                        Ok(AuraEvent::IntentParsed { intent }) => {
-                            tracing::info!(?intent, "Intent parsed");
-                        }
                         Ok(AuraEvent::ActionExecuted { description }) => {
                             tracing::info!(%description, "Action executed");
                             send_event(&bus, AuraEvent::ShowOverlay {
