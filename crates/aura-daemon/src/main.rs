@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -114,9 +116,11 @@ async fn run_daemon(
 
     // Set up mic capture on a dedicated std::thread (cpal's Stream is !Send)
     let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let mic_shutdown = Arc::new(AtomicBool::new(false));
 
     let capture = AudioCapture::new(None).context("Failed to initialize audio capture")?;
-    let _mic_thread = std::thread::Builder::new()
+    let mic_shutdown_flag = Arc::clone(&mic_shutdown);
+    let mic_thread = std::thread::Builder::new()
         .name("aura-mic-capture".into())
         .spawn(move || {
             // start() returns a Stream that must be kept alive
@@ -128,24 +132,36 @@ async fn run_daemon(
                 }
             };
             tracing::info!("Mic capture started");
-            // Block this thread forever — dropping _stream stops capture
-            loop {
-                std::thread::park();
+            // Block until shutdown is signaled — dropping _stream stops capture
+            while !mic_shutdown_flag.load(Ordering::Relaxed) {
+                std::thread::park_timeout(Duration::from_millis(500));
             }
+            tracing::info!("Mic capture stopped");
         })?;
 
     // Bridge std::sync::mpsc -> tokio -> session.send_audio()
     let audio_session = Arc::clone(&session);
     let audio_cancel = cancel.clone();
+    let bridge_shutdown = Arc::clone(&mic_shutdown);
     tokio::spawn(async move {
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
 
         // Spawn a blocking task to drain the std::sync::mpsc channel
         let bridge_tx = tokio_tx.clone();
         tokio::task::spawn_blocking(move || {
-            while let Ok(samples) = std_rx.recv() {
-                if bridge_tx.blocking_send(samples).is_err() {
-                    break;
+            loop {
+                match std_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(samples) => {
+                        if bridge_tx.blocking_send(samples).is_err() {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if bridge_shutdown.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
         });
@@ -179,8 +195,11 @@ async fn run_daemon(
 
     // Shutdown
     cancel.cancel();
+    mic_shutdown.store(true, Ordering::Relaxed);
+    mic_thread.thread().unpark();
     session.disconnect();
     let _ = processor_handle.await;
+    let _ = mic_thread.join();
 
     Ok(())
 }
@@ -232,6 +251,7 @@ async fn run_processor(
                         let response = if let Some(action) = function_call_to_action(&name, &args) {
                             #[cfg(target_os = "macos")]
                             {
+                                let action_desc = format!("{action:?}");
                                 let result = executor.execute(&action).await;
                                 if result.success {
                                     let _ = bus.send(AuraEvent::ActionExecuted {
@@ -239,7 +259,7 @@ async fn run_processor(
                                     });
                                 } else {
                                     let _ = bus.send(AuraEvent::ActionFailed {
-                                        description: result.description.clone(),
+                                        description: action_desc,
                                         error: result.description.clone(),
                                     });
                                 }
@@ -271,9 +291,14 @@ async fn run_processor(
                                 "error": "Screen summarization not yet implemented",
                             })
                         } else {
+                            let error = format!("Unknown function: {name}");
+                            let _ = bus.send(AuraEvent::ActionFailed {
+                                description: format!("Tool call: {name}"),
+                                error: error.clone(),
+                            });
                             serde_json::json!({
                                 "success": false,
-                                "error": format!("Unknown function: {name}"),
+                                "error": error,
                             })
                         };
 
