@@ -1,4 +1,3 @@
-use aura_llm::intent::Intent;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -9,9 +8,6 @@ pub enum AuraEvent {
     ListeningStopped,
     VoiceCommand { text: String },
 
-    // Intent
-    IntentParsed { intent: Intent },
-
     // Actions
     ActionExecuted { description: String },
     ActionFailed { description: String, error: String },
@@ -19,6 +15,10 @@ pub enum AuraEvent {
     // Conversation
     AssistantSpeaking { text: String },
     BargeIn,
+
+    // Gemini session
+    GeminiConnected,
+    GeminiReconnecting { attempt: u32 },
 
     // Overlay
     ShowOverlay { content: OverlayContent },

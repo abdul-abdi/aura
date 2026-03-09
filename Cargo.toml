@@ -5,7 +5,6 @@ members = [
     "crates/aura-voice",
     "crates/aura-overlay",
     "crates/aura-screen",
-    "crates/aura-llm",
     "crates/aura-bridge",
     "crates/aura-gemini",
 ]

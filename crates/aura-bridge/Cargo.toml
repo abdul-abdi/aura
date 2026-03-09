@@ -15,4 +15,3 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 async-trait = "0.1"
-aura-llm = { path = "../aura-llm" }
