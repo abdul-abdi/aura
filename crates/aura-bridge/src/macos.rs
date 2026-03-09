@@ -59,7 +59,10 @@ fn run_command(cmd: &mut Command, context: &str) -> Result<std::process::Output,
 
 fn open_app(name: &str) -> ActionResult {
     info!(app = %name, "Opening application");
-    match run_command(Command::new("open").arg("-a").arg(name), &format!("open {name}")) {
+    match run_command(
+        Command::new("open").arg("-a").arg(name),
+        &format!("open {name}"),
+    ) {
         Ok(_) => ActionResult {
             success: true,
             description: format!("Opened {name}"),
@@ -71,7 +74,10 @@ fn open_app(name: &str) -> ActionResult {
 
 fn search_files(query: &str) -> ActionResult {
     info!(query = %query, "Searching files with mdfind");
-    match run_command(Command::new("mdfind").arg(query), &format!("search '{query}'")) {
+    match run_command(
+        Command::new("mdfind").arg(query),
+        &format!("search '{query}'"),
+    ) {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let results: Vec<&str> = stdout.lines().take(MAX_SEARCH_RESULTS).collect();
@@ -155,7 +161,8 @@ fn type_text(text: &str) -> ActionResult {
     if text.chars().any(|c| c.is_control()) {
         return ActionResult {
             success: false,
-            description: "Text contains control characters (newlines, etc.) which are not supported".into(),
+            description:
+                "Text contains control characters (newlines, etc.) which are not supported".into(),
             data: None,
         };
     }

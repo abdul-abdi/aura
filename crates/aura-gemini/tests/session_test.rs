@@ -32,11 +32,7 @@ fn test_config(url: String) -> GeminiConfig {
 /// the second connection will not be served.
 async fn start_mock_server<F, Fut>(handler: F) -> String
 where
-    F: FnOnce(
-            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-        ) -> Fut
-        + Send
-        + 'static,
+    F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send,
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -51,9 +47,7 @@ where
 
 /// Complete the setup handshake on the server side:
 /// receive the client's setup message, then send setupComplete.
-async fn complete_setup(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-) {
+async fn complete_setup(ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) {
     // Read setup message from client
     let msg = ws.next().await.unwrap().unwrap();
     let text = match msg {
@@ -62,7 +56,10 @@ async fn complete_setup(
     };
     // Verify it contains a setup field
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert!(val.get("setup").is_some(), "Expected setup message, got: {val}");
+    assert!(
+        val.get("setup").is_some(),
+        "Expected setup message, got: {val}"
+    );
 
     // Send setupComplete
     ws.send(Message::Text(r#"{"setupComplete":{}}"#.into()))
@@ -129,7 +126,12 @@ async fn test_session_connect_and_receive_audio() {
     let mut rx = session.subscribe();
 
     // Should receive Connected
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
 
     // Should receive AudioResponse
     let event = expect_event(
@@ -175,7 +177,12 @@ async fn test_session_send_audio() {
     let mut rx = session.subscribe();
 
     // Wait for connection
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
 
     // Send audio
     let pcm = vec![0.0_f32, 0.5, -0.5, 1.0];
@@ -237,7 +244,12 @@ async fn test_session_tool_call_and_response() {
     let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
     let mut rx = session.subscribe();
 
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
 
     // Wait for tool call event
     let event = expect_event(
@@ -299,7 +311,12 @@ async fn test_session_interrupted() {
     let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
     let mut rx = session.subscribe();
 
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
     expect_event(
         &mut rx,
         |e| matches!(e, GeminiEvent::Interrupted),
@@ -326,7 +343,12 @@ async fn test_session_turn_complete() {
     let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
     let mut rx = session.subscribe();
 
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
     expect_event(
         &mut rx,
         |e| matches!(e, GeminiEvent::TurnComplete),
@@ -395,7 +417,12 @@ async fn test_session_tool_call_cancellation() {
     let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
     let mut rx = session.subscribe();
 
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
 
     let event = expect_event(
         &mut rx,
@@ -434,7 +461,12 @@ async fn test_session_transcription() {
     let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
     let mut rx = session.subscribe();
 
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
 
     let event = expect_event(
         &mut rx,
@@ -464,7 +496,12 @@ async fn test_session_reconnect_on_server_close() {
     let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
     let mut rx = session.subscribe();
 
-    expect_event(&mut rx, |e| matches!(e, GeminiEvent::Connected), "Connected").await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
 
     // Use a longer timeout since there's a 1-second backoff before reconnecting
     let event = timeout(Duration::from_secs(5), async {
@@ -520,7 +557,10 @@ async fn test_session_connect_failure() {
     .expect("Timed out waiting for Reconnecting or Error event");
 
     assert!(
-        matches!(event, GeminiEvent::Reconnecting { .. } | GeminiEvent::Error { .. }),
+        matches!(
+            event,
+            GeminiEvent::Reconnecting { .. } | GeminiEvent::Error { .. }
+        ),
         "Expected Reconnecting or Error, got: {event:?}"
     );
 

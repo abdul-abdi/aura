@@ -294,8 +294,8 @@ mod tests {
             "AUDIO"
         );
         assert_eq!(
-            value["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]
-                ["prebuiltVoiceConfig"]["voiceName"],
+            value["setup"]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]
+                ["voiceName"],
             "Aoede"
         );
         assert_eq!(
@@ -324,10 +324,7 @@ mod tests {
             value["realtimeInput"]["mediaChunks"][0]["mimeType"],
             "audio/pcm;rate=16000"
         );
-        assert_eq!(
-            value["realtimeInput"]["mediaChunks"][0]["data"],
-            "AQIDBA=="
-        );
+        assert_eq!(value["realtimeInput"]["mediaChunks"][0]["data"], "AQIDBA==");
     }
 
     #[test]

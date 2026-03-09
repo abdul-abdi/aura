@@ -48,7 +48,9 @@ mod tests {
         // Temporarily remove the env var if it exists
         let original = std::env::var("GEMINI_API_KEY").ok();
         // SAFETY: test is single-threaded; we restore the var immediately after.
-        unsafe { std::env::remove_var("GEMINI_API_KEY"); }
+        unsafe {
+            std::env::remove_var("GEMINI_API_KEY");
+        }
 
         let result = GeminiConfig::from_env();
         assert!(result.is_err());

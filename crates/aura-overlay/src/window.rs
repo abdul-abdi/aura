@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use skia_safe::{surfaces, AlphaType, ColorType, ImageInfo};
+use skia_safe::{AlphaType, ColorType, ImageInfo, surfaces};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -88,9 +88,15 @@ impl OverlayWindow {
     }
 
     fn render_frame(&mut self) {
-        let Some(ref window) = self.window else { return };
-        let Some(ref mut surface) = self.surface else { return };
-        let Some(ref mut renderer) = self.renderer else { return };
+        let Some(ref window) = self.window else {
+            return;
+        };
+        let Some(ref mut surface) = self.surface else {
+            return;
+        };
+        let Some(ref mut renderer) = self.renderer else {
+            return;
+        };
 
         let size = window.inner_size();
         let width = size.width;
@@ -100,8 +106,12 @@ impl OverlayWindow {
         }
 
         // Resize softbuffer
-        let Some(nz_width) = NonZeroU32::new(width) else { return };
-        let Some(nz_height) = NonZeroU32::new(height) else { return };
+        let Some(nz_width) = NonZeroU32::new(width) else {
+            return;
+        };
+        let Some(nz_height) = NonZeroU32::new(height) else {
+            return;
+        };
         if surface.resize(nz_width, nz_height).is_err() {
             tracing::warn!("Failed to resize softbuffer surface");
             return;
@@ -117,12 +127,7 @@ impl OverlayWindow {
         let row_bytes = width as usize * 4;
         let mut pixel_data = vec![0u8; row_bytes * height as usize];
 
-        let mut skia_surface = surfaces::wrap_pixels(
-            &info,
-            &mut pixel_data,
-            Some(row_bytes),
-            None,
-        );
+        let mut skia_surface = surfaces::wrap_pixels(&info, &mut pixel_data, Some(row_bytes), None);
 
         let Some(ref mut skia_surface) = skia_surface else {
             tracing::warn!("Failed to create Skia raster surface");
@@ -204,10 +209,7 @@ impl ApplicationHandler<OverlayMessage> for OverlayWindow {
                 }
 
                 let size = window.inner_size();
-                self.renderer = Some(OverlayRenderer::new(
-                    size.width as f32,
-                    size.height as f32,
-                ));
+                self.renderer = Some(OverlayRenderer::new(size.width as f32, size.height as f32));
 
                 #[cfg(target_os = "macos")]
                 {
@@ -239,12 +241,7 @@ impl ApplicationHandler<OverlayMessage> for OverlayWindow {
         }
     }
 
-    fn window_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 self.hide();

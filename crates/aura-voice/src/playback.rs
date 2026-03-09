@@ -60,10 +60,8 @@ impl AudioPlayer {
                             }
                         }
                         PlaybackCommand::IsPlaying(reply) => {
-                            let playing = current_sink
-                                .as_ref()
-                                .map(|s| !s.empty())
-                                .unwrap_or(false);
+                            let playing =
+                                current_sink.as_ref().map(|s| !s.empty()).unwrap_or(false);
                             let _ = reply.send(playing);
                         }
                     }
@@ -93,7 +91,9 @@ impl AudioPlayer {
     pub fn is_playing(&self) -> bool {
         let (reply_tx, reply_rx) = mpsc::channel();
         if self.tx.send(PlaybackCommand::IsPlaying(reply_tx)).is_ok() {
-            reply_rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or(false)
+            reply_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .unwrap_or(false)
         } else {
             false
         }

@@ -56,7 +56,8 @@ async fn test_e2e_gemini_reconnecting_flow() {
     let bus = EventBus::new(64);
     let mut rx = bus.subscribe();
 
-    bus.send(AuraEvent::GeminiReconnecting { attempt: 1 }).unwrap();
+    bus.send(AuraEvent::GeminiReconnecting { attempt: 1 })
+        .unwrap();
     bus.send(AuraEvent::GeminiConnected).unwrap();
 
     let e1 = rx.recv().await.unwrap();

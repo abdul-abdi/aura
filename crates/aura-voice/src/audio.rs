@@ -79,21 +79,24 @@ impl AudioCapture {
         let err_fn = |err| tracing::error!("Audio stream error: {err}");
         let ratio = self.resample_ratio;
 
-        let stream = self.device.build_input_stream(
-            &self.config,
-            move |data: &[f32], _| {
-                let resampled = if (ratio - 1.0).abs() < f64::EPSILON {
-                    data.to_vec()
-                } else {
-                    downsample(data, ratio)
-                };
-                if sender.send(resampled).is_err() {
-                    tracing::warn!("Audio receiver dropped, data lost");
-                }
-            },
-            err_fn,
-            None,
-        ).context("Failed to build audio input stream")?;
+        let stream = self
+            .device
+            .build_input_stream(
+                &self.config,
+                move |data: &[f32], _| {
+                    let resampled = if (ratio - 1.0).abs() < f64::EPSILON {
+                        data.to_vec()
+                    } else {
+                        downsample(data, ratio)
+                    };
+                    if sender.send(resampled).is_err() {
+                        tracing::warn!("Audio receiver dropped, data lost");
+                    }
+                },
+                err_fn,
+                None,
+            )
+            .context("Failed to build audio input stream")?;
 
         stream.play()?;
         Ok(stream)
@@ -102,15 +105,14 @@ impl AudioCapture {
 
 /// Pick the best capture rate from supported configs.
 /// Prefers rates that divide evenly into 16kHz.
-fn pick_capture_rate(
-    supported: &[cpal::SupportedStreamConfigRange],
-) -> Result<u32> {
+fn pick_capture_rate(supported: &[cpal::SupportedStreamConfigRange]) -> Result<u32> {
     for &rate in PREFERRED_RATES {
         let sample_rate = cpal::SampleRate(rate);
-        if supported
-            .iter()
-            .any(|c| c.channels() >= 1 && c.min_sample_rate() <= sample_rate && c.max_sample_rate() >= sample_rate)
-        {
+        if supported.iter().any(|c| {
+            c.channels() >= 1
+                && c.min_sample_rate() <= sample_rate
+                && c.max_sample_rate() >= sample_rate
+        }) {
             return Ok(rate);
         }
     }

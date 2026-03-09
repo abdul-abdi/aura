@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rustpotter::{Rustpotter, RustpotterConfig, WakewordRef};
 
 use crate::audio::{CHANNELS, SAMPLE_RATE};

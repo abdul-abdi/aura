@@ -149,8 +149,7 @@ mod tests {
 
     #[test]
     fn map_launch_url() {
-        let action =
-            function_call_to_action("launch_url", &json!({"url": "https://example.com"}));
+        let action = function_call_to_action("launch_url", &json!({"url": "https://example.com"}));
         assert!(matches!(action, Some(Action::LaunchUrl { url }) if url == "https://example.com"));
     }
 

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use aura_gemini::config::GeminiConfig;
 use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
 use aura_gemini::tools::function_call_to_action;
 use aura_overlay::renderer::OverlayState;
-use aura_overlay::window::{create_event_loop, OverlayMessage, OverlayWindow};
+use aura_overlay::window::{OverlayMessage, OverlayWindow, create_event_loop};
 use aura_voice::audio::AudioCapture;
 use aura_voice::playback::AudioPlayer;
 use tracing_subscriber::EnvFilter;
@@ -48,9 +48,8 @@ fn main() -> Result<()> {
         .init();
 
     // Validate GEMINI_API_KEY early before doing anything else
-    let gemini_config = GeminiConfig::from_env().context(
-        "GEMINI_API_KEY must be set. Get one at https://aistudio.google.com/apikey",
-    )?;
+    let gemini_config = GeminiConfig::from_env()
+        .context("GEMINI_API_KEY must be set. Get one at https://aistudio.google.com/apikey")?;
     tracing::info!("Gemini API key validated");
 
     // First-run setup
@@ -239,10 +238,10 @@ async fn run_processor(
                         let _ = bus.send(AuraEvent::GeminiConnected);
                     }
                     Ok(GeminiEvent::AudioResponse { samples }) => {
-                        if let Some(ref p) = player {
-                            if let Err(e) = p.play(samples, OUTPUT_SAMPLE_RATE) {
-                                tracing::error!("Audio playback failed: {e}");
-                            }
+                        if let Some(ref p) = player
+                            && let Err(e) = p.play(samples, OUTPUT_SAMPLE_RATE)
+                        {
+                            tracing::error!("Audio playback failed: {e}");
                         }
                     }
                     Ok(GeminiEvent::ToolCall { id, name, args }) => {

@@ -2,9 +2,10 @@
 use std::f32::consts::PI;
 
 use skia_safe::{
+    BlurStyle, Canvas, Color4f, Font, FontMgr, FontStyle, MaskFilter, Paint, Path, Point, RRect,
+    Rect, Shader, TileMode,
     font_style::{Slant, Weight, Width},
-    paint, BlurStyle, Canvas, Color4f, Font, FontMgr, FontStyle, MaskFilter, Paint, Path, Point,
-    RRect, Rect, Shader, TileMode,
+    paint,
 };
 
 use crate::easing::AuraEasing;
@@ -160,10 +161,7 @@ impl OverlayRenderer {
                     let mut fade = Paint::default();
                     fade.set_color4f(Color4f::new(0.0, 0.0, 0.0, 1.0 - alpha), None);
                     fade.set_anti_alias(true);
-                    canvas.draw_rect(
-                        Rect::from_xywh(0.0, 0.0, self.width, self.height),
-                        &fade,
-                    );
+                    canvas.draw_rect(Rect::from_xywh(0.0, 0.0, self.width, self.height), &fade);
                 }
             }
         }
@@ -265,7 +263,12 @@ impl OverlayRenderer {
     // ------------------------------------------------------------------
 
     /// Build the waveform path and return (path, peak_x, peak_y).
-    fn build_wave_path(&self, audio_levels: &[f32], phase: f32, transition: f32) -> (Path, f32, f32) {
+    fn build_wave_path(
+        &self,
+        audio_levels: &[f32],
+        phase: f32,
+        transition: f32,
+    ) -> (Path, f32, f32) {
         let num_points: usize = 120;
         let base_y = self.height * 0.70;
         let max_amplitude = 60.0 * transition;
@@ -504,12 +507,8 @@ impl OverlayRenderer {
         // Card background
         let card_width = max_width.min(self.width - 40.0);
         let card_height = 160.0; // fixed height for now
-        let card_rect = Rect::from_xywh(
-            center_x - card_width / 2.0,
-            card_y,
-            card_width,
-            card_height,
-        );
+        let card_rect =
+            Rect::from_xywh(center_x - card_width / 2.0, card_y, card_width, card_height);
         let card_rrect = RRect::new_rect_xy(card_rect, corner_radius, corner_radius);
 
         // Glass fill
@@ -571,13 +570,7 @@ impl OverlayRenderer {
     // Error: violet-tinted glass card with gentle pulse
     // ------------------------------------------------------------------
 
-    fn draw_error_card(
-        &self,
-        canvas: &Canvas,
-        message: &str,
-        card_opacity: f32,
-        pulse_phase: f32,
-    ) {
+    fn draw_error_card(&self, canvas: &Canvas, message: &str, card_opacity: f32, pulse_phase: f32) {
         let max_width = 420.0_f32;
         let padding = 24.0_f32;
         let corner_radius = 16.0_f32;
@@ -590,12 +583,8 @@ impl OverlayRenderer {
 
         let card_width = max_width.min(self.width - 40.0);
         let card_height = 120.0;
-        let card_rect = Rect::from_xywh(
-            center_x - card_width / 2.0,
-            card_y,
-            card_width,
-            card_height,
-        );
+        let card_rect =
+            Rect::from_xywh(center_x - card_width / 2.0, card_y, card_width, card_height);
         let card_rrect = RRect::new_rect_xy(card_rect, corner_radius, corner_radius);
 
         // Violet-tinted glass fill
@@ -623,7 +612,10 @@ impl OverlayRenderer {
         border_glow.set_anti_alias(true);
         border_glow.set_style(paint::Style::Stroke);
         border_glow.set_stroke_width(2.0);
-        border_glow.set_color4f(Color4f::new(vr, vg, vb, 0.1 * card_opacity * (1.0 + pulse)), None);
+        border_glow.set_color4f(
+            Color4f::new(vr, vg, vb, 0.1 * card_opacity * (1.0 + pulse)),
+            None,
+        );
         border_glow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 4.0, None));
         canvas.draw_rrect(card_rrect, &border_glow);
 

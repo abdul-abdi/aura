@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::GeminiConfig;
@@ -28,14 +28,28 @@ const MAX_BACKOFF_MS: u64 = 30_000;
 #[derive(Debug, Clone)]
 pub enum GeminiEvent {
     Connected,
-    AudioResponse { samples: Vec<f32> },
-    ToolCall { id: String, name: String, args: serde_json::Value },
+    AudioResponse {
+        samples: Vec<f32>,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
     Interrupted,
-    ToolCallCancellation { ids: Vec<String> },
-    Transcription { text: String },
+    ToolCallCancellation {
+        ids: Vec<String>,
+    },
+    Transcription {
+        text: String,
+    },
     TurnComplete,
-    Error { message: String },
-    Reconnecting { attempt: u32 },
+    Error {
+        message: String,
+    },
+    Reconnecting {
+        attempt: u32,
+    },
     Disconnected,
 }
 
@@ -168,10 +182,7 @@ async fn connection_loop(
                 attempt += 1;
                 if attempt > MAX_RECONNECT_ATTEMPTS {
                     let _ = event_tx.send(GeminiEvent::Error {
-                        message: format!(
-                            "Max reconnection attempts exceeded: {}",
-                            outcome.error
-                        ),
+                        message: format!("Max reconnection attempts exceeded: {}", outcome.error),
                     });
                     break;
                 }
@@ -334,8 +345,7 @@ async fn handle_server_message(
                     match BASE64.decode(&blob.data) {
                         Ok(bytes) => {
                             let samples = pcm_bytes_to_f32(&bytes);
-                            let _ =
-                                event_tx.send(GeminiEvent::AudioResponse { samples });
+                            let _ = event_tx.send(GeminiEvent::AudioResponse { samples });
                         }
                         Err(e) => {
                             tracing::warn!("Failed to decode audio base64: {e}");
@@ -471,7 +481,9 @@ mod tests {
     fn pcm_bytes_roundtrip() {
         let original = vec![0.0_f32, 0.5, -0.5, 0.25, -0.25];
         let msg = encode_audio_message(&original);
-        let bytes = BASE64.decode(&msg.realtime_input.media_chunks[0].data).unwrap();
+        let bytes = BASE64
+            .decode(&msg.realtime_input.media_chunks[0].data)
+            .unwrap();
         let decoded = pcm_bytes_to_f32(&bytes);
 
         assert_eq!(decoded.len(), original.len());
@@ -517,7 +529,9 @@ mod tests {
     fn clamp_audio_values() {
         let pcm = vec![2.0, -2.0]; // out of range
         let msg = encode_audio_message(&pcm);
-        let bytes = BASE64.decode(&msg.realtime_input.media_chunks[0].data).unwrap();
+        let bytes = BASE64
+            .decode(&msg.realtime_input.media_chunks[0].data)
+            .unwrap();
         let samples = pcm_bytes_to_f32(&bytes);
         assert!((samples[0] - 1.0).abs() < 0.001); // clamped to 1.0
         assert!((samples[1] - (-1.0)).abs() < 0.001); // clamped to -1.0

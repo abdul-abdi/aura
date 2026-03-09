@@ -43,9 +43,12 @@ async fn test_daemon_processes_voice_command() {
 
     // Should have received the VoiceCommand and a ShowOverlay(Processing)
     assert!(
-        events.iter().any(|e| matches!(e, AuraEvent::ShowOverlay {
-            content: OverlayContent::Processing
-        })),
+        events.iter().any(|e| matches!(
+            e,
+            AuraEvent::ShowOverlay {
+                content: OverlayContent::Processing
+            }
+        )),
         "Daemon should show processing overlay on voice command. Got: {events:?}"
     );
 

@@ -29,7 +29,10 @@ fn test_is_ready_without_local_models() {
     let setup = AuraSetup::new(tmp.path().to_path_buf());
     let status = setup.check();
 
-    assert!(status.is_ready(), "Should be ready — no local models needed with Gemini");
+    assert!(
+        status.is_ready(),
+        "Should be ready — no local models needed with Gemini"
+    );
 }
 
 #[test]
