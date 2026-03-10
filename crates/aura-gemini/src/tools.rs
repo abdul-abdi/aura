@@ -60,6 +60,97 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     "properties": {}
                 }),
             },
+            FunctionDeclaration {
+                name: "move_mouse".into(),
+                description: "Move the mouse cursor to the specified screen coordinates."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "number", "description": "X coordinate (pixels from left)" },
+                        "y": { "type": "number", "description": "Y coordinate (pixels from top)" }
+                    },
+                    "required": ["x", "y"]
+                }),
+            },
+            FunctionDeclaration {
+                name: "click".into(),
+                description: "Click at the specified screen coordinates. Defaults to single \
+                    left click."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "number", "description": "X coordinate" },
+                        "y": { "type": "number", "description": "Y coordinate" },
+                        "button": { "type": "string", "enum": ["left", "right"], "description": "Mouse button. Default: left" },
+                        "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" }
+                    },
+                    "required": ["x", "y"]
+                }),
+            },
+            FunctionDeclaration {
+                name: "type_text".into(),
+                description: "Type a string of text at the current cursor position. Use for \
+                    entering text in fields, search bars, editors, etc."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "The text to type" }
+                    },
+                    "required": ["text"]
+                }),
+            },
+            FunctionDeclaration {
+                name: "press_key".into(),
+                description: "Press a key with optional modifiers. Use for keyboard shortcuts \
+                    (Cmd+C, Cmd+V, Cmd+Tab, etc.) and special keys (Return, Escape, Tab, \
+                    arrow keys, F1-F12)."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string", "description": "Key name: a-z, return, escape, tab, space, delete, up, down, left, right, f1-f12" },
+                        "modifiers": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                            "description": "Modifier keys to hold. Example: ['cmd', 'shift']"
+                        }
+                    },
+                    "required": ["key"]
+                }),
+            },
+            FunctionDeclaration {
+                name: "scroll".into(),
+                description: "Scroll the view. Positive dy scrolls down, negative dy scrolls \
+                    up. Positive dx scrolls right, negative dx scrolls left."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "dx": { "type": "integer", "description": "Horizontal scroll amount in pixels. Default: 0" },
+                        "dy": { "type": "integer", "description": "Vertical scroll amount in pixels. Positive = down." }
+                    },
+                    "required": ["dy"]
+                }),
+            },
+            FunctionDeclaration {
+                name: "drag".into(),
+                description: "Click and drag from one point to another. Used for moving \
+                    windows, selecting text, dragging files, etc."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "from_x": { "type": "number", "description": "Start X coordinate" },
+                        "from_y": { "type": "number", "description": "Start Y coordinate" },
+                        "to_x": { "type": "number", "description": "End X coordinate" },
+                        "to_y": { "type": "number", "description": "End Y coordinate" }
+                    },
+                    "required": ["from_x", "from_y", "to_x", "to_y"]
+                }),
+            },
         ],
     }]
 }
@@ -69,13 +160,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_declarations_returns_three_functions() {
+    fn tool_declarations_returns_nine_functions() {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 1, "Should be one Tool object");
         assert_eq!(
             tools[0].function_declarations.len(),
-            3,
-            "Should have 3 function declarations"
+            9,
+            "Should have 9 function declarations"
         );
     }
 
@@ -87,7 +178,20 @@ mod tests {
             .iter()
             .map(|fd| fd.name.as_str())
             .collect();
-        assert_eq!(names, vec!["run_applescript", "get_screen_context", "shutdown_aura"]);
+        assert_eq!(
+            names,
+            vec![
+                "run_applescript",
+                "get_screen_context",
+                "shutdown_aura",
+                "move_mouse",
+                "click",
+                "type_text",
+                "press_key",
+                "scroll",
+                "drag",
+            ]
+        );
     }
 
     #[test]
@@ -95,10 +199,12 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 3);
+        assert_eq!(decls.len(), 9);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
+        assert_eq!(decls[3]["name"], "move_mouse");
+        assert_eq!(decls[8]["name"], "drag");
     }
 
     #[test]
