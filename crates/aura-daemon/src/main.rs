@@ -729,6 +729,12 @@ async fn run_processor(
                         memory_op(&memory, move |mem| mem.end_session(&es_sid, None)).await;
                         break;
                     }
+                    Ok(GeminiEvent::SessionHandle { handle }) => {
+                        tracing::debug!(handle_prefix = &handle[..handle.len().min(12)], "Received session resumption handle, persisting");
+                        memory_op(&memory, move |mem| {
+                            mem.set_setting("resumption_handle", &handle)
+                        }).await;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "Event bus receiver lagged — events were dropped");
                         continue;

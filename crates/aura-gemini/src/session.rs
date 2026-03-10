@@ -51,6 +51,9 @@ pub enum GeminiEvent {
         attempt: u32,
     },
     Disconnected,
+    SessionHandle {
+        handle: String,
+    },
 }
 
 /// Handle for interacting with a live Gemini session.
@@ -450,7 +453,8 @@ async fn handle_server_message(
     if let Some(update) = msg.session_resumption_update {
         if let Some(new_handle) = update.new_handle {
             let mut handle = state.resumption_handle.lock().await;
-            *handle = Some(new_handle);
+            *handle = Some(new_handle.clone());
+            let _ = event_tx.send(GeminiEvent::SessionHandle { handle: new_handle });
         }
         return false;
     }

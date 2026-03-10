@@ -72,6 +72,10 @@ impl SessionMemory {
                 content TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 metadata TEXT
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn })
@@ -149,6 +153,24 @@ impl SessionMemory {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
     }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let result = stmt.query_row(rusqlite::params![key], |row| row.get(0));
+        match result {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +186,32 @@ mod tests {
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .unwrap();
         assert_eq!(mode, "wal");
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        mem.set_setting("resumption_handle", "abc123").unwrap();
+        assert_eq!(
+            mem.get_setting("resumption_handle").unwrap(),
+            Some("abc123".into())
+        );
+    }
+
+    #[test]
+    fn settings_missing_key_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        assert_eq!(mem.get_setting("nonexistent").unwrap(), None);
+    }
+
+    #[test]
+    fn settings_upsert_updates_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        mem.set_setting("handle", "v1").unwrap();
+        mem.set_setting("handle", "v2").unwrap();
+        assert_eq!(mem.get_setting("handle").unwrap(), Some("v2".into()));
     }
 }
