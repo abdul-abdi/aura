@@ -373,6 +373,7 @@ async fn connect_and_stream_inner(
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
     ping_interval.tick().await; // skip immediate first tick
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
