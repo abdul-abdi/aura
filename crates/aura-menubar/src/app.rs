@@ -176,7 +176,19 @@ extern "C" fn handle_click(_this: &Object, _cmd: Sel, sender: id) {
                 show_context_menu(_this, sender, raw_item);
             } else {
                 let button: id = msg_send![state.status_item.raw(), button];
-                state.popover.toggle(button);
+                let popover: id = state.popover.raw();
+                // Drop borrow before AppKit call that may trigger reentrant callbacks
+                drop(borrow);
+                drop(guard);
+                let shown: bool = msg_send![popover, isShown];
+                if shown {
+                    let _: () = msg_send![popover, close];
+                } else {
+                    let bounds: cocoa::foundation::NSRect = msg_send![button, bounds];
+                    let _: () = msg_send![popover, showRelativeToRect: bounds
+                        ofView: button
+                        preferredEdge: 1u64]; // NSMinYEdge
+                }
             }
         }
     }
@@ -190,37 +202,40 @@ unsafe fn show_context_menu(handler: &Object, _sender: id, raw_item: id) {
         // Title item (disabled)
         let title_str = NSString::alloc(nil).init_str("Aura");
         let empty_sel = sel!(init); // dummy selector
+        let title_key: id = NSString::alloc(nil).init_str("");
         let title_item: id = msg_send![class!(NSMenuItem), alloc];
         let title_item: id = msg_send![title_item,
             initWithTitle: title_str
             action: empty_sel
-            keyEquivalent: NSString::alloc(nil).init_str("")
+            keyEquivalent: title_key
         ];
         let _: () = msg_send![title_item, setEnabled: false];
         let _: () = msg_send![menu, addItem: title_item];
 
-        // Separator
+        // Separator (class method returns autoreleased — no release needed)
         let sep: id = msg_send![class!(NSMenuItem), separatorItem];
         let _: () = msg_send![menu, addItem: sep];
 
         // Reconnect
         let reconnect_str = NSString::alloc(nil).init_str("Reconnect");
+        let reconnect_key: id = NSString::alloc(nil).init_str("");
         let reconnect_item: id = msg_send![class!(NSMenuItem), alloc];
         let reconnect_item: id = msg_send![reconnect_item,
             initWithTitle: reconnect_str
             action: sel!(menuReconnect:)
-            keyEquivalent: NSString::alloc(nil).init_str("")
+            keyEquivalent: reconnect_key
         ];
         let _: () = msg_send![reconnect_item, setTarget: handler as *const Object as id];
         let _: () = msg_send![menu, addItem: reconnect_item];
 
         // Quit
         let quit_str = NSString::alloc(nil).init_str("Quit Aura");
+        let quit_key: id = NSString::alloc(nil).init_str("q");
         let quit_item: id = msg_send![class!(NSMenuItem), alloc];
         let quit_item: id = msg_send![quit_item,
             initWithTitle: quit_str
             action: sel!(menuQuit:)
-            keyEquivalent: NSString::alloc(nil).init_str("q")
+            keyEquivalent: quit_key
         ];
         let _: () = msg_send![quit_item, setTarget: handler as *const Object as id];
         let _: () = msg_send![menu, addItem: quit_item];
@@ -232,6 +247,18 @@ unsafe fn show_context_menu(handler: &Object, _sender: id, raw_item: id) {
             atLocation: cocoa::foundation::NSPoint::new(0.0, 0.0)
             inView: button
         ];
+
+        // Clean up — we own the alloc/init refs
+        let _: () = msg_send![quit_item, release];
+        let _: () = msg_send![quit_str, release];
+        let _: () = msg_send![quit_key, release];
+        let _: () = msg_send![reconnect_item, release];
+        let _: () = msg_send![reconnect_str, release];
+        let _: () = msg_send![reconnect_key, release];
+        let _: () = msg_send![title_item, release];
+        let _: () = msg_send![title_str, release];
+        let _: () = msg_send![title_key, release];
+        let _: () = msg_send![menu, release];
     }
 }
 

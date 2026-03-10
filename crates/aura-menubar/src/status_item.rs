@@ -62,6 +62,10 @@ impl AuraStatusItem {
             let tooltip = NSString::alloc(cocoa::base::nil).init_str("Aura AI Assistant");
             let _: () = msg_send![button, setToolTip: tooltip];
 
+            // Clean up — setAccessibilityLabel and setToolTip retain, so we release our refs
+            let _: () = msg_send![label, release];
+            let _: () = msg_send![tooltip, release];
+
             item
         }
     }
@@ -79,6 +83,7 @@ impl AuraStatusItem {
             let button: id = msg_send![self.status_item, button];
             let label = NSString::alloc(cocoa::base::nil).init_str(color.accessibility_label());
             let _: () = msg_send![button, setAccessibilityLabel: label];
+            let _: () = msg_send![label, release];
         }
     }
 
@@ -95,12 +100,6 @@ impl AuraStatusItem {
     unsafe fn update_icon(&self, color: DotColor) {
         unsafe {
             let button: id = msg_send![self.status_item, button];
-
-            // Release the old image to prevent leaks
-            let old_image: id = msg_send![button, image];
-            if old_image != cocoa::base::nil {
-                let _: () = msg_send![old_image, release];
-            }
 
             let size = NSSize::new(18.0, 18.0);
             let image: id = msg_send![class!(NSImage), alloc];
@@ -148,6 +147,7 @@ impl AuraStatusItem {
             let _: () = msg_send![image, setTemplate: NO];
 
             let _: () = msg_send![button, setImage: image];
+            let _: () = msg_send![image, release]; // balance our alloc/init
         }
     }
 

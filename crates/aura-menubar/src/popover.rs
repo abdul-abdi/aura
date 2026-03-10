@@ -275,18 +275,8 @@ impl AuraPopover {
     /// # Safety
     /// Must be called on the main thread (AppKit requirement).
     /// `relative_to` must be a valid NSView pointer.
-    pub unsafe fn toggle(&self, relative_to: id) {
-        unsafe {
-            let shown: bool = msg_send![self.popover, isShown];
-            if shown {
-                let _: () = msg_send![self.popover, close];
-            } else {
-                let bounds: NSRect = msg_send![relative_to, bounds];
-                let _: () = msg_send![self.popover, showRelativeToRect: bounds
-                    ofView: relative_to
-                    preferredEdge: 1u64]; // NSMinYEdge
-            }
-        }
+    pub fn raw(&self) -> id {
+        self.popover
     }
 
     /// Append a chat message bubble to the popover's scroll view.
