@@ -23,9 +23,39 @@ pub struct CapturedFrame {
     pub height: u32,
 }
 
-/// Capture the main display as a JPEG-encoded base64 string.
+unsafe extern "C" {
+    fn CGGetDisplaysWithPoint(
+        point: core_graphics::geometry::CGPoint,
+        max_displays: u32,
+        displays: *mut u32,
+        count: *mut u32,
+    ) -> i32;
+}
+
+/// Get the display ID containing the mouse cursor.
+fn active_display_id() -> Option<u32> {
+    unsafe {
+        let mut display_id: u32 = 0;
+        let mut count: u32 = 0;
+        let event_source = core_graphics::event_source::CGEventSource::new(
+            core_graphics::event_source::CGEventSourceStateID::CombinedSessionState,
+        )
+        .ok()?;
+        let mouse_event = core_graphics::event::CGEvent::new(event_source).ok()?;
+        let point = mouse_event.location();
+        let result = CGGetDisplaysWithPoint(point, 1, &mut display_id, &mut count);
+        if result == 0 && count > 0 {
+            Some(display_id)
+        } else {
+            None
+        }
+    }
+}
+
+/// Capture the active display (display under mouse cursor) as a JPEG-encoded base64 string.
 pub fn capture_screen() -> Result<CapturedFrame> {
-    let display = CGDisplay::main();
+    let display_id = active_display_id().unwrap_or(CGDisplay::main().id);
+    let display = CGDisplay::new(display_id);
     let cg_image = CGDisplay::image(&display)
         .context("Failed to capture screen — is Screen Recording permission granted?")?;
 
