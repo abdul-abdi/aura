@@ -14,7 +14,7 @@ pub enum PlaybackCommand {
 }
 
 /// Pre-buffer for absorbing network jitter before starting playback.
-/// Buffers ~200ms of audio samples before creating and starting the Sink.
+/// Buffers ~80ms of audio samples before creating and starting the Sink.
 struct PreBuffer {
     samples: Vec<f32>,
     sample_rate: u32,
@@ -56,8 +56,8 @@ impl AudioPlayer {
                                 sink.stop();
                             }
 
-                            // Enter buffering mode: accumulate ~200ms before starting Sink
-                            let target_samples = (sample_rate as usize * 200) / 1000; // 200ms
+                            // Enter buffering mode: accumulate ~80ms before starting Sink
+                            let target_samples = (sample_rate as usize * 80) / 1000; // 80ms — lower latency
                             pre_buffer = Some(PreBuffer {
                                 samples: Vec::with_capacity(target_samples),
                                 sample_rate,
