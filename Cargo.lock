@@ -230,7 +230,6 @@ dependencies = [
  "subtle",
  "tokio",
  "tokio-tungstenite 0.24.0",
- "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3161,7 +3160,6 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
- "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

@@ -1,5 +1,7 @@
 pub mod relay;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use axum::{
     Router,
@@ -10,7 +12,6 @@ use axum::{
 };
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
-use tower::limit::ConcurrencyLimitLayer;
 
 const GEMINI_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/\
     google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -45,22 +46,35 @@ pub fn check_auth(token: Option<&str>, expected: Option<&str>) -> bool {
     }
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, Query(params): Query<ConnectParams>) -> Response {
-    // Check auth token if AURA_PROXY_AUTH_TOKEN is set
-    let expected = std::env::var("AURA_PROXY_AUTH_TOKEN").ok();
+async fn ws_handler_with_sem(
+    ws: WebSocketUpgrade,
+    params: ConnectParams,
+    expected: Option<String>,
+    semaphore: Arc<tokio::sync::Semaphore>,
+) -> Response {
     if !check_auth(params.auth_token.as_deref(), expected.as_deref()) {
         return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
 
+    let permit = match semaphore.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "Too many connections").into_response(),
+    };
+
     let gemini_url = format!("{GEMINI_WS_BASE}?key={}", params.api_key);
     ws.max_message_size(WS_MAX_SIZE)
         .max_frame_size(WS_MAX_SIZE)
-        .on_upgrade(move |socket| relay::relay_websocket(socket, gemini_url))
+        .on_upgrade(move |socket| async move {
+            relay::relay_websocket(socket, gemini_url).await;
+            drop(permit); // released when WS closes
+        })
 }
 
 /// Auth-only endpoint for testing — validates token without requiring WS upgrade headers.
-async fn ws_auth_preflight(Query(params): Query<ConnectParams>) -> Response {
-    let expected = std::env::var("AURA_PROXY_AUTH_TOKEN").ok();
+async fn ws_auth_preflight_with_token(
+    params: ConnectParams,
+    expected: Option<String>,
+) -> Response {
     if !check_auth(params.auth_token.as_deref(), expected.as_deref()) {
         return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
@@ -72,11 +86,24 @@ pub async fn run_server(port: u16) -> Result<()> {
         tracing::warn!("AURA_PROXY_AUTH_TOKEN not set — proxy accepts unauthenticated connections");
     }
 
+    let auth_token: Option<String> = std::env::var("AURA_PROXY_AUTH_TOKEN").ok();
+    let ws_semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+
     let app = Router::new()
         .route("/health", get(health))
-        .route("/ws", get(ws_handler))
-        .route("/ws/auth", get(ws_auth_preflight))
-        .layer(ConcurrencyLimitLayer::new(10));
+        .route("/ws", get({
+            let sem = Arc::clone(&ws_semaphore);
+            let token = auth_token.clone();
+            move |ws: WebSocketUpgrade, Query(params): Query<ConnectParams>| {
+                ws_handler_with_sem(ws, params, token, sem)
+            }
+        }))
+        .route("/ws/auth", get({
+            let token = auth_token;
+            move |Query(params): Query<ConnectParams>| {
+                ws_auth_preflight_with_token(params, token)
+            }
+        }));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("Proxy listening on port {port}");
