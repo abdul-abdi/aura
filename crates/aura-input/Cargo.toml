@@ -1,0 +1,11 @@
+[package]
+name = "aura-input"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+core-graphics = { version = "0.24", features = ["highsierra"] }
+core-graphics-types = "0.2"
+core-foundation = "0.10"

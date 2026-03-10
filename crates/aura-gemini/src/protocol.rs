@@ -150,6 +150,33 @@ pub struct MediaChunk {
     pub data: String,
 }
 
+/// Real-time video input using the new separate video field.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeVideoMessage {
+    pub realtime_input: RealtimeVideoInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeVideoInput {
+    pub video: Blob,
+}
+
+/// Real-time audio input using the new separate field.
+/// Replaces the deprecated mediaChunks array format.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeAudioMessage {
+    pub realtime_input: RealtimeAudioInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeAudioInput {
+    pub audio: Blob,
+}
+
 /// Text content sent to the server during a session.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +217,7 @@ pub struct FunctionResponse {
 // ---------------------------------------------------------------------------
 
 /// Top-level server message — a flat struct with optional fields.
+/// Unknown fields are silently ignored to tolerate API additions.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerMessage {
@@ -258,7 +286,10 @@ pub struct ToolCallCancellation {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionResumptionUpdate {
-    pub new_handle: String,
+    #[serde(default)]
+    pub new_handle: Option<String>,
+    #[serde(default)]
+    pub resumable: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +449,21 @@ mod tests {
 
         let msg: ServerMessage = serde_json::from_str(&raw.to_string()).unwrap();
         let update = msg.session_resumption_update.unwrap();
-        assert_eq!(update.new_handle, "abc-resume-handle-xyz");
+        assert_eq!(update.new_handle.unwrap(), "abc-resume-handle-xyz");
+    }
+
+    #[test]
+    fn deserialize_session_resumption_update_without_handle() {
+        let raw = json!({
+            "sessionResumptionUpdate": {
+                "resumable": true
+            }
+        });
+
+        let msg: ServerMessage = serde_json::from_str(&raw.to_string()).unwrap();
+        let update = msg.session_resumption_update.unwrap();
+        assert!(update.new_handle.is_none());
+        assert_eq!(update.resumable, Some(true));
     }
 
     #[test]
@@ -466,5 +511,35 @@ mod tests {
         assert_eq!(resp["name"], "get_weather");
         assert_eq!(resp["response"]["temperature"], 72);
         assert_eq!(resp["response"]["unit"], "fahrenheit");
+    }
+
+    #[test]
+    fn serialize_realtime_video() {
+        let msg = RealtimeVideoMessage {
+            realtime_input: RealtimeVideoInput {
+                video: Blob {
+                    mime_type: "image/jpeg".into(),
+                    data: "base64data".into(),
+                },
+            },
+        };
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["realtimeInput"]["video"]["mimeType"], "image/jpeg");
+        assert_eq!(value["realtimeInput"]["video"]["data"], "base64data");
+    }
+
+    #[test]
+    fn serialize_realtime_audio_new_format() {
+        let msg = RealtimeAudioMessage {
+            realtime_input: RealtimeAudioInput {
+                audio: Blob {
+                    mime_type: "audio/pcm;rate=16000".into(),
+                    data: "AQIDBA==".into(),
+                },
+            },
+        };
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["realtimeInput"]["audio"]["mimeType"], "audio/pcm;rate=16000");
+        assert_eq!(value["realtimeInput"]["audio"]["data"], "AQIDBA==");
     }
 }

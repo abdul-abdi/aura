@@ -5,7 +5,8 @@ use objc::declare::ClassDecl;
 use objc::runtime::{Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 
-use std::sync::Mutex;
+use parking_lot::ReentrantMutex;
+use std::cell::RefCell;
 use tokio::sync::mpsc;
 
 use crate::popover::AuraPopover;
@@ -22,8 +23,11 @@ pub enum MenuBarMessage {
 }
 
 /// Global mutable state accessed from ObjC callbacks.
-/// This is safe because all access happens on the main thread.
-static GLOBAL_STATE: Mutex<Option<AppState>> = Mutex::new(None);
+/// ReentrantMutex allows the same thread to re-acquire the lock (needed when
+/// ObjC callbacks triggered by popUpMenuPositioningItem re-enter while lock is held).
+/// RefCell provides interior mutability with runtime borrow checking.
+static GLOBAL_STATE: ReentrantMutex<RefCell<Option<AppState>>> =
+    ReentrantMutex::new(RefCell::new(None));
 
 struct AppState {
     status_item: AuraStatusItem,
@@ -65,18 +69,21 @@ impl MenuBarApp {
             let _: () = msg_send![button, setTarget: handler];
             let _: () = msg_send![button, setAction: sel!(handleClick:)];
 
-            // Enable right-click by sending action on both clicks
-            let _: () = msg_send![button, sendActionOn: 3i64]; // NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp
+            // Enable left+right click: NSEventMaskLeftMouseDown (2) | NSEventMaskRightMouseDown (8) = 10
+            let _: () = msg_send![button, sendActionOn: 10i64];
 
             // Store state globally for ObjC callbacks
-            *GLOBAL_STATE.lock().unwrap() = Some(AppState {
-                status_item,
-                popover,
-                rx: self.rx,
-                pulsing: false,
-                pulse_bright: true,
-                reconnect_tx: Some(self.reconnect_tx),
-            });
+            {
+                let guard = GLOBAL_STATE.lock();
+                *guard.borrow_mut() = Some(AppState {
+                    status_item,
+                    popover,
+                    rx: self.rx,
+                    pulsing: false,
+                    pulse_bright: true,
+                    reconnect_tx: Some(self.reconnect_tx),
+                });
+            }
 
             // Set up NSTimer to poll message channel every 50ms
             let timer_target = handler;
@@ -133,17 +140,22 @@ fn register_click_handler_class() -> &'static objc::runtime::Class {
 
 #[allow(deprecated)]
 extern "C" fn handle_click(_this: &Object, _cmd: Sel, sender: id) {
-    let Ok(guard) = GLOBAL_STATE.lock() else {
-        return;
-    };
+    let guard = GLOBAL_STATE.lock();
+    let borrow = guard.borrow();
     unsafe {
-        if let Some(ref state) = *guard {
+        if let Some(ref state) = *borrow {
             // Check if this is a right-click
-            let current_event: id = msg_send![class!(NSApp), currentEvent];
+            let current_event: id = msg_send![NSApp(), currentEvent];
             let event_type: u64 = msg_send![current_event, type];
-            // NSEventTypeRightMouseUp = 4
-            if event_type == 4 {
-                show_context_menu(_this, sender, state);
+            // NSEventTypeRightMouseDown = 3
+            if event_type == 3 {
+                let raw_item = state.status_item.raw();
+                // Drop borrow and lock before calling ObjC methods that run a
+                // nested event loop — otherwise poll_messages would deadlock
+                // trying to re-borrow an already-borrowed RefCell.
+                drop(borrow);
+                drop(guard);
+                show_context_menu(_this, sender, raw_item);
             } else {
                 let button: id = msg_send![state.status_item.raw(), button];
                 state.popover.toggle(button);
@@ -153,7 +165,7 @@ extern "C" fn handle_click(_this: &Object, _cmd: Sel, sender: id) {
 }
 
 #[allow(deprecated)]
-unsafe fn show_context_menu(handler: &Object, _sender: id, state: &AppState) {
+unsafe fn show_context_menu(handler: &Object, _sender: id, raw_item: id) {
     unsafe {
         let menu: id = msg_send![class!(NSMenu), alloc];
         let menu: id = msg_send![menu, init];
@@ -196,8 +208,8 @@ unsafe fn show_context_menu(handler: &Object, _sender: id, state: &AppState) {
         let _: () = msg_send![quit_item, setTarget: handler as *const Object as id];
         let _: () = msg_send![menu, addItem: quit_item];
 
-        // Show menu at status item
-        let button: id = msg_send![state.status_item.raw(), button];
+        // Show menu at status item button
+        let button: id = msg_send![raw_item, button];
         let _: () = msg_send![menu,
             popUpMenuPositioningItem: nil
             atLocation: cocoa::foundation::NSPoint::new(0.0, 0.0)
@@ -208,10 +220,9 @@ unsafe fn show_context_menu(handler: &Object, _sender: id, state: &AppState) {
 
 #[allow(deprecated)]
 extern "C" fn menu_reconnect(_this: &Object, _cmd: Sel, _sender: id) {
-    let Ok(guard) = GLOBAL_STATE.lock() else {
-        return;
-    };
-    if let Some(ref state) = *guard {
+    let guard = GLOBAL_STATE.lock();
+    let borrow = guard.borrow();
+    if let Some(ref state) = *borrow {
         if let Some(ref tx) = state.reconnect_tx {
             let _ = tx.try_send(());
         }
@@ -228,13 +239,14 @@ extern "C" fn menu_quit(_this: &Object, _cmd: Sel, _sender: id) {
 
 #[allow(deprecated)]
 extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
-    let Ok(mut state_guard) = GLOBAL_STATE.lock() else {
-        return;
-    };
-    if let Some(ref mut state) = *state_guard {
-        // Drain all pending messages (non-blocking)
-        while let Ok(msg) = state.rx.try_recv() {
-            unsafe {
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+
+        let guard = GLOBAL_STATE.lock();
+        let mut borrow = guard.borrow_mut();
+        if let Some(ref mut state) = *borrow {
+            // Drain all pending messages (non-blocking)
+            while let Ok(msg) = state.rx.try_recv() {
                 match msg {
                     MenuBarMessage::SetColor(color) => {
                         state.status_item.set_color(color);
@@ -263,24 +275,25 @@ extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
                     }
                 }
             }
-        }
 
-        // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
-        if state.pulsing {
-            // Use a simple counter approach: toggle every 10th poll (50ms * 10 = 500ms)
-            static PULSE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let count = PULSE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count % 10 == 0 {
-                state.pulse_bright = !state.pulse_bright;
-                let color = if state.pulse_bright {
-                    DotColor::Green
-                } else {
-                    DotColor::GreenDim
-                };
-                unsafe {
+            // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
+            if state.pulsing {
+                // Use a simple counter approach: toggle every 10th poll (50ms * 10 = 500ms)
+                static PULSE_COUNTER: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                let count = PULSE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count % 10 == 0 {
+                    state.pulse_bright = !state.pulse_bright;
+                    let color = if state.pulse_bright {
+                        DotColor::Green
+                    } else {
+                        DotColor::GreenDim
+                    };
                     state.status_item.set_color(color);
                 }
             }
         }
+
+        let _: () = msg_send![pool, drain];
     }
 }

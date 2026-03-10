@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -30,6 +31,7 @@ pub struct ScriptResult {
     pub stderr: String,
 }
 
+#[derive(Clone)]
 pub struct ScriptExecutor;
 
 impl ScriptExecutor {
@@ -60,7 +62,9 @@ impl ScriptExecutor {
         let timeout_dur = Duration::from_secs(timeout_secs);
 
         let handle = tokio::task::spawn_blocking(move || {
-            let mut cmd = Command::new("osascript");
+            let mut cmd = Command::new("sandbox-exec");
+            cmd.arg("-f").arg(sandbox_profile_path());
+            cmd.arg("osascript");
             match language {
                 ScriptLanguage::AppleScript => {
                     cmd.arg("-e").arg(&script);
@@ -80,7 +84,7 @@ impl ScriptExecutor {
                     return ScriptResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: format!("Failed to spawn osascript: {e}"),
+                        stderr: format!("Failed to spawn sandbox-exec: {e}"),
                     };
                 }
             };
@@ -167,4 +171,68 @@ fn check_dangerous(script: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Locate the sandbox profile to pass to `sandbox-exec -f`.
+///
+/// Search order:
+/// 1. Next to the current binary (production install).
+/// 2. Next to `CARGO_MANIFEST_DIR` (development / cargo test).
+/// 3. `~/.config/aura/sandbox.sb` (user-level override).
+fn sandbox_profile_path() -> PathBuf {
+    // 1. Beside the running binary
+    if let Ok(exe) = std::env::current_exe() {
+        let candidate = exe
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("sandbox.sb");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // 2. Relative to the crate's source directory (cargo test / dev builds)
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dev_path = manifest_dir.join("sandbox.sb");
+    if dev_path.exists() {
+        return dev_path;
+    }
+
+    // 3. User config directory fallback
+    if let Some(home) = std::env::var_os("HOME") {
+        let cfg = PathBuf::from(home)
+            .join(".config")
+            .join("aura")
+            .join("sandbox.sb");
+        if cfg.exists() {
+            return cfg;
+        }
+    }
+
+    // Return the dev path even if missing — sandbox-exec will produce a clear error.
+    dev_path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sandbox_blocks_network() {
+        let executor = ScriptExecutor::new();
+        let result = executor
+            .run(
+                r#"do shell script "curl -s https://example.com""#,
+                ScriptLanguage::AppleScript,
+                5,
+            )
+            .await;
+        // Either the script fails (sandbox killed curl / denied network) or
+        // it succeeds but returns no output (blocked silently). Both are acceptable.
+        assert!(
+            !result.success || result.stdout.is_empty(),
+            "Expected sandbox to block network access, but got output: {}",
+            result.stdout
+        );
+    }
 }

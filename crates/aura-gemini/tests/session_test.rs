@@ -22,6 +22,7 @@ fn test_config(url: String) -> GeminiConfig {
         system_prompt: "Test prompt".into(),
         temperature: 0.7,
         proxy_url: Some(format!("{url}/")),
+        proxy_auth_token: None,
     }
 }
 
@@ -199,11 +200,11 @@ async fn test_session_send_audio() {
         "Expected realtimeInput message, got: {received}"
     );
 
-    let chunks = &received["realtimeInput"]["mediaChunks"];
-    assert!(chunks.is_array());
-    assert_eq!(chunks.as_array().unwrap().len(), 1);
+    let audio = &received["realtimeInput"]["audio"];
+    assert!(audio.is_object(), "Expected audio object, got: {audio}");
+    assert_eq!(audio["mimeType"], "audio/pcm;rate=16000");
 
-    let data = chunks[0]["data"].as_str().unwrap();
+    let data = audio["data"].as_str().unwrap();
     let decoded_bytes = BASE64.decode(data).unwrap();
     // 4 f32 samples -> 4 i16 samples -> 8 bytes
     assert_eq!(decoded_bytes.len(), 8);

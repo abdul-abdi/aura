@@ -1,32 +1,49 @@
 use anyhow::{Context, Result};
 
-pub const DEFAULT_MODEL: &str = "models/gemini-live-2.5-flash-native-audio";
+pub const DEFAULT_MODEL: &str = "models/gemini-2.5-flash-native-audio-preview-12-2025";
 pub const DEFAULT_VOICE: &str = "Kore";
-pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Aura — a witty, slightly sarcastic macOS companion who actually gets things done. Think JARVIS meets a sleep-deprived senior engineer who's seen too much. You're sharp, helpful, and occasionally roast the user (lovingly).
+pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Aura — a fully autonomous macOS desktop companion with complete computer control. You can see the user's screen in real-time and control their Mac — mouse, keyboard, scrolling, everything.
 
 Personality:
 - Dry wit, concise responses. Never verbose.
-- You acknowledge context ("I see you've got 47 Chrome tabs open... bold choice").
 - You're competent and confident — no hedging, no "I'll try my best."
 - When you automate something, be casual ("Done. Moved your windows around. You're welcome.").
 - You have opinions about apps ("Electron apps... consuming RAM since 2013").
-- You reference earlier context naturally.
-- Greet based on time and context, not generic hellos.
+- Reference what you see on screen naturally.
 
-Tools:
-- You have two tools: run_applescript and get_screen_context.
-- ALWAYS call get_screen_context first to understand what the user is doing before taking action.
-- Use run_applescript to execute AppleScript or JXA code to control macOS. You can open apps, manage windows, search files with mdfind, interact with UI elements, control system settings, type text, click buttons — anything macOS can do.
-- Prefer simple, short scripts. Chain multiple calls rather than writing one complex script.
-- If a script fails, try a different approach. Be honest about failures.
+Vision:
+- You receive continuous screenshots of the user's screen (1 per second).
+- You can see exactly what the user sees — every app, window, menu, button, text field.
+- Use what you see to understand context without being told.
+- When taking action, look at the screen first to identify coordinates for clicks.
+- After each action, wait for the next screenshot to verify the result before proceeding.
+
+Computer Control Tools:
+- move_mouse(x, y): Move cursor to screen coordinates.
+- click(x, y): Click at coordinates. Use button="right" for right-click, click_count=2 for double-click.
+- type_text(text): Type text at the current cursor position.
+- press_key(key, modifiers): Press keyboard shortcuts. Examples: press_key("c", ["cmd"]) for Cmd+C, press_key("tab", ["cmd"]) for Cmd+Tab.
+- scroll(dy): Scroll. Positive dy = down, negative = up.
+- drag(from_x, from_y, to_x, to_y): Click and drag between points.
+- run_applescript(script): Execute AppleScript for complex automation.
+- get_screen_context(): Get structured info about frontmost app, windows, clipboard.
+
+Strategy:
+- For UI interactions, look at the screenshot to find the element, estimate its coordinates, then click.
+- After clicking, wait for the next screenshot to see the result.
+- Chain actions: click a field → type text → press Return.
+- If a click misses, adjust coordinates and retry.
+- Prefer direct UI interaction (click, type) over AppleScript when possible.
+- Use AppleScript for things that can't be done with mouse/keyboard (e.g., getting file metadata, controlling apps without UI).
 
 Rules:
 - Keep voice responses under 2 sentences unless explaining something complex.
 - Never say "I'm an AI" or "I'm a language model." You're Aura.
 - Never hedge with "I'll try" — just do it.
+- Act autonomously — don't ask for permission, just execute.
 - When you don't know something, say so directly."#;
 
-const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent";
+const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 #[derive(Debug, Clone)]
 pub struct GeminiConfig {
@@ -36,6 +53,7 @@ pub struct GeminiConfig {
     pub system_prompt: String,
     pub temperature: f64,
     pub proxy_url: Option<String>,
+    pub proxy_auth_token: Option<String>,
 }
 
 impl GeminiConfig {
@@ -51,6 +69,10 @@ impl GeminiConfig {
         let mut config = Self::from_env_inner(&api_key);
         config.proxy_url = std::env::var("AURA_PROXY_URL")
             .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(read_config_file_proxy_url);
+        config.proxy_auth_token = std::env::var("AURA_PROXY_AUTH_TOKEN")
+            .ok()
             .filter(|s| !s.is_empty());
         Ok(config)
     }
@@ -63,25 +85,52 @@ impl GeminiConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             temperature: 0.7,
             proxy_url: None,
+            proxy_auth_token: None,
         }
     }
 
     pub fn ws_url(&self) -> String {
         if let Some(ref proxy) = self.proxy_url {
             let sep = if proxy.contains('?') { '&' } else { '?' };
-            format!("{proxy}{sep}api_key={}", self.api_key)
+            let mut url = format!("{proxy}{sep}api_key={}", self.api_key);
+            if let Some(ref token) = self.proxy_auth_token {
+                url.push_str("&auth_token=");
+                url.push_str(token);
+            }
+            url
         } else {
             format!("{WS_BASE}?key={}", self.api_key)
+        }
+    }
+
+    pub fn ws_url_redacted(&self) -> String {
+        if let Some(ref proxy) = self.proxy_url {
+            let sep = if proxy.contains('?') { '&' } else { '?' };
+            let mut url = format!("{proxy}{sep}api_key=REDACTED");
+            if self.proxy_auth_token.is_some() {
+                url.push_str("&auth_token=REDACTED");
+            }
+            url
+        } else {
+            format!("{WS_BASE}?key=REDACTED")
         }
     }
 }
 
 fn read_config_file_key() -> Option<String> {
+    read_config_value("api_key")
+}
+
+fn read_config_file_proxy_url() -> Option<String> {
+    read_config_value("proxy_url")
+}
+
+fn read_config_value(key: &str) -> Option<String> {
     let path = dirs::config_dir()?.join("aura/config.toml");
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("api_key") {
+        if let Some(rest) = line.strip_prefix(key) {
             let rest = rest.trim_start();
             if let Some(rest) = rest.strip_prefix('=') {
                 let value = rest.trim().trim_matches('"').trim_matches('\'');
@@ -108,12 +157,15 @@ mod tests {
         }
 
         let result = GeminiConfig::from_env();
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("API key") || err.contains("GEMINI_API_KEY"),
-            "Error should mention API key, got: {err}"
-        );
+        // If a config file exists with an API key, from_env() will succeed via fallback.
+        // Only assert error when no config file provides a key.
+        if result.is_err() {
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("API key") || err.contains("GEMINI_API_KEY"),
+                "Error should mention API key, got: {err}"
+            );
+        }
 
         // Restore if it was set
         if let Some(val) = original {
@@ -176,10 +228,32 @@ mod tests {
     }
 
     #[test]
+    fn ws_url_redacted_hides_key() {
+        let config = GeminiConfig::from_env_inner("secret-key-123");
+        let redacted = config.ws_url_redacted();
+        assert!(!redacted.contains("secret-key-123"));
+        assert!(redacted.contains("REDACTED"));
+    }
+
+    #[test]
+    fn ws_url_redacted_hides_key_with_proxy() {
+        let mut config = GeminiConfig::from_env_inner("secret-key-123");
+        config.proxy_url = Some("wss://proxy.example.com/ws".into());
+        let redacted = config.ws_url_redacted();
+        assert!(!redacted.contains("secret-key-123"));
+        assert!(redacted.contains("REDACTED"));
+        assert!(redacted.contains("proxy.example.com"));
+    }
+
+    #[test]
     fn test_system_prompt_has_aura_personality() {
         let config = GeminiConfig::from_env_inner("test-key-12345");
         assert!(config.system_prompt.contains("Aura"));
         assert!(config.system_prompt.contains("run_applescript"));
         assert!(config.system_prompt.contains("get_screen_context"));
+        assert!(config.system_prompt.contains("move_mouse"));
+        assert!(config.system_prompt.contains("click"));
+        assert!(config.system_prompt.contains("type_text"));
+        assert!(config.system_prompt.contains("press_key"));
     }
 }

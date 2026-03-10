@@ -20,8 +20,8 @@ const AUDIO_CHUNK_DURATION_MS: u64 = 100;
 const INPUT_SAMPLE_RATE: u32 = 16_000;
 #[allow(dead_code)]
 const OUTPUT_SAMPLE_RATE: u32 = 24_000;
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-const INITIAL_BACKOFF_MS: u64 = 1000;
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+const INITIAL_BACKOFF_MS: u64 = 200;
 const MAX_BACKOFF_MS: u64 = 30_000;
 
 /// Events emitted by the Gemini session.
@@ -51,15 +51,20 @@ pub enum GeminiEvent {
         attempt: u32,
     },
     Disconnected,
+    SessionHandle {
+        handle: String,
+    },
 }
 
 /// Handle for interacting with a live Gemini session.
 pub struct GeminiLiveSession {
     audio_tx: mpsc::Sender<Vec<f32>>,
+    video_tx: mpsc::Sender<String>,
     tool_response_tx: mpsc::Sender<(String, String, serde_json::Value)>,
     text_tx: mpsc::Sender<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
+    is_first_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GeminiLiveSession {
@@ -67,15 +72,18 @@ impl GeminiLiveSession {
     /// Spawns background tasks for sending and receiving.
     pub async fn connect(config: GeminiConfig) -> Result<Self> {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
+        let (video_tx, video_rx) = mpsc::channel::<String>(8);
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
         let (text_tx, text_rx) = mpsc::channel::<String>(16);
         let (event_tx, _) = broadcast::channel::<GeminiEvent>(128);
         let cancel = tokio_util::sync::CancellationToken::new();
+        let is_first_connect = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         let session_state = SessionState {
             config: Arc::new(config),
             resumption_handle: Arc::new(Mutex::new(None)),
+            is_first_connect: Arc::clone(&is_first_connect),
         };
 
         // Spawn the connection manager task
@@ -83,15 +91,17 @@ impl GeminiLiveSession {
         let tx = event_tx.clone();
         let token = cancel.clone();
         tokio::spawn(async move {
-            connection_loop(state, audio_rx, tool_response_rx, text_rx, tx, token).await;
+            connection_loop(state, audio_rx, video_rx, tool_response_rx, text_rx, tx, token).await;
         });
 
         Ok(Self {
             audio_tx,
+            video_tx,
             tool_response_tx,
             text_tx,
             event_tx,
             cancel,
+            is_first_connect,
         })
     }
 
@@ -99,6 +109,14 @@ impl GeminiLiveSession {
     pub async fn send_audio(&self, pcm_16khz: &[f32]) -> Result<()> {
         self.audio_tx
             .send(pcm_16khz.to_vec())
+            .await
+            .map_err(|_| anyhow::anyhow!("Session closed"))
+    }
+
+    /// Send a JPEG screenshot frame to Gemini.
+    pub async fn send_video(&self, jpeg_base64: &str) -> Result<()> {
+        self.video_tx
+            .send(jpeg_base64.to_string())
             .await
             .map_err(|_| anyhow::anyhow!("Session closed"))
     }
@@ -133,6 +151,12 @@ impl GeminiLiveSession {
     pub fn disconnect(&self) {
         self.cancel.cancel();
     }
+
+    /// Returns true if this is the first connection (not a reconnection).
+    /// After the first connection, this returns false.
+    pub fn is_first_connect(&self) -> bool {
+        self.is_first_connect.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl Drop for GeminiLiveSession {
@@ -145,6 +169,7 @@ impl Drop for GeminiLiveSession {
 struct SessionState {
     config: Arc<GeminiConfig>,
     resumption_handle: Arc<Mutex<Option<String>>>,
+    is_first_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Outcome of a single connection attempt.
@@ -158,6 +183,7 @@ struct StreamOutcome {
 async fn connection_loop(
     state: SessionState,
     mut audio_rx: mpsc::Receiver<Vec<f32>>,
+    mut video_rx: mpsc::Receiver<String>,
     mut tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
     mut text_rx: mpsc::Receiver<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
@@ -173,6 +199,7 @@ async fn connection_loop(
         match connect_and_stream(
             &state,
             &mut audio_rx,
+            &mut video_rx,
             &mut tool_response_rx,
             &mut text_rx,
             &event_tx,
@@ -219,6 +246,7 @@ async fn connection_loop(
 async fn connect_and_stream(
     state: &SessionState,
     audio_rx: &mut mpsc::Receiver<Vec<f32>>,
+    video_rx: &mut mpsc::Receiver<String>,
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
     text_rx: &mut mpsc::Receiver<String>,
     event_tx: &broadcast::Sender<GeminiEvent>,
@@ -229,6 +257,7 @@ async fn connect_and_stream(
     let result = connect_and_stream_inner(
         state,
         audio_rx,
+        video_rx,
         tool_response_rx,
         text_rx,
         event_tx,
@@ -249,6 +278,7 @@ async fn connect_and_stream(
 async fn connect_and_stream_inner(
     state: &SessionState,
     audio_rx: &mut mpsc::Receiver<Vec<f32>>,
+    video_rx: &mut mpsc::Receiver<String>,
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
     text_rx: &mut mpsc::Receiver<String>,
     event_tx: &broadcast::Sender<GeminiEvent>,
@@ -256,9 +286,14 @@ async fn connect_and_stream_inner(
     was_connected: &mut bool,
 ) -> Result<()> {
     let url = state.config.ws_url();
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .context("WebSocket connection failed")?;
+    tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
+    let (ws_stream, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .context("WebSocket connection timed out (10s)")?
+    .context("WebSocket connection failed")?;
 
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
@@ -266,17 +301,36 @@ async fn connect_and_stream_inner(
     let resumption_handle = state.resumption_handle.lock().await.clone();
     let setup = build_setup_message(&state.config, resumption_handle);
     let setup_json = serde_json::to_string(&setup)?;
+    tracing::debug!("Sending setup: {setup_json}");
     ws_sink.send(Message::Text(setup_json)).await?;
 
-    // Wait for setupComplete
+    // Wait for setupComplete with timeout
+    let setup_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        let msg = ws_source
-            .next()
-            .await
-            .context("Connection closed before setupComplete")?
-            .context("WebSocket error during setup")?;
+        let msg = tokio::select! {
+            msg = ws_source.next() => {
+                msg.context("Connection closed before setupComplete")?
+                    .context("WebSocket error during setup")?
+            }
+            _ = tokio::time::sleep_until(setup_deadline) => {
+                anyhow::bail!("Timed out waiting for setupComplete (15s). Model '{}' may not exist or may not support the Live API.", state.config.model);
+            }
+            _ = cancel.cancelled() => return Ok(()),
+        };
 
-        if let Message::Text(text) = msg {
+        let json_text = match &msg {
+            Message::Text(text) => Some(text.clone()),
+            Message::Binary(bytes) => {
+                String::from_utf8(bytes.clone()).ok()
+            }
+            Message::Close(frame) => {
+                anyhow::bail!("Server closed connection during setup: {frame:?}");
+            }
+            _ => None,
+        };
+
+        if let Some(text) = json_text {
+            tracing::debug!("Setup response: {text}");
             let server_msg: ServerMessage = serde_json::from_str(&text)?;
             if server_msg.setup_complete.is_some() {
                 break;
@@ -286,18 +340,54 @@ async fn connect_and_stream_inner(
 
     *was_connected = true;
     let _ = event_tx.send(GeminiEvent::Connected);
+    // Set after sending so the receiver sees true on first connect
+    state.is_first_connect.store(false, std::sync::atomic::Ordering::Relaxed);
     tracing::info!("Gemini Live session connected");
 
     let ws_sink = Arc::new(Mutex::new(ws_sink));
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+    ping_interval.tick().await; // skip immediate first tick
+
     loop {
         tokio::select! {
+            biased;
+
             _ = cancel.cancelled() => return Ok(()),
 
-            Some(pcm) = audio_rx.recv() => {
-                let msg = encode_audio_message(&pcm);
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
+            msg = ws_source.next() => {
+                let Some(msg) = msg else {
+                    return Err(anyhow::anyhow!("WebSocket connection closed"));
+                };
+                let msg = msg?;
+
+                let json_text = match msg {
+                    Message::Text(text) => Some(text),
+                    Message::Binary(bytes) => {
+                        String::from_utf8(bytes).ok()
+                    }
+                    Message::Close(_) => {
+                        return Err(anyhow::anyhow!("Server closed connection"));
+                    }
+                    _ => None,
+                };
+
+                if let Some(text) = json_text {
+                    match serde_json::from_str::<ServerMessage>(&text) {
+                        Ok(server_msg) => {
+                            if handle_server_message(server_msg, event_tx, state).await {
+                                return Err(anyhow::anyhow!("goAway: server requested reconnection"));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                text_preview = &text[..text.len().min(200)],
+                                "Failed to parse Gemini message, skipping"
+                            );
+                        }
+                    }
+                }
             }
 
             Some((id, name, response)) = tool_response_rx.recv() => {
@@ -327,24 +417,27 @@ async fn connect_and_stream_inner(
                 ws_sink.lock().await.send(Message::Text(json)).await?;
             }
 
-            msg = ws_source.next() => {
-                let Some(msg) = msg else {
-                    return Err(anyhow::anyhow!("WebSocket connection closed"));
-                };
-                let msg = msg?;
+            _ = ping_interval.tick() => {
+                ws_sink.lock().await.send(Message::Ping(vec![])).await?;
+            }
 
-                match msg {
-                    Message::Text(text) => {
-                        let server_msg: ServerMessage = serde_json::from_str(&text)?;
-                        if handle_server_message(server_msg, event_tx, state).await {
-                            return Err(anyhow::anyhow!("goAway: server requested reconnection"));
-                        }
-                    }
-                    Message::Close(_) => {
-                        return Err(anyhow::anyhow!("Server closed connection"));
-                    }
-                    _ => {}
-                }
+            Some(jpeg_b64) = video_rx.recv() => {
+                let msg = RealtimeVideoMessage {
+                    realtime_input: RealtimeVideoInput {
+                        video: Blob {
+                            mime_type: "image/jpeg".into(),
+                            data: jpeg_b64,
+                        },
+                    },
+                };
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
+            }
+
+            Some(pcm) = audio_rx.recv() => {
+                let msg = encode_audio_message(&pcm);
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
             }
         }
     }
@@ -358,8 +451,11 @@ async fn handle_server_message(
 ) -> bool {
     // Session resumption token update
     if let Some(update) = msg.session_resumption_update {
-        let mut handle = state.resumption_handle.lock().await;
-        *handle = Some(update.new_handle);
+        if let Some(new_handle) = update.new_handle {
+            let mut handle = state.resumption_handle.lock().await;
+            *handle = Some(new_handle.clone());
+            let _ = event_tx.send(GeminiEvent::SessionHandle { handle: new_handle });
+        }
         return false;
     }
 
@@ -460,7 +556,7 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
 }
 
 /// Convert f32 PCM [-1.0, 1.0] to base64-encoded 16-bit LE PCM bytes.
-fn encode_audio_message(pcm: &[f32]) -> RealtimeInputMessage {
+fn encode_audio_message(pcm: &[f32]) -> RealtimeAudioMessage {
     let mut bytes = Vec::with_capacity(pcm.len() * 2);
     for &sample in pcm {
         let clamped = sample.clamp(-1.0, 1.0);
@@ -468,12 +564,12 @@ fn encode_audio_message(pcm: &[f32]) -> RealtimeInputMessage {
         bytes.extend_from_slice(&i16_val.to_le_bytes());
     }
 
-    RealtimeInputMessage {
-        realtime_input: RealtimeInput {
-            media_chunks: vec![MediaChunk {
+    RealtimeAudioMessage {
+        realtime_input: RealtimeAudioInput {
+            audio: Blob {
                 mime_type: "audio/pcm;rate=16000".into(),
                 data: BASE64.encode(&bytes),
-            }],
+            },
         },
     }
 }
@@ -497,7 +593,7 @@ mod tests {
     fn encode_f32_to_pcm_base64() {
         let pcm = vec![0.0, 1.0, -1.0, 0.5];
         let msg = encode_audio_message(&pcm);
-        let data = &msg.realtime_input.media_chunks[0].data;
+        let data = &msg.realtime_input.audio.data;
 
         // Decode and verify
         let bytes = BASE64.decode(data).unwrap();
@@ -515,7 +611,7 @@ mod tests {
         let original = vec![0.0_f32, 0.5, -0.5, 0.25, -0.25];
         let msg = encode_audio_message(&original);
         let bytes = BASE64
-            .decode(&msg.realtime_input.media_chunks[0].data)
+            .decode(&msg.realtime_input.audio.data)
             .unwrap();
         let decoded = pcm_bytes_to_f32(&bytes);
 
@@ -529,11 +625,12 @@ mod tests {
     fn build_setup_message_includes_tools() {
         let config = GeminiConfig {
             api_key: "test".into(),
-            model: "models/gemini-live-2.5-flash-native-audio".into(),
+            model: "models/gemini-2.5-flash-native-audio-preview-12-2025".into(),
             voice: "Kore".into(),
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
             proxy_url: None,
+            proxy_auth_token: None,
         };
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
@@ -547,11 +644,12 @@ mod tests {
     fn build_setup_message_with_resumption() {
         let config = GeminiConfig {
             api_key: "test".into(),
-            model: "models/gemini-live-2.5-flash-native-audio".into(),
+            model: "models/gemini-2.5-flash-native-audio-preview-12-2025".into(),
             voice: "Kore".into(),
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
             proxy_url: None,
+            proxy_auth_token: None,
         };
         let msg = build_setup_message(&config, Some("tok_resume_123".into()));
         let json = serde_json::to_string(&msg).unwrap();
@@ -563,7 +661,7 @@ mod tests {
         let pcm = vec![2.0, -2.0]; // out of range
         let msg = encode_audio_message(&pcm);
         let bytes = BASE64
-            .decode(&msg.realtime_input.media_chunks[0].data)
+            .decode(&msg.realtime_input.audio.data)
             .unwrap();
         let samples = pcm_bytes_to_f32(&bytes);
         assert!((samples[0] - 1.0).abs() < 0.001); // clamped to 1.0
