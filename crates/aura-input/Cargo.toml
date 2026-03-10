@@ -8,3 +8,4 @@ anyhow.workspace = true
 tracing.workspace = true
 core-graphics = { version = "0.24", features = ["highsierra"] }
 core-graphics-types = "0.2"
+core-foundation = "0.10"
