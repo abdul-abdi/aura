@@ -279,10 +279,10 @@ async fn connect_and_stream(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> std::result::Result<bool, StreamOutcome> {
     let mut was_connected = false;
-    let connected_at = std::time::Instant::now();
+    let mut connected_at = std::time::Instant::now();
 
     let result =
-        connect_and_stream_inner(state, channels, event_tx, cancel, &mut was_connected).await;
+        connect_and_stream_inner(state, channels, event_tx, cancel, &mut was_connected, &mut connected_at).await;
 
     match result {
         Ok(go_away) => Ok(go_away),
@@ -309,6 +309,7 @@ async fn connect_and_stream_inner(
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     was_connected: &mut bool,
+    connected_at: &mut std::time::Instant,
 ) -> Result<bool> {
     let url = state.config.ws_url();
     tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
@@ -362,6 +363,7 @@ async fn connect_and_stream_inner(
     }
 
     *was_connected = true;
+    *connected_at = std::time::Instant::now();
     let _ = event_tx.send(GeminiEvent::Connected);
     // Set after sending so the receiver sees true on first connect
     state
