@@ -29,7 +29,7 @@ use aura_voice::audio::AudioCapture;
 use aura_voice::playback::AudioPlayer;
 use tracing_subscriber::EnvFilter;
 
-const EVENT_BUS_CAPACITY: usize = 64;
+const EVENT_BUS_CAPACITY: usize = 256;
 const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
 #[derive(Parser)]
@@ -698,7 +698,8 @@ async fn run_processor(
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Processor lagged by {n} Gemini events");
+                        tracing::warn!(skipped = n, "Event bus receiver lagged — events were dropped");
+                        continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
