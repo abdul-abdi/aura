@@ -283,9 +283,13 @@ async fn connect_and_stream_inner(
     was_connected: &mut bool,
 ) -> Result<()> {
     let url = state.config.ws_url();
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .context("WebSocket connection failed")?;
+    let (ws_stream, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::connect_async(&url),
+    )
+    .await
+    .context("WebSocket connection timed out (10s)")?
+    .context("WebSocket connection failed")?;
 
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
@@ -337,9 +341,16 @@ async fn connect_and_stream_inner(
 
     let ws_sink = Arc::new(Mutex::new(ws_sink));
 
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
+    ping_interval.tick().await; // skip immediate first tick
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
+
+            _ = ping_interval.tick() => {
+                ws_sink.lock().await.send(Message::Ping(vec![])).await?;
+            }
 
             Some(pcm) = audio_rx.recv() => {
                 let msg = encode_audio_message(&pcm);
