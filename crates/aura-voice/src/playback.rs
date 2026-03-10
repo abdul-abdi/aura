@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
 use rodio::{OutputStream, Sink};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+
+/// Default output sample rate from Gemini audio responses.
+const DEFAULT_OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
 pub enum PlaybackCommand {
     /// Create a new Sink for streaming audio at the given sample rate.
@@ -9,8 +14,6 @@ pub enum PlaybackCommand {
     Append { samples: Vec<f32> },
     /// Stop playback and drop the current sink.
     Stop,
-    /// Query whether audio is currently playing.
-    IsPlaying(mpsc::Sender<bool>),
 }
 
 /// Pre-buffer for absorbing network jitter before starting playback.
@@ -26,21 +29,27 @@ struct PreBuffer {
 #[derive(Clone)]
 pub struct AudioPlayer {
     tx: mpsc::Sender<PlaybackCommand>,
+    playing: Arc<AtomicBool>,
 }
 
 impl AudioPlayer {
     /// Spawn a dedicated playback thread and return a handle.
     pub fn new() -> Result<Self> {
         let (tx, rx) = mpsc::channel::<PlaybackCommand>();
+        let (startup_tx, startup_rx) = std::sync::mpsc::channel::<Result<()>>();
+        let playing = Arc::new(AtomicBool::new(false));
+        let playing_flag = Arc::clone(&playing);
 
         std::thread::Builder::new()
             .name("aura-playback".into())
             .spawn(move || {
                 let Ok((stream, handle)) = OutputStream::try_default() else {
                     tracing::error!("Failed to open audio output device");
+                    let _ = startup_tx.send(Err(anyhow::anyhow!("Failed to open audio output device")));
                     return;
                 };
                 let _stream = stream; // keep alive
+                let _ = startup_tx.send(Ok(()));
 
                 // Current sink and its sample rate, kept together so Append
                 // knows the rate without the caller resending it each time.
@@ -55,6 +64,7 @@ impl AudioPlayer {
                             if let Some((sink, _)) = current.take() {
                                 sink.stop();
                             }
+                            playing_flag.store(false, Ordering::Release);
 
                             // Warn if we're dropping a partially filled pre-buffer
                             if let Some(ref existing) = pre_buffer {
@@ -91,6 +101,7 @@ impl AudioPlayer {
                                             );
                                             sink.append(source);
                                             current = Some((sink, buf.sample_rate));
+                                            playing_flag.store(true, Ordering::Release);
                                             tracing::debug!(
                                                 "Audio pre-buffer flushed, playback started"
                                             );
@@ -108,20 +119,20 @@ impl AudioPlayer {
                                 sink.append(source);
                             } else {
                                 // Auto-create a stream if none exists (e.g. after barge-in)
-                                let default_rate = 24_000;
                                 match Sink::try_new(&handle) {
                                     Ok(sink) => {
                                         tracing::debug!(
-                                            sample_rate = default_rate,
+                                            sample_rate = DEFAULT_OUTPUT_SAMPLE_RATE,
                                             "Auto-starting audio stream"
                                         );
                                         let source = rodio::buffer::SamplesBuffer::new(
                                             1,
-                                            default_rate,
+                                            DEFAULT_OUTPUT_SAMPLE_RATE,
                                             samples,
                                         );
                                         sink.append(source);
-                                        current = Some((sink, default_rate));
+                                        current = Some((sink, DEFAULT_OUTPUT_SAMPLE_RATE));
+                                        playing_flag.store(true, Ordering::Release);
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to create audio sink: {e}");
@@ -134,20 +145,18 @@ impl AudioPlayer {
                             if let Some((sink, _)) = current.take() {
                                 sink.stop();
                             }
-                        }
-                        PlaybackCommand::IsPlaying(reply) => {
-                            let playing = current
-                                .as_ref()
-                                .map(|(sink, _)| !sink.empty())
-                                .unwrap_or(false);
-                            let _ = reply.send(playing);
+                            playing_flag.store(false, Ordering::Release);
                         }
                     }
                 }
             })
             .context("Failed to spawn playback thread")?;
 
-        Ok(Self { tx })
+        // Wait for thread to confirm device opened
+        startup_rx.recv().context("Playback thread exited")?
+            .context("Audio output device unavailable")?;
+
+        Ok(Self { tx, playing })
     }
 
     /// Begin a new audio stream at the given sample rate.
@@ -174,14 +183,7 @@ impl AudioPlayer {
 
     /// Check if audio is currently playing.
     pub fn is_playing(&self) -> bool {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        if self.tx.send(PlaybackCommand::IsPlaying(reply_tx)).is_ok() {
-            reply_rx
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .unwrap_or(false)
-        } else {
-            false
-        }
+        self.playing.load(Ordering::Acquire)
     }
 }
 
@@ -258,10 +260,13 @@ mod tests {
         let result = player.append(sine_chunk(24_000, 100));
         assert!(result.is_ok(), "append should not error on channel send");
 
-        // Give the thread time to process (it should log a warning, not crash)
+        // Give the thread time to process
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // The player should still be functional
+        // Auto-created sink should be playing now
+        // Stop and verify it returns to not playing
+        player.stop();
+        std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!player.is_playing());
     }
 
@@ -331,7 +336,7 @@ mod tests {
         // Drop the receiver immediately
         drop(_rx);
 
-        let player = AudioPlayer { tx };
+        let player = AudioPlayer { tx, playing: Arc::new(AtomicBool::new(false)) };
 
         // stop() should not panic — it should log a warning via tracing
         player.stop();

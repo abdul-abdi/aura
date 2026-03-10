@@ -189,8 +189,8 @@ impl AudioCapture {
 
         let stream = match stream_result {
             Ok(s) => s,
-            Err(_) => {
-                tracing::warn!("Fixed buffer size not supported, falling back to default");
+            Err(e) => {
+                tracing::warn!("Fixed buffer size not supported ({e}), falling back to default");
                 let mut fallback_config = self.config.clone();
                 fallback_config.buffer_size = cpal::BufferSize::Default;
                 self.device
@@ -223,7 +223,7 @@ fn pick_capture_rate(supported: &[cpal::SupportedStreamConfigRange]) -> Result<u
         }
     }
 
-    // Fall back to the default config's rate
+    // Fall back to the default config's rate (capped at 48kHz)
     let first = supported.first().context("No supported audio configs")?;
-    Ok(first.min_sample_rate().0)
+    Ok(first.max_sample_rate().0.min(48_000))
 }
