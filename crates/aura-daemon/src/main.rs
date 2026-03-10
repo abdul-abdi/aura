@@ -84,7 +84,11 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum Command {
     /// Deploy aura-proxy to Google Cloud Run
-    Deploy,
+    Deploy {
+        /// Accept all defaults without prompting (for non-interactive use)
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -99,8 +103,8 @@ fn main() -> Result<()> {
         .init();
 
     // Handle subcommands
-    if let Some(Command::Deploy) = cli.command {
-        return deploy::run_deploy();
+    if let Some(Command::Deploy { yes }) = cli.command {
+        return deploy::run_deploy(yes);
     }
 
     // Validate GEMINI_API_KEY — prompt user if missing

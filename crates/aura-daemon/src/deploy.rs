@@ -2,7 +2,6 @@ use std::process::Command as ShellCommand;
 
 use anyhow::{Result, bail};
 use dialoguer::{Confirm, Input};
-use indicatif::{ProgressBar, ProgressStyle};
 
 /// Convert Cloud Run HTTPS URL to WebSocket URL.
 /// `https://service.run.app` -> `wss://service.run.app/ws`
@@ -151,6 +150,36 @@ fn set_secret(project: &str, name: &str, value: &str) -> Result<()> {
     }
 }
 
+/// Grant the default Compute Engine service account access to a secret.
+fn grant_secret_access(project: &str, secret_name: &str) -> Result<()> {
+    // Get the project number for the default compute service account
+    let output = ShellCommand::new("gcloud")
+        .args(["projects", "describe", project, "--format=value(projectNumber)"])
+        .stderr(std::process::Stdio::null())
+        .output()?;
+    let project_number = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if project_number.is_empty() {
+        bail!("Could not determine project number for {project}");
+    }
+    let sa = format!("{project_number}-compute@developer.gserviceaccount.com");
+
+    let _ = ShellCommand::new("gcloud")
+        .args([
+            "secrets",
+            "add-iam-policy-binding",
+            secret_name,
+            &format!("--member=serviceAccount:{sa}"),
+            "--role=roles/secretmanager.secretAccessor",
+            "--project",
+            project,
+            "--quiet",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
+}
+
 /// Get the workspace root directory.
 fn workspace_root() -> Result<std::path::PathBuf> {
     let daemon_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -166,14 +195,18 @@ fn deploy_cloud_run(project: &str, region: &str, auth_secret: Option<&str>) -> R
     let root = workspace_root()?;
     let source = root.to_string_lossy().to_string();
 
+    // Cloud Build expects a Dockerfile at the source root. Copy it temporarily.
+    let dockerfile_src = root.join("crates/aura-proxy/Dockerfile");
+    let dockerfile_dst = root.join("Dockerfile");
+    let needs_cleanup = !dockerfile_dst.exists();
+    std::fs::copy(&dockerfile_src, &dockerfile_dst)?;
+
     let mut args = vec![
         "run".to_string(),
         "deploy".into(),
         "aura-proxy".into(),
         "--source".into(),
         source,
-        "--dockerfile".into(),
-        "crates/aura-proxy/Dockerfile".into(),
         "--project".into(),
         project.to_string(),
         "--region".into(),
@@ -204,9 +237,14 @@ fn deploy_cloud_run(project: &str, region: &str, auth_secret: Option<&str>) -> R
     let status = ShellCommand::new("gcloud")
         .args(&args)
         .stderr(std::process::Stdio::inherit())
-        .status()?;
+        .status();
 
-    if !status.success() {
+    // Clean up the temporary Dockerfile regardless of deploy result
+    if needs_cleanup {
+        let _ = std::fs::remove_file(&dockerfile_dst);
+    }
+
+    if !status?.success() {
         bail!("Cloud Run deployment failed. Check the output above for details.");
     }
 
@@ -233,16 +271,6 @@ fn deploy_cloud_run(project: &str, region: &str, auth_secret: Option<&str>) -> R
         bail!("Deployment succeeded but could not retrieve service URL");
     }
     Ok(url)
-}
-
-fn make_spinner(msg: &str) -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_style(
-        ProgressStyle::with_template("  {spinner:.cyan} {msg}").unwrap(),
-    );
-    spinner.set_message(msg.to_string());
-    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-    spinner
 }
 
 fn read_existing_api_key() -> Option<String> {
@@ -272,7 +300,7 @@ fn print_success(service_url: &str, ws_url: &str, auth_token: &Option<String>) {
 
 // ── Main deploy flow ────────────────────────────────────────────────────────
 
-pub fn run_deploy() -> Result<()> {
+pub fn run_deploy(auto_yes: bool) -> Result<()> {
     println!();
     println!("  \x1b[1mAura Cloud Deploy\x1b[0m");
     println!("  ─────────────────");
@@ -303,11 +331,7 @@ pub fn run_deploy() -> Result<()> {
     let project = match get_gcloud_project() {
         Some(p) => {
             println!("  GCP Project: \x1b[1m{p}\x1b[0m (from gcloud config)");
-            if Confirm::new()
-                .with_prompt("  Use this project?")
-                .default(true)
-                .interact()?
-            {
+            if auto_yes || confirm_default_yes("  Use this project?")? {
                 p
             } else {
                 Input::<String>::new()
@@ -315,20 +339,21 @@ pub fn run_deploy() -> Result<()> {
                     .interact_text()?
             }
         }
-        None => Input::<String>::new()
-            .with_prompt("  Enter GCP project ID")
-            .interact_text()?,
+        None => {
+            if auto_yes {
+                bail!("No gcloud project set. Run `gcloud config set project PROJECT_ID` first.");
+            }
+            Input::<String>::new()
+                .with_prompt("  Enter GCP project ID")
+                .interact_text()?
+        }
     };
     println!();
 
     // 4. Region selection
     let default_region = get_gcloud_region().unwrap_or_else(|| "us-central1".to_string());
     println!("  Region: \x1b[1m{default_region}\x1b[0m");
-    let region = if Confirm::new()
-        .with_prompt("  Use this region?")
-        .default(true)
-        .interact()?
-    {
+    let region = if auto_yes || confirm_default_yes("  Use this region?")? {
         default_region
     } else {
         Input::<String>::new()
@@ -339,10 +364,8 @@ pub fn run_deploy() -> Result<()> {
     println!();
 
     // 5. Auth token
-    let auth_token = if Confirm::new()
-        .with_prompt("  Generate a random auth token for the proxy?")
-        .default(true)
-        .interact()?
+    let auth_token = if auto_yes
+        || confirm_default_yes("  Generate a random auth token for the proxy?")?
     {
         let token = generate_auth_token();
         println!(
@@ -357,7 +380,7 @@ pub fn run_deploy() -> Result<()> {
     println!();
 
     // 6. Enable APIs
-    let spinner = make_spinner("Enabling GCP APIs...");
+    println!("  Enabling GCP APIs...");
     let mut apis = vec![
         "run.googleapis.com",
         "cloudbuild.googleapis.com",
@@ -367,16 +390,17 @@ pub fn run_deploy() -> Result<()> {
         apis.push("secretmanager.googleapis.com");
     }
     for api in &apis {
-        spinner.set_message(format!("Enabling {api}..."));
+        println!("    Enabling {api}...");
         enable_api(&project, api)?;
     }
-    spinner.finish_with_message("Enabling GCP APIs... \x1b[32m✓\x1b[0m");
+    println!("  Enabling GCP APIs... \x1b[32m✓\x1b[0m");
 
     // 7. Store secret
     let secret_name = if let Some(ref token) = auth_token {
-        let spinner = make_spinner("Storing auth token in Secret Manager...");
+        println!("  Storing auth token in Secret Manager...");
         set_secret(&project, "aura-proxy-auth-token", token)?;
-        spinner.finish_with_message("Storing auth token in Secret Manager... \x1b[32m✓\x1b[0m");
+        grant_secret_access(&project, "aura-proxy-auth-token")?;
+        println!("  Storing auth token in Secret Manager... \x1b[32m✓\x1b[0m");
         Some("aura-proxy-auth-token")
     } else {
         None
@@ -399,13 +423,10 @@ pub fn run_deploy() -> Result<()> {
         let _ = std::fs::create_dir_all(&aura_dir);
         let config_path = aura_dir.join("config.toml");
 
-        if config_path.exists() {
+        if config_path.exists() && !auto_yes {
             let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
             if existing.contains("proxy_url")
-                && !Confirm::new()
-                    .with_prompt("  Config already has a proxy_url. Overwrite?")
-                    .default(true)
-                    .interact()?
+                && !confirm_default_yes("  Config already has a proxy_url. Overwrite?")?
             {
                 println!("  Skipped config write. Manually add:");
                 println!("    proxy_url = \"{ws_url}\"");
@@ -418,10 +439,18 @@ pub fn run_deploy() -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+            let _ =
+                std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
         }
     }
 
     print_success(&service_url, &ws_url, &auth_token);
     Ok(())
+}
+
+fn confirm_default_yes(prompt: &str) -> Result<bool> {
+    Ok(Confirm::new()
+        .with_prompt(prompt)
+        .default(true)
+        .interact()?)
 }

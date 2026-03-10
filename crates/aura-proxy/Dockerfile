@@ -5,7 +5,7 @@
 # the dependency layer is cached independently of application source changes.
 # Only aura-proxy and its deps are actually compiled (cargo -p flag).
 # ════════════════════════════════════════════════════════════════════════════════
-FROM rust:1.82-slim AS builder
+FROM rust:1.85-slim AS builder
 
 # tokio-tungstenite uses native-tls which requires OpenSSL headers at compile time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,10 +49,13 @@ RUN cargo build --release -p aura-proxy
 
 # ── Copy real proxy source and do the final build ────────────────────────────
 # Remove stub artifacts so Cargo sees the sources as changed.
-RUN rm -f \
+RUN rm -rf \
     target/release/aura-proxy \
     target/release/deps/aura_proxy-* \
-    target/release/deps/aura-proxy-*
+    target/release/deps/aura-proxy-* \
+    target/release/.fingerprint/aura-proxy-* \
+    target/release/.fingerprint/aura_proxy-* \
+    target/release/incremental/aura_proxy-*
 
 COPY crates/aura-proxy/src crates/aura-proxy/src
 

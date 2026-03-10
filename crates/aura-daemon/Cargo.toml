@@ -23,7 +23,6 @@ dirs = "6"
 which = "7"
 chrono = { version = "0.4", features = ["serde"] }
 dialoguer = "0.12"
-indicatif = "0.17"
 toml = "0.8"
 
 [dev-dependencies]
