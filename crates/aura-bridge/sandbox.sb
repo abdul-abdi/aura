@@ -1,0 +1,16 @@
+(version 1)
+(deny default)
+;; Allow forking and executing child processes
+(allow process-fork)
+(allow process-exec*)
+;; Allow read access to the whole filesystem (scripts need to read app state)
+(allow file-read*)
+;; Allow writes only to /tmp (scripts must not touch arbitrary paths)
+(allow file-write* (subpath "/tmp"))
+;; Allow Mach IPC (required for AppleScript automation / Apple Events)
+(allow mach-lookup)
+(allow sysctl-read)
+(allow system-socket)
+(allow iokit-open)
+;; Block all network access from the sandboxed script process
+(deny network*)
