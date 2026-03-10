@@ -46,19 +46,11 @@ pub fn check_auth(token: Option<&str>, expected: Option<&str>) -> bool {
 }
 
 /// Hash token to fixed-size output for constant-time comparison.
-/// Uses multiple rounds of DefaultHasher to fill 32 bytes.
 fn hash_token(input: &[u8]) -> [u8; 32] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut result = [0u8; 32];
-    for i in 0..4u64 {
-        let mut hasher = DefaultHasher::new();
-        i.hash(&mut hasher);
-        input.hash(&mut hasher);
-        let h = hasher.finish().to_le_bytes();
-        result[(i as usize) * 8..(i as usize + 1) * 8].copy_from_slice(&h);
-    }
-    result
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    hasher.finalize().into()
 }
 
 async fn ws_handler_with_sem(
