@@ -6,6 +6,11 @@ import SwiftUI
 @Observable
 @MainActor
 final class AppState {
+    // MARK: - Onboarding
+
+    var showOnboarding: Bool = true
+    var permissionChecker = PermissionChecker()
+
     // MARK: - Connection state
 
     enum ConnectionState {
@@ -34,6 +39,19 @@ final class AppState {
     private var connection: DaemonConnection?
 
     private static let maxMessages = 200
+
+    // MARK: - Init
+
+    init() {
+        showOnboarding = !UserDefaults.standard.bool(forKey: "aura.onboardingComplete")
+    }
+
+    // MARK: - Onboarding
+
+    func completeOnboarding() {
+        showOnboarding = false
+        UserDefaults.standard.set(true, forKey: "aura.onboardingComplete")
+    }
 
     // MARK: - Setup
 
