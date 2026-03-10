@@ -335,8 +335,9 @@ async fn connect_and_stream_inner(
     }
 
     *was_connected = true;
-    state.is_first_connect.store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = event_tx.send(GeminiEvent::Connected);
+    // Set after sending so the receiver sees true on first connect
+    state.is_first_connect.store(false, std::sync::atomic::Ordering::Relaxed);
     tracing::info!("Gemini Live session connected");
 
     let ws_sink = Arc::new(Mutex::new(ws_sink));
