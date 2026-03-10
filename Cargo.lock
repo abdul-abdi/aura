@@ -226,7 +226,6 @@ name = "aura-gemini"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "aura-bridge",
  "aura-gemini",
  "base64",
  "futures-util",

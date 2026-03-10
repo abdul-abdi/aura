@@ -20,4 +20,3 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 base64 = "0.22"
 futures-util = "0.3"
 tokio-util = "0.7"
-aura-bridge = { path = "../aura-bridge" }

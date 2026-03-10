@@ -7,14 +7,12 @@ use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use winit::event_loop::EventLoopProxy;
 
-use aura_bridge::actions::ActionExecutor;
 use aura_daemon::bus::EventBus;
 use aura_daemon::daemon::Daemon;
 use aura_daemon::event::{AuraEvent, OverlayContent};
 use aura_daemon::setup::AuraSetup;
 use aura_gemini::config::GeminiConfig;
 use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
-use aura_gemini::tools::function_call_to_action;
 use aura_overlay::renderer::OverlayState;
 use aura_overlay::window::{OverlayMessage, OverlayWindow, create_event_loop};
 use aura_voice::audio::AudioCapture;
@@ -222,10 +220,6 @@ async fn run_processor(
         }
     };
 
-    // macOS action executor
-    #[cfg(target_os = "macos")]
-    let executor = aura_bridge::macos::MacOSExecutor::new();
-
     tracing::info!("Gemini event processor running");
 
     loop {
@@ -244,63 +238,12 @@ async fn run_processor(
                             tracing::error!("Audio playback failed: {e}");
                         }
                     }
-                    Ok(GeminiEvent::ToolCall { id, name, args }) => {
-                        tracing::info!(name = %name, "Tool call received");
-
-                        let response = if let Some(action) = function_call_to_action(&name, &args) {
-                            #[cfg(target_os = "macos")]
-                            {
-                                let action_desc = format!("{action:?}");
-                                let result = executor.execute(&action).await;
-                                if result.success {
-                                    let _ = bus.send(AuraEvent::ActionExecuted {
-                                        description: result.description.clone(),
-                                    });
-                                } else {
-                                    let _ = bus.send(AuraEvent::ActionFailed {
-                                        description: action_desc,
-                                        error: result.description.clone(),
-                                    });
-                                }
-                                serde_json::json!({
-                                    "success": result.success,
-                                    "description": result.description,
-                                    "data": result.data,
-                                })
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                let _ = bus.send(AuraEvent::ActionFailed {
-                                    description: format!("{action:?}"),
-                                    error: "Platform not supported".into(),
-                                });
-                                serde_json::json!({
-                                    "success": false,
-                                    "error": "Platform not supported",
-                                })
-                            }
-                        } else if name == "summarize_screen" {
-                            // TODO: implement screen capture + send to Gemini
-                            let _ = bus.send(AuraEvent::ActionFailed {
-                                description: "Summarize screen".into(),
-                                error: "Screen summarization not yet implemented".into(),
-                            });
-                            serde_json::json!({
-                                "success": false,
-                                "error": "Screen summarization not yet implemented",
-                            })
-                        } else {
-                            let error = format!("Unknown function: {name}");
-                            let _ = bus.send(AuraEvent::ActionFailed {
-                                description: format!("Tool call: {name}"),
-                                error: error.clone(),
-                            });
-                            serde_json::json!({
-                                "success": false,
-                                "error": error,
-                            })
-                        };
-
+                    Ok(GeminiEvent::ToolCall { id, name, args: _ }) => {
+                        tracing::info!(name = %name, "Tool call received (v2 migration pending)");
+                        let response = serde_json::json!({
+                            "success": false,
+                            "error": "Tool handling is being migrated to v2",
+                        });
                         if let Err(e) = session.send_tool_response(id, name, response).await {
                             tracing::error!("Failed to send tool response: {e}");
                         }

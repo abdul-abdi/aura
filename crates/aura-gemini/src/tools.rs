@@ -1,167 +1,100 @@
-//! Gemini tool declarations mapping to macOS actions.
+//! Gemini tool declarations for dynamic macOS automation.
 
 use crate::protocol::{FunctionDeclaration, Tool};
-use aura_bridge::actions::Action;
 use serde_json::json;
 
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
-/// Returns a `Vec<Tool>` with a single `Tool` containing five
-/// `FunctionDeclaration`s that map to macOS desktop actions.
+/// Returns a `Vec<Tool>` with a single `Tool` containing two
+/// `FunctionDeclaration`s: `run_applescript` and `get_screen_context`.
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![Tool {
         function_declarations: vec![
             FunctionDeclaration {
-                name: "open_app".into(),
-                description: "Open an application by name on macOS".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "app_name": {
-                            "type": "string",
-                            "description": "Name of the application to open (e.g. Safari, Terminal, Finder)"
-                        }
-                    },
-                    "required": ["app_name"]
-                }),
-            },
-            FunctionDeclaration {
-                name: "search_files".into(),
-                description: "Search for files on the user's computer using Spotlight".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query to find files"
-                        }
-                    },
-                    "required": ["query"]
-                }),
-            },
-            FunctionDeclaration {
-                name: "tile_windows".into(),
-                description: "Arrange windows in a tiling layout on screen".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "layout": {
-                            "type": "string",
-                            "enum": ["left-right", "grid", "stack"],
-                            "description": "The tiling layout to apply"
-                        }
-                    },
-                    "required": ["layout"]
-                }),
-            },
-            FunctionDeclaration {
-                name: "launch_url".into(),
-                description: "Open a URL in the default web browser".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "The URL to open (must start with http:// or https://)"
-                        }
-                    },
-                    "required": ["url"]
-                }),
-            },
-            FunctionDeclaration {
-                name: "summarize_screen".into(),
-                description: "Capture and describe what is currently visible on the user's screen"
+                name: "run_applescript".into(),
+                description: "Execute AppleScript or JXA code to control any macOS application \
+                    or system feature. You can open apps, manage windows, interact with UI \
+                    elements, automate workflows, manipulate files, control system settings, \
+                    send keystrokes, and more. Write the script based on what the user needs. \
+                    Prefer simple scripts — chain multiple calls over one complex script."
                     .into(),
                 parameters: json!({
                     "type": "object",
-                    "properties": {},
-                    "required": []
+                    "properties": {
+                        "script": {
+                            "type": "string",
+                            "description": "The AppleScript or JXA code to execute"
+                        },
+                        "language": {
+                            "type": "string",
+                            "enum": ["applescript", "javascript"],
+                            "description": "Script language. Default: applescript"
+                        },
+                        "timeout_secs": {
+                            "type": "integer",
+                            "description": "Max execution time in seconds. Default: 30"
+                        }
+                    },
+                    "required": ["script"]
+                }),
+            },
+            FunctionDeclaration {
+                name: "get_screen_context".into(),
+                description: "Get the user's current screen context: frontmost application, \
+                    window title, list of open windows, and clipboard contents. Always call \
+                    this before taking action so you understand what the user is doing."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
                 }),
             },
         ],
     }]
 }
 
-/// Map a Gemini function call name and arguments to an [`Action`].
-///
-/// Returns `None` for `summarize_screen` (handled specially by the caller)
-/// and for any unknown function name or missing required arguments.
-pub fn function_call_to_action(name: &str, args: &serde_json::Value) -> Option<Action> {
-    match name {
-        "open_app" => Some(Action::OpenApp {
-            name: args["app_name"].as_str()?.to_string(),
-        }),
-        "search_files" => Some(Action::SearchFiles {
-            query: args["query"].as_str()?.to_string(),
-        }),
-        "tile_windows" => Some(Action::TileWindows {
-            layout: args["layout"].as_str()?.to_string(),
-        }),
-        "launch_url" => Some(Action::LaunchUrl {
-            url: args["url"].as_str()?.to_string(),
-        }),
-        // summarize_screen is handled specially by the caller (requires screen capture)
-        "summarize_screen" => None,
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn tool_declarations_are_valid_json() {
+    fn tool_declarations_returns_two_functions() {
         let tools = build_tool_declarations();
-        let value = serde_json::to_value(&tools).unwrap();
-
-        let names: Vec<&str> = value[0]["functionDeclarations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|fd| fd["name"].as_str().unwrap())
-            .collect();
-
+        assert_eq!(tools.len(), 1, "Should be one Tool object");
         assert_eq!(
-            names,
-            vec![
-                "open_app",
-                "search_files",
-                "tile_windows",
-                "launch_url",
-                "summarize_screen"
-            ]
+            tools[0].function_declarations.len(),
+            2,
+            "Should have 2 function declarations"
         );
     }
 
     #[test]
-    fn map_open_app() {
-        let action = function_call_to_action("open_app", &json!({"app_name": "Safari"}));
-        assert!(matches!(action, Some(Action::OpenApp { name }) if name == "Safari"));
+    fn tool_names_are_correct() {
+        let tools = build_tool_declarations();
+        let names: Vec<&str> = tools[0]
+            .function_declarations
+            .iter()
+            .map(|fd| fd.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["run_applescript", "get_screen_context"]);
     }
 
     #[test]
-    fn map_search_files() {
-        let action = function_call_to_action("search_files", &json!({"query": "test"}));
-        assert!(matches!(action, Some(Action::SearchFiles { query }) if query == "test"));
+    fn tool_declarations_serialize_to_valid_json() {
+        let tools = build_tool_declarations();
+        let value = serde_json::to_value(&tools).unwrap();
+        let decls = value[0]["functionDeclarations"].as_array().unwrap();
+        assert_eq!(decls.len(), 2);
+        assert_eq!(decls[0]["name"], "run_applescript");
+        assert_eq!(decls[1]["name"], "get_screen_context");
     }
 
     #[test]
-    fn map_launch_url() {
-        let action = function_call_to_action("launch_url", &json!({"url": "https://example.com"}));
-        assert!(matches!(action, Some(Action::LaunchUrl { url }) if url == "https://example.com"));
-    }
-
-    #[test]
-    fn map_unknown_function() {
-        let action = function_call_to_action("unknown", &json!({}));
-        assert!(action.is_none());
-    }
-
-    #[test]
-    fn map_missing_args() {
-        let action = function_call_to_action("open_app", &json!({}));
-        assert!(action.is_none());
+    fn run_applescript_has_required_script_param() {
+        let tools = build_tool_declarations();
+        let params = &tools[0].function_declarations[0].parameters;
+        assert!(params["properties"]["script"].is_object());
+        let required = params["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "script"));
     }
 }

@@ -504,8 +504,8 @@ mod tests {
         };
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("open_app"));
-        assert!(json.contains("search_files"));
+        assert!(json.contains("run_applescript"));
+        assert!(json.contains("get_screen_context"));
         assert!(json.contains("slidingWindow"));
         assert!(json.contains("sessionResumption"));
     }
