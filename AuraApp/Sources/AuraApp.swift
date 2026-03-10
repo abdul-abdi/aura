@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Sparkle
 import SwiftUI
 
 @main
@@ -23,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var connection: DaemonConnection?
     private var daemonProcess: Process?
     private var hotKeyRef: UnsafeMutableRawPointer?
+    private let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
+    )
 
     // MARK: - Lifecycle
 
@@ -116,6 +120,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         reconnectItem.target = self
         menu.addItem(reconnectItem)
+
+        let updateItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updateItem.target = updaterController
+        menu.addItem(updateItem)
 
         menu.addItem(.separator())
 

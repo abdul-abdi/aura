@@ -107,6 +107,10 @@ cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
     <string>Aura uses AppleScript to automate macOS tasks on your behalf.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Aura. All rights reserved.</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/user/aura/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string></string>
 </dict>
 </plist>
 PLIST
