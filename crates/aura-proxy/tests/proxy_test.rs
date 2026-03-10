@@ -47,6 +47,12 @@ fn test_check_auth_length_mismatch() {
     assert!(!aura_proxy::check_auth(Some("short"), Some("longer_token")));
 }
 
+#[test]
+fn test_check_auth_different_lengths_still_compared() {
+    assert!(!aura_proxy::check_auth(Some("short"), Some("muchlongertoken")));
+    assert!(!aura_proxy::check_auth(Some("muchlongertoken"), Some("short")));
+}
+
 // ── Integration tests ────────────────────────────────────────────────
 // These tests intentionally hold ENV_MUTEX across await points to serialize
 // env var mutations. The lock is never contended across threads in practice

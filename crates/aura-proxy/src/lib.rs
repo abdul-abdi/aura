@@ -11,8 +11,6 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-use subtle::ConstantTimeEq;
-
 const GEMINI_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/\
     google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
@@ -36,14 +34,31 @@ pub fn check_auth(token: Option<&str>, expected: Option<&str>) -> bool {
         None => true,
         Some(expected) => match token {
             Some(token) => {
-                let token_bytes = token.as_bytes();
-                let expected_bytes = expected.as_bytes();
-                token_bytes.len() == expected_bytes.len()
-                    && token_bytes.ct_eq(expected_bytes).unwrap_u8() == 1
+                use subtle::ConstantTimeEq;
+                // Hash both to fixed length to avoid length oracle
+                let token_hash = hash_token(token.as_bytes());
+                let expected_hash = hash_token(expected.as_bytes());
+                token_hash.ct_eq(&expected_hash).unwrap_u8() == 1
             }
             None => false,
         },
     }
+}
+
+/// Hash token to fixed-size output for constant-time comparison.
+/// Uses multiple rounds of DefaultHasher to fill 32 bytes.
+fn hash_token(input: &[u8]) -> [u8; 32] {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut result = [0u8; 32];
+    for i in 0..4u64 {
+        let mut hasher = DefaultHasher::new();
+        i.hash(&mut hasher);
+        input.hash(&mut hasher);
+        let h = hasher.finish().to_le_bytes();
+        result[(i as usize) * 8..(i as usize + 1) * 8].copy_from_slice(&h);
+    }
+    result
 }
 
 async fn ws_handler_with_sem(
