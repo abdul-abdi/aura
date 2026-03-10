@@ -28,11 +28,11 @@ struct TextInputView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.black.opacity(0.15))
+                            .fill(Color.white.opacity(0.08))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
+                            .strokeBorder(Color.white.opacity(0.2), lineWidth: 1)
                     )
                     .focused($isFocused)
                     .onKeyPress(.return, phases: .down) { keyPress in
@@ -67,7 +67,8 @@ struct TextInputView: View {
                 .padding(.bottom, 4)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 12)
         }
         .onAppear {
             isFocused = true

@@ -176,14 +176,14 @@ private struct PermissionRow: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.black.opacity(0.1))
+                .fill(Color.white.opacity(0.06))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(
                     granted
                         ? auraGreen.opacity(0.4)
-                        : Color.white.opacity(0.12),
+                        : Color.white.opacity(0.15),
                     lineWidth: 1
                 )
         )

@@ -277,7 +277,21 @@ async fn connection_loop(
                     let _ = event_tx.send(GeminiEvent::Error {
                         message: format!("Max reconnection attempts exceeded: {}", outcome.error),
                     });
-                    break;
+                    let _ = event_tx.send(GeminiEvent::Disconnected);
+
+                    // Park here waiting for a user-initiated reconnect instead of
+                    // breaking.  Breaking would drop reconnect_rx, making all future
+                    // IPC reconnect signals silently fail.
+                    tracing::info!("Waiting for user-initiated reconnect signal");
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = reconnect_rx.recv() => {
+                            tracing::info!("User-initiated reconnect after max retries");
+                            let _ = event_tx.send(GeminiEvent::Reconnecting { attempt: 0 });
+                            attempt = 0;
+                            continue;
+                        }
+                    }
                 }
 
                 tracing::warn!(attempt, error = %outcome.error, "Connection lost, reconnecting");

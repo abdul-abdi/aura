@@ -149,14 +149,14 @@ struct WelcomeView: View {
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.black.opacity(0.15))
+                    .fill(Color.white.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
                         isKeyValid
                             ? auraGreen.opacity(0.5)
-                            : Color.white.opacity(0.15),
+                            : Color.white.opacity(0.2),
                         lineWidth: 1
                     )
             )
