@@ -150,6 +150,20 @@ pub struct MediaChunk {
     pub data: String,
 }
 
+/// Text content sent to the server during a session.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientContentMessage {
+    pub client_content: ClientContent,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientContent {
+    pub turns: Vec<Content>,
+    pub turn_complete: bool,
+}
+
 /// Tool response sent back to the server after a function call.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -405,6 +419,29 @@ mod tests {
         let msg: ServerMessage = serde_json::from_str(&raw.to_string()).unwrap();
         let update = msg.session_resumption_update.unwrap();
         assert_eq!(update.new_handle, "abc-resume-handle-xyz");
+    }
+
+    #[test]
+    fn serialize_client_content_message() {
+        let msg = ClientContentMessage {
+            client_content: ClientContent {
+                turns: vec![Content {
+                    role: Some("user".into()),
+                    parts: vec![Part {
+                        text: Some("Hello, world!".into()),
+                        inline_data: None,
+                    }],
+                }],
+                turn_complete: true,
+            },
+        };
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["clientContent"]["turns"][0]["role"], "user");
+        assert_eq!(
+            value["clientContent"]["turns"][0]["parts"][0]["text"],
+            "Hello, world!"
+        );
+        assert_eq!(value["clientContent"]["turnComplete"], true);
     }
 
     #[test]

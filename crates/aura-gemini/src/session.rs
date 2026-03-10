@@ -57,6 +57,7 @@ pub enum GeminiEvent {
 pub struct GeminiLiveSession {
     audio_tx: mpsc::Sender<Vec<f32>>,
     tool_response_tx: mpsc::Sender<(String, String, serde_json::Value)>,
+    text_tx: mpsc::Sender<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
 }
@@ -68,6 +69,7 @@ impl GeminiLiveSession {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
+        let (text_tx, text_rx) = mpsc::channel::<String>(16);
         let (event_tx, _) = broadcast::channel::<GeminiEvent>(128);
         let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -81,12 +83,13 @@ impl GeminiLiveSession {
         let tx = event_tx.clone();
         let token = cancel.clone();
         tokio::spawn(async move {
-            connection_loop(state, audio_rx, tool_response_rx, tx, token).await;
+            connection_loop(state, audio_rx, tool_response_rx, text_rx, tx, token).await;
         });
 
         Ok(Self {
             audio_tx,
             tool_response_tx,
+            text_tx,
             event_tx,
             cancel,
         })
@@ -96,6 +99,14 @@ impl GeminiLiveSession {
     pub async fn send_audio(&self, pcm_16khz: &[f32]) -> Result<()> {
         self.audio_tx
             .send(pcm_16khz.to_vec())
+            .await
+            .map_err(|_| anyhow::anyhow!("Session closed"))
+    }
+
+    /// Send a text message to Gemini.
+    pub async fn send_text(&self, text: &str) -> Result<()> {
+        self.text_tx
+            .send(text.to_string())
             .await
             .map_err(|_| anyhow::anyhow!("Session closed"))
     }
@@ -148,6 +159,7 @@ async fn connection_loop(
     state: SessionState,
     mut audio_rx: mpsc::Receiver<Vec<f32>>,
     mut tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
+    mut text_rx: mpsc::Receiver<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -162,6 +174,7 @@ async fn connection_loop(
             &state,
             &mut audio_rx,
             &mut tool_response_rx,
+            &mut text_rx,
             &event_tx,
             &cancel,
         )
@@ -207,6 +220,7 @@ async fn connect_and_stream(
     state: &SessionState,
     audio_rx: &mut mpsc::Receiver<Vec<f32>>,
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
+    text_rx: &mut mpsc::Receiver<String>,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> std::result::Result<(), StreamOutcome> {
@@ -216,6 +230,7 @@ async fn connect_and_stream(
         state,
         audio_rx,
         tool_response_rx,
+        text_rx,
         event_tx,
         cancel,
         &mut was_connected,
@@ -235,11 +250,12 @@ async fn connect_and_stream_inner(
     state: &SessionState,
     audio_rx: &mut mpsc::Receiver<Vec<f32>>,
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
+    text_rx: &mut mpsc::Receiver<String>,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     was_connected: &mut bool,
 ) -> Result<()> {
-    let url = state.config.websocket_url();
+    let url = state.config.ws_url();
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
         .await
         .context("WebSocket connection failed")?;
@@ -288,6 +304,23 @@ async fn connect_and_stream_inner(
                 let msg = ToolResponseMessage {
                     tool_response: ToolResponse {
                         function_responses: vec![FunctionResponse { id, name, response }],
+                    },
+                };
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
+            }
+
+            Some(text) = text_rx.recv() => {
+                let msg = ClientContentMessage {
+                    client_content: ClientContent {
+                        turns: vec![Content {
+                            role: Some("user".into()),
+                            parts: vec![Part {
+                                text: Some(text),
+                                inline_data: None,
+                            }],
+                        }],
+                        turn_complete: true,
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
@@ -500,7 +533,7 @@ mod tests {
             voice: "Kore".into(),
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
-            ws_url_override: None,
+            proxy_url: None,
         };
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
@@ -518,7 +551,7 @@ mod tests {
             voice: "Kore".into(),
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
-            ws_url_override: None,
+            proxy_url: None,
         };
         let msg = build_setup_message(&config, Some("tok_resume_123".into()));
         let json = serde_json::to_string(&msg).unwrap();

@@ -1,0 +1,15 @@
+[package]
+name = "aura-menubar"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+cocoa = "0.26"
+objc = "0.2"
+core-graphics = "0.24"
+core-foundation = "0.10"

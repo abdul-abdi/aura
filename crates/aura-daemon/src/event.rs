@@ -2,36 +2,32 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuraEvent {
-    // Voice pipeline
+    // Voice
     WakeWordDetected,
     ListeningStarted,
-    ListeningStopped,
-    VoiceCommand { text: String },
-
-    // Actions
-    ActionExecuted { description: String },
-    ActionFailed { description: String, error: String },
-
-    // Conversation
-    AssistantSpeaking { text: String },
-    BargeIn,
 
     // Gemini session
     GeminiConnected,
-    GeminiReconnecting { attempt: u32 },
+    GeminiReconnecting {
+        attempt: u32,
+    },
 
-    // Overlay
-    ShowOverlay { content: OverlayContent },
-    HideOverlay,
+    // Conversation
+    AssistantSpeaking {
+        text: String,
+    },
+    UserTranscription {
+        text: String,
+    },
+    BargeIn,
+
+    // Tool execution
+    ToolExecuted {
+        name: String,
+        success: bool,
+        output: String,
+    },
 
     // System
     Shutdown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OverlayContent {
-    Listening,
-    Processing,
-    Response { text: String },
-    Error { message: String },
 }

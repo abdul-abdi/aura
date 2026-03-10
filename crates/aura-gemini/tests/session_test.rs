@@ -21,7 +21,7 @@ fn test_config(url: String) -> GeminiConfig {
         voice: "Kore".into(),
         system_prompt: "Test prompt".into(),
         temperature: 0.7,
-        ws_url_override: Some(url),
+        proxy_url: Some(format!("{url}/")),
     }
 }
 

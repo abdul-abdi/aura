@@ -5,10 +5,11 @@ edition.workspace = true
 
 [dependencies]
 aura-voice = { path = "../aura-voice" }
-aura-overlay = { path = "../aura-overlay" }
+aura-menubar = { path = "../aura-menubar" }
 aura-screen = { path = "../aura-screen" }
 aura-bridge = { path = "../aura-bridge" }
 aura-gemini = { path = "../aura-gemini" }
+aura-memory = { path = "../aura-memory" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -17,9 +18,9 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 tokio-util = "0.7"
-winit = { version = "0.30", features = ["rwh_06"] }
 dirs = "6"
 which = "7"
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"

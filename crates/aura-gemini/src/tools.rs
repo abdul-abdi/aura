@@ -5,8 +5,8 @@ use serde_json::json;
 
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
-/// Returns a `Vec<Tool>` with a single `Tool` containing two
-/// `FunctionDeclaration`s: `run_applescript` and `get_screen_context`.
+/// Returns a `Vec<Tool>` with a single `Tool` containing three
+/// `FunctionDeclaration`s: `run_applescript`, `get_screen_context`, and `shutdown_aura`.
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![Tool {
         function_declarations: vec![
@@ -49,6 +49,17 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     "properties": {}
                 }),
             },
+            FunctionDeclaration {
+                name: "shutdown_aura".into(),
+                description: "Shut down and quit Aura completely. Call this when the user \
+                    says they want to exit, quit, shut down, close, or stop Aura. Say goodbye \
+                    before calling this tool."
+                    .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
         ],
     }]
 }
@@ -58,13 +69,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_declarations_returns_two_functions() {
+    fn tool_declarations_returns_three_functions() {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 1, "Should be one Tool object");
         assert_eq!(
             tools[0].function_declarations.len(),
-            2,
-            "Should have 2 function declarations"
+            3,
+            "Should have 3 function declarations"
         );
     }
 
@@ -76,7 +87,7 @@ mod tests {
             .iter()
             .map(|fd| fd.name.as_str())
             .collect();
-        assert_eq!(names, vec!["run_applescript", "get_screen_context"]);
+        assert_eq!(names, vec!["run_applescript", "get_screen_context", "shutdown_aura"]);
     }
 
     #[test]
@@ -84,9 +95,10 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 2);
+        assert_eq!(decls.len(), 3);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
+        assert_eq!(decls[2]["name"], "shutdown_aura");
     }
 
     #[test]

@@ -18,13 +18,15 @@ async fn test_event_bus_multiple_subscribers() {
     let mut rx1 = bus.subscribe();
     let mut rx2 = bus.subscribe();
 
-    bus.send(AuraEvent::VoiceCommand {
-        text: "open safari".into(),
+    bus.send(AuraEvent::ToolExecuted {
+        name: "run_applescript".into(),
+        success: true,
+        output: "done".into(),
     })
     .unwrap();
 
     let e1 = rx1.recv().await.unwrap();
     let e2 = rx2.recv().await.unwrap();
-    assert!(matches!(e1, AuraEvent::VoiceCommand { .. }));
-    assert!(matches!(e2, AuraEvent::VoiceCommand { .. }));
+    assert!(matches!(e1, AuraEvent::ToolExecuted { .. }));
+    assert!(matches!(e2, AuraEvent::ToolExecuted { .. }));
 }

@@ -3,7 +3,6 @@ use aura_daemon::event::AuraEvent;
 
 #[tokio::test]
 async fn test_e2e_gemini_event_flow() {
-    // Simulate the Gemini-based event flow through the bus
     let bus = EventBus::new(64);
     let mut rx = bus.subscribe();
 
@@ -16,9 +15,11 @@ async fn test_e2e_gemini_event_flow() {
     })
     .unwrap();
 
-    // Action executed (from tool call)
-    bus.send(AuraEvent::ActionExecuted {
-        description: "Opened Safari".into(),
+    // Tool executed (from tool call)
+    bus.send(AuraEvent::ToolExecuted {
+        name: "run_applescript".into(),
+        success: true,
+        output: "Opened Safari".into(),
     })
     .unwrap();
 
@@ -29,7 +30,7 @@ async fn test_e2e_gemini_event_flow() {
     assert!(matches!(e2, AuraEvent::AssistantSpeaking { .. }));
 
     let e3 = rx.recv().await.unwrap();
-    assert!(matches!(e3, AuraEvent::ActionExecuted { .. }));
+    assert!(matches!(e3, AuraEvent::ToolExecuted { .. }));
 }
 
 #[tokio::test]
@@ -68,16 +69,20 @@ async fn test_e2e_gemini_reconnecting_flow() {
 }
 
 #[tokio::test]
-async fn test_e2e_action_failed_flow() {
+async fn test_e2e_tool_failure_flow() {
     let bus = EventBus::new(64);
     let mut rx = bus.subscribe();
 
-    bus.send(AuraEvent::ActionFailed {
-        description: "Gemini session".into(),
-        error: "WebSocket closed unexpectedly".into(),
+    bus.send(AuraEvent::ToolExecuted {
+        name: "run_applescript".into(),
+        success: false,
+        output: "Script execution failed".into(),
     })
     .unwrap();
 
     let e1 = rx.recv().await.unwrap();
-    assert!(matches!(e1, AuraEvent::ActionFailed { .. }));
+    assert!(matches!(
+        e1,
+        AuraEvent::ToolExecuted { success: false, .. }
+    ));
 }

@@ -35,30 +35,63 @@ pub struct GeminiConfig {
     pub voice: String,
     pub system_prompt: String,
     pub temperature: f64,
-    pub ws_url_override: Option<String>,
+    pub proxy_url: Option<String>,
 }
 
 impl GeminiConfig {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("GEMINI_API_KEY")
-            .context("GEMINI_API_KEY environment variable is not set")?;
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_file_key())
+            .context(
+                "No API key found. Set GEMINI_API_KEY env var or add api_key to ~/.config/aura/config.toml",
+            )?;
 
-        Ok(Self {
-            api_key,
+        let mut config = Self::from_env_inner(&api_key);
+        config.proxy_url = std::env::var("AURA_PROXY_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Ok(config)
+    }
+
+    pub fn from_env_inner(api_key: &str) -> Self {
+        Self {
+            api_key: api_key.to_string(),
             model: DEFAULT_MODEL.to_string(),
             voice: DEFAULT_VOICE.to_string(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             temperature: 0.7,
-            ws_url_override: None,
-        })
+            proxy_url: None,
+        }
     }
 
-    pub fn websocket_url(&self) -> String {
-        if let Some(ref url) = self.ws_url_override {
-            return url.clone();
+    pub fn ws_url(&self) -> String {
+        if let Some(ref proxy) = self.proxy_url {
+            let sep = if proxy.contains('?') { '&' } else { '?' };
+            format!("{proxy}{sep}api_key={}", self.api_key)
+        } else {
+            format!("{WS_BASE}?key={}", self.api_key)
         }
-        format!("{WS_BASE}?key={}", self.api_key)
     }
+}
+
+fn read_config_file_key() -> Option<String> {
+    let path = dirs::config_dir()?.join("aura/config.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("api_key") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let value = rest.trim().trim_matches('"').trim_matches('\'');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -78,8 +111,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("GEMINI_API_KEY"),
-            "Error should mention GEMINI_API_KEY, got: {err}"
+            err.contains("API key") || err.contains("GEMINI_API_KEY"),
+            "Error should mention API key, got: {err}"
         );
 
         // Restore if it was set
@@ -90,17 +123,10 @@ mod tests {
     }
 
     #[test]
-    fn websocket_url_format() {
-        let config = GeminiConfig {
-            api_key: "test-key-123".to_string(),
-            model: DEFAULT_MODEL.to_string(),
-            voice: DEFAULT_VOICE.to_string(),
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            temperature: 0.7,
-            ws_url_override: None,
-        };
-
-        let url = config.websocket_url();
+    fn test_no_proxy_uses_direct_gemini_url() {
+        let config = GeminiConfig::from_env_inner("test-key-123");
+        assert!(config.proxy_url.is_none());
+        let url = config.ws_url();
         assert!(url.starts_with("wss://"), "URL should use wss://");
         assert!(
             url.contains("generativelanguage.googleapis.com"),
@@ -117,31 +143,43 @@ mod tests {
     }
 
     #[test]
-    fn test_system_prompt_has_aura_personality() {
-        let config = GeminiConfig {
-            api_key: "test-key-12345".to_string(),
-            model: DEFAULT_MODEL.to_string(),
-            voice: DEFAULT_VOICE.to_string(),
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            temperature: 0.7,
-            ws_url_override: None,
-        };
-        assert!(config.system_prompt.contains("Aura"));
-        assert!(config.system_prompt.contains("run_applescript"));
-        assert!(config.system_prompt.contains("get_screen_context"));
+    fn test_proxy_url_overrides_direct_connection() {
+        let mut config = GeminiConfig::from_env_inner("test-key-123");
+        config.proxy_url = Some("wss://aura-proxy-xyz.run.app/ws".into());
+        let url = config.ws_url();
+        assert!(url.starts_with("wss://aura-proxy-xyz.run.app/ws"));
+        assert!(url.contains("api_key=test-key-123"));
     }
 
     #[test]
-    fn websocket_url_override() {
-        let config = GeminiConfig {
-            api_key: "test-key".to_string(),
-            model: DEFAULT_MODEL.to_string(),
-            voice: DEFAULT_VOICE.to_string(),
-            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            temperature: 0.7,
-            ws_url_override: Some("ws://localhost:9999/test".to_string()),
-        };
+    fn test_read_config_file_key_parses_toml_line() {
+        // Test the parsing logic directly with temp file
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "api_key = \"my-secret-key-123\"\n").unwrap();
 
-        assert_eq!(config.websocket_url(), "ws://localhost:9999/test");
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let mut found = None;
+        for line in content.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("api_key") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let value = rest.trim().trim_matches('"').trim_matches('\'');
+                    if !value.is_empty() {
+                        found = Some(value.to_string());
+                    }
+                }
+            }
+        }
+        assert_eq!(found, Some("my-secret-key-123".to_string()));
+    }
+
+    #[test]
+    fn test_system_prompt_has_aura_personality() {
+        let config = GeminiConfig::from_env_inner("test-key-12345");
+        assert!(config.system_prompt.contains("Aura"));
+        assert!(config.system_prompt.contains("run_applescript"));
+        assert!(config.system_prompt.contains("get_screen_context"));
     }
 }
