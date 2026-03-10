@@ -50,7 +50,7 @@ impl AudioCapture {
         let config = StreamConfig {
             channels: CHANNELS,
             sample_rate: cpal::SampleRate(capture_rate),
-            buffer_size: cpal::BufferSize::Default,
+            buffer_size: cpal::BufferSize::Fixed(256),
         };
 
         let resample_ratio = capture_rate as f64 / SAMPLE_RATE as f64;
@@ -83,7 +83,6 @@ impl AudioCapture {
     }
 
     pub fn start(&self, sender: mpsc::Sender<Vec<f32>>) -> Result<Stream> {
-        let err_fn = |err| tracing::error!("Audio stream error: {err}");
         let ratio = self.resample_ratio;
         let capture_rate = self.config.sample_rate.0;
 
@@ -124,48 +123,74 @@ impl AudioCapture {
                 None
             };
 
-        let stream = self
-            .device
-            .build_input_stream(
-                &self.config,
-                move |data: &[f32], _| {
-                    match &resampler_state {
-                        None => {
-                            // No resampling needed — forward directly.
-                            if sender.send(data.to_vec()).is_err() {
-                                tracing::warn!("Audio receiver dropped");
-                            }
+        // Build a reusable audio data callback factory.
+        // Both the primary (Fixed(256)) and fallback (Default) stream attempts share
+        // the same Arc<Mutex<ResampleState>> and a cloned sender so either closure
+        // can own them.
+        let make_callback = |rs: Option<Arc<Mutex<ResampleState>>>, tx: mpsc::Sender<Vec<f32>>| {
+            move |data: &[f32], _: &_| {
+                match &rs {
+                    None => {
+                        // No resampling needed — forward directly.
+                        if tx.send(data.to_vec()).is_err() {
+                            tracing::warn!("Audio receiver dropped");
                         }
-                        Some(state) => {
-                            let mut st = state.lock().unwrap();
-                            st.input_buf.extend_from_slice(data);
+                    }
+                    Some(state) => {
+                        let mut st = state.lock().unwrap();
+                        st.input_buf.extend_from_slice(data);
 
-                            // Process full chunks until fewer than RESAMPLE_CHUNK_SIZE remain.
-                            while st.input_buf.len() >= RESAMPLE_CHUNK_SIZE {
-                                let chunk: Vec<f32> =
-                                    st.input_buf.drain(..RESAMPLE_CHUNK_SIZE).collect();
-                                let wave_in = vec![chunk];
-                                match st.resampler.process(&wave_in, None) {
-                                    Ok(output) => {
-                                        let resampled =
-                                            output.into_iter().next().unwrap_or_default();
-                                        if sender.send(resampled).is_err() {
-                                            tracing::warn!("Audio receiver dropped");
-                                            return;
-                                        }
+                        // Process full chunks until fewer than RESAMPLE_CHUNK_SIZE remain.
+                        while st.input_buf.len() >= RESAMPLE_CHUNK_SIZE {
+                            let chunk: Vec<f32> =
+                                st.input_buf.drain(..RESAMPLE_CHUNK_SIZE).collect();
+                            let wave_in = vec![chunk];
+                            match st.resampler.process(&wave_in, None) {
+                                Ok(output) => {
+                                    let resampled =
+                                        output.into_iter().next().unwrap_or_default();
+                                    if tx.send(resampled).is_err() {
+                                        tracing::warn!("Audio receiver dropped");
+                                        return;
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("Resampling error: {e}");
-                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Resampling error: {e}");
                                 }
                             }
                         }
                     }
-                },
-                err_fn,
-                None,
-            )
-            .context("Failed to build audio input stream")?;
+                }
+            }
+        };
+
+        let err_fn = |err| tracing::error!("Audio stream error: {err}");
+
+        // Try Fixed(256) first for lower capture latency; fall back to Default if
+        // the hardware or driver rejects the fixed buffer size.
+        let stream_result = self.device.build_input_stream(
+            &self.config,
+            make_callback(resampler_state.clone(), sender.clone()),
+            err_fn,
+            None,
+        );
+
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::warn!("Fixed buffer size not supported, falling back to default");
+                let mut fallback_config = self.config.clone();
+                fallback_config.buffer_size = cpal::BufferSize::Default;
+                self.device
+                    .build_input_stream(
+                        &fallback_config,
+                        make_callback(resampler_state, sender),
+                        |err| tracing::error!("Audio stream error: {err}"),
+                        None,
+                    )
+                    .context("Failed to build audio input stream")?
+            }
+        };
 
         stream.play()?;
         Ok(stream)
