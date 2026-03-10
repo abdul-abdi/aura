@@ -119,11 +119,20 @@ fn main() -> Result<()> {
                 loop {
                     // Create a new session for each connection attempt
                     let session_id = {
-                        let mem = memory.lock().unwrap();
-                        match mem.start_session() {
-                            Ok(id) => id,
+                        let mem = Arc::clone(&memory);
+                        match tokio::task::spawn_blocking(move || {
+                            mem.lock().ok().and_then(|g| g.start_session().ok())
+                        })
+                        .await
+                        {
+                            Ok(Some(id)) => id,
+                            Ok(None) => {
+                                tracing::error!("Failed to start memory session");
+                                tokio::time::sleep(Duration::from_secs(3)).await;
+                                continue;
+                            }
                             Err(e) => {
-                                tracing::error!("Failed to start memory session: {e}");
+                                tracing::error!("Memory session task panicked: {e}");
                                 tokio::time::sleep(Duration::from_secs(3)).await;
                                 continue;
                             }
@@ -234,6 +243,20 @@ async fn run_daemon(
             false
         }
     };
+
+    // Check accessibility permission (needed for input control tools)
+    if !aura_input::accessibility::check_accessibility(true) {
+        tracing::warn!("Accessibility permission not granted — input tools will fail silently");
+        if let Some(ref tx) = menubar_tx {
+            let _ = tx
+                .send(MenuBarMessage::AddMessage {
+                    text: "Grant Accessibility permission in System Settings for input control."
+                        .into(),
+                    is_user: false,
+                })
+                .await;
+        }
+    }
 
     // Bridge std::sync::mpsc -> tokio -> session.send_audio()
     // Applies energy gating while Aura is speaking to prevent echo-triggered barge-in.
@@ -463,13 +486,15 @@ async fn run_processor(
                                 "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}]"
                             );
 
-                            if let Err(e) = memory.lock().unwrap().add_message(
-                                &session_id,
-                                MessageRole::User,
-                                &context_msg,
-                                None,
-                            ) {
-                                tracing::warn!("Failed to log greeting context to memory: {e}");
+                            let ctx_sid = session_id.clone();
+                            let ctx_msg = context_msg.clone();
+                            if memory_op(&memory, move |mem| {
+                                mem.add_message(&ctx_sid, MessageRole::User, &ctx_msg, None)
+                            })
+                            .await
+                            .is_none()
+                            {
+                                tracing::warn!("Failed to log greeting context to memory");
                             }
 
                             if let Err(e) = session.send_text(&context_msg).await {
@@ -510,13 +535,17 @@ async fn run_processor(
                     }
                     Ok(GeminiEvent::ToolCall { id, name, args }) => {
                         tracing::info!(name = %name, "Tool call");
-                        if let Err(e) = memory.lock().unwrap().add_message(
-                            &session_id,
-                            MessageRole::ToolCall,
-                            &format!("{name}: {args}"),
-                            None,
-                        ) {
-                            tracing::warn!("Failed to log tool call to memory: {e}");
+                        {
+                            let tc_sid = session_id.clone();
+                            let tc_content = format!("{name}: {args}");
+                            if memory_op(&memory, move |mem| {
+                                mem.add_message(&tc_sid, MessageRole::ToolCall, &tc_content, None)
+                            })
+                            .await
+                            .is_none()
+                            {
+                                tracing::warn!("Failed to log tool call to memory");
+                            }
                         }
 
                         // shutdown_aura stays inline — needs to break event loop
@@ -573,13 +602,17 @@ async fn run_processor(
                             });
 
                             // Log result
-                            if let Err(e) = tool_memory.lock().unwrap().add_message(
-                                &tool_session_id,
-                                MessageRole::ToolResult,
-                                &response.to_string(),
-                                None,
-                            ) {
-                                tracing::warn!("Failed to log tool result: {e}");
+                            {
+                                let tr_sid = tool_session_id.clone();
+                                let tr_content = response.to_string();
+                                if memory_op(&tool_memory, move |mem| {
+                                    mem.add_message(&tr_sid, MessageRole::ToolResult, &tr_content, None)
+                                })
+                                .await
+                                .is_none()
+                                {
+                                    tracing::warn!("Failed to log tool result to memory");
+                                }
                             }
 
                             // Resume green status
@@ -660,7 +693,8 @@ async fn run_processor(
                         }
 
                         // End the memory session
-                        let _ = memory.lock().unwrap().end_session(&session_id, None);
+                        let es_sid = session_id.clone();
+                        memory_op(&memory, move |mem| mem.end_session(&es_sid, None)).await;
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -806,6 +840,28 @@ where
         Ok(Ok(())) => serde_json::json!({ "success": true }),
         Ok(Err(e)) => serde_json::json!({ "success": false, "error": format!("{e}") }),
         Err(e) => serde_json::json!({ "success": false, "error": format!("Task panicked: {e}") }),
+    }
+}
+
+/// Run a memory operation on a blocking thread to avoid holding the Mutex
+/// across await points or blocking the tokio runtime.
+async fn memory_op<F, T>(memory: &Arc<Mutex<SessionMemory>>, f: F) -> Option<T>
+where
+    F: FnOnce(&SessionMemory) -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mem = Arc::clone(memory);
+    match tokio::task::spawn_blocking(move || {
+        let guard = mem.lock().ok()?;
+        f(&guard).ok()
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("Memory operation panicked: {e}");
+            None
+        }
     }
 }
 
