@@ -45,7 +45,7 @@ use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
 use aura_daemon::bus::EventBus;
 use aura_daemon::event::AuraEvent;
 use aura_daemon::ipc;
-use aura_daemon::protocol::{ConnectionState, DaemonEvent, UICommand};
+use aura_daemon::protocol::{ConnectionState, DaemonEvent, Role, UICommand};
 use aura_daemon::setup::AuraSetup;
 use aura_gemini::config::GeminiConfig;
 use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
@@ -1036,8 +1036,26 @@ async fn run_processor(
                         // Native audio models generate text and audio independently.
                         // The text is the model's internal reasoning — NOT a transcript
                         // of the spoken audio. It's always longer/different from what's
-                        // actually said. Log it for debugging but don't display it.
-                        tracing::debug!(transcription = text.lines().next().unwrap_or(""), "Gemini text (not displayed)");
+                        // actually said. Log it for debugging but still forward to IPC
+                        // clients for display in the floating panel.
+                        tracing::debug!(transcription = text.lines().next().unwrap_or(""), "Gemini text");
+
+                        // Filter out markdown artifacts (lines that are just bold markers)
+                        let filtered: String = text
+                            .lines()
+                            .filter(|line| {
+                                let trimmed = line.trim();
+                                !trimmed.is_empty() && trimmed != "**"
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        if !filtered.is_empty() {
+                            let _ = ipc_tx.send(DaemonEvent::Transcript {
+                                role: Role::Assistant,
+                                text: filtered,
+                            });
+                        }
                     }
                     Ok(GeminiEvent::TurnComplete) => {
                         is_speaking.store(false, Ordering::Release);
