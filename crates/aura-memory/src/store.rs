@@ -180,20 +180,20 @@ impl SessionMemory {
     /// Delete sessions (and their messages) older than `max_age_days` days.
     /// Returns the number of sessions deleted.
     pub fn prune_old_sessions(&self, max_age_days: u32) -> Result<usize> {
-        // We delete messages first since the schema has no ON DELETE CASCADE.
-        // Use datetime() to normalize RFC 3339 timestamps for comparison.
+        let tx = self.conn.unchecked_transaction()?;
         let cutoff = format!("-{max_age_days} days");
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM messages WHERE session_id IN (
                 SELECT id FROM sessions
                 WHERE datetime(started_at) < datetime('now', ?1)
             )",
             params![cutoff],
         )?;
-        let deleted = self.conn.execute(
+        let deleted = tx.execute(
             "DELETE FROM sessions WHERE datetime(started_at) < datetime('now', ?1)",
             params![cutoff],
         )?;
+        tx.commit()?;
         Ok(deleted)
     }
 
@@ -205,34 +205,46 @@ impl SessionMemory {
             return Ok(String::new());
         }
 
+        // Batch query: get all tool calls for these sessions in one query
+        let placeholders: Vec<String> = (1..=sessions.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT session_id, content FROM messages WHERE role = 'tool_call' AND session_id IN ({}) ORDER BY id ASC",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = sessions
+            .iter()
+            .map(|s| &s.id as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        // Group tool calls by session
+        let mut session_tools: HashMap<String, Vec<String>> = HashMap::new();
+        for row in rows {
+            let (session_id, content) = row?;
+            if let Some(name) = content.split(':').next().map(|s| s.trim().to_string()) {
+                session_tools.entry(session_id).or_default().push(name);
+            }
+        }
+
         let mut lines = Vec::new();
         lines.push("Recent history:".to_string());
 
         for session in &sessions {
-            // Collect tool calls for this session
-            let mut stmt = self.conn.prepare(
-                "SELECT content FROM messages WHERE session_id = ?1 AND role = 'tool_call' ORDER BY id ASC",
-            )?;
-            let tool_names: Vec<String> = stmt
-                .query_map(params![session.id], |row| row.get::<_, String>(0))?
-                .filter_map(|r| r.ok())
-                .filter_map(|content| {
-                    // Content format is "tool_name: {args}" — extract the name
-                    content.split(':').next().map(|s| s.trim().to_string())
-                })
-                .collect();
-
+            let Some(tool_names) = session_tools.get(&session.id) else {
+                continue;
+            };
             if tool_names.is_empty() {
                 continue;
             }
 
-            // Count occurrences of each tool
             let mut counts: HashMap<String, usize> = HashMap::new();
-            for name in &tool_names {
+            for name in tool_names {
                 *counts.entry(name.clone()).or_insert(0) += 1;
             }
 
-            // Format: "tool_name (Nx)" sorted by count descending
             let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
             sorted.sort_by(|a, b| b.1.cmp(&a.1));
             let tool_summary: Vec<String> = sorted
@@ -246,7 +258,6 @@ impl SessionMemory {
                 })
                 .collect();
 
-            // Format timestamp — truncate to minutes
             let ts = &session.started_at;
             let display_ts = if ts.len() >= 16 { &ts[..16] } else { ts };
 
@@ -257,7 +268,6 @@ impl SessionMemory {
         }
 
         if lines.len() <= 1 {
-            // Only the header, no actual sessions with tools
             return Ok(String::new());
         }
 
