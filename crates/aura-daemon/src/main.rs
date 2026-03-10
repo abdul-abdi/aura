@@ -38,6 +38,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
 use tokio::sync::mpsc;
+mod deploy;
 use tokio_util::sync::CancellationToken;
 
 use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
@@ -69,12 +70,21 @@ or any action that permanently destroys data, ALWAYS confirm with the user first
 #[command(name = "aura", about = "Voice-first AI desktop companion")]
 struct Cli {
     /// Run without the menu bar UI (headless mode)
-    #[arg(long)]
+    #[arg(long, global = true)]
     headless: bool,
 
     /// Enable verbose logging
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     verbose: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Deploy aura-proxy to Google Cloud Run
+    Deploy,
 }
 
 fn main() -> Result<()> {
@@ -87,6 +97,11 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
         )
         .init();
+
+    // Handle subcommands
+    if let Some(Command::Deploy) = cli.command {
+        return deploy::run_deploy();
+    }
 
     // Validate GEMINI_API_KEY — prompt user if missing
     let gemini_config = match GeminiConfig::from_env() {
