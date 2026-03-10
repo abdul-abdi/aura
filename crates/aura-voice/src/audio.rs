@@ -4,8 +4,8 @@ use cpal::{Device, Stream, StreamConfig};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 /// Target sample rate for Whisper STT.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -96,6 +96,7 @@ impl AudioCapture {
         struct ResampleState {
             resampler: SincFixedIn<f32>,
             input_buf: Vec<f32>,
+            chunk_buf: Vec<f32>,
         }
 
         let resampler_state: Option<Arc<Mutex<ResampleState>>> =
@@ -118,6 +119,7 @@ impl AudioCapture {
                 Some(Arc::new(Mutex::new(ResampleState {
                     resampler,
                     input_buf: Vec::with_capacity(RESAMPLE_CHUNK_SIZE * 2),
+                    chunk_buf: Vec::with_capacity(RESAMPLE_CHUNK_SIZE),
                 })))
             } else {
                 None
@@ -137,18 +139,28 @@ impl AudioCapture {
                         }
                     }
                     Some(state) => {
-                        let mut st = state.lock().unwrap();
+                        let Ok(mut st) = state.lock() else {
+                            return; // mutex poisoned — silently skip this callback
+                        };
                         st.input_buf.extend_from_slice(data);
 
+                        // Destructure to allow the borrow checker to see disjoint field borrows.
+                        let ResampleState {
+                            ref mut resampler,
+                            ref mut input_buf,
+                            ref mut chunk_buf,
+                        } = *st;
+
                         // Process full chunks until fewer than RESAMPLE_CHUNK_SIZE remain.
-                        while st.input_buf.len() >= RESAMPLE_CHUNK_SIZE {
-                            let chunk: Vec<f32> =
-                                st.input_buf.drain(..RESAMPLE_CHUNK_SIZE).collect();
-                            let wave_in = vec![chunk];
-                            match st.resampler.process(&wave_in, None) {
+                        while input_buf.len() >= RESAMPLE_CHUNK_SIZE {
+                            // Reuse pre-allocated chunk_buf to avoid per-iteration allocation.
+                            chunk_buf.clear();
+                            chunk_buf.extend_from_slice(&input_buf[..RESAMPLE_CHUNK_SIZE]);
+                            input_buf.drain(..RESAMPLE_CHUNK_SIZE);
+                            let wave_in = [chunk_buf.as_slice()];
+                            match resampler.process(&wave_in, None) {
                                 Ok(output) => {
-                                    let resampled =
-                                        output.into_iter().next().unwrap_or_default();
+                                    let resampled = output.into_iter().next().unwrap_or_default();
                                     if tx.send(resampled).is_err() {
                                         tracing::warn!("Audio receiver dropped");
                                         return;

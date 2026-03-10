@@ -51,12 +51,12 @@ impl ScreenContext {
             parts.push(format!("Open windows: {}", self.open_windows.join(", ")));
         }
         if let Some(ref clip) = self.clipboard {
-            let truncated = if clip.len() > 200 {
-                format!("{}...", &clip[..200])
+            let truncated: String = clip.chars().take(200).collect();
+            if truncated.len() < clip.len() {
+                parts.push(format!("Clipboard: {truncated}..."));
             } else {
-                clip.clone()
-            };
-            parts.push(format!("Clipboard: {truncated}"));
+                parts.push(format!("Clipboard: {truncated}"));
+            }
         }
         parts.join("\n")
     }

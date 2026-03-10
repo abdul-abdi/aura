@@ -4,6 +4,63 @@ use objc::{class, msg_send, sel, sel_impl};
 
 const MAX_MESSAGES: u32 = 100;
 
+/// Semantic status category used for coloring the status label.
+/// Replaces string `.contains()` matching with a proper enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusColor {
+    Green,
+    Amber,
+    Red,
+    Gray,
+}
+
+impl StatusColor {
+    /// Classify a status text string into a semantic color.
+    fn from_status_text(text: &str) -> Self {
+        if text.contains("Connected") || text.contains("Listening") {
+            StatusColor::Green
+        } else if text.contains("Reconnecting") || text.contains("Running") {
+            StatusColor::Amber
+        } else if text.contains("Error") || text.contains("Mic") {
+            StatusColor::Red
+        } else {
+            StatusColor::Gray
+        }
+    }
+
+    /// The status dot prefix character.
+    fn dot_char(self) -> &'static str {
+        match self {
+            StatusColor::Green | StatusColor::Amber | StatusColor::Red => "\u{25CF}", // Filled
+            StatusColor::Gray => "\u{25CB}",                                          // Empty
+        }
+    }
+
+    /// Returns an NSColor `id` for this status color.
+    ///
+    /// # Safety
+    /// Must be called on the main thread.
+    unsafe fn ns_color(self) -> id {
+        unsafe {
+            match self {
+                StatusColor::Green => {
+                    msg_send![class!(NSColor), colorWithRed: 0.30f64
+                        green: 0.75f64 blue: 0.45f64 alpha: 1.0f64]
+                }
+                StatusColor::Amber => {
+                    msg_send![class!(NSColor), colorWithRed: 0.90f64
+                        green: 0.72f64 blue: 0.25f64 alpha: 1.0f64]
+                }
+                StatusColor::Red => {
+                    msg_send![class!(NSColor), colorWithRed: 0.90f64
+                        green: 0.30f64 blue: 0.30f64 alpha: 1.0f64]
+                }
+                StatusColor::Gray => msg_send![class!(NSColor), secondaryLabelColor],
+            }
+        }
+    }
+}
+
 pub struct AuraPopover {
     popover: id,
     scroll_view: id,
@@ -12,11 +69,17 @@ pub struct AuraPopover {
     message_count: u32,
 }
 
+// SAFETY: AuraPopover holds Objective-C `id` pointers that are only ever
+// accessed on the main thread. The struct is sent once from the initialization
+// site into GLOBAL_STATE, after which all access is main-thread-only via
+// NSTimer callbacks and ObjC event handlers mediated by the GLOBAL_STATE lock.
 unsafe impl Send for AuraPopover {}
 
-#[allow(deprecated)]
 impl AuraPopover {
-    /// MUST be called on the main thread.
+    /// Create a new popover with a scroll view and status header.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
     pub unsafe fn new() -> Self {
         unsafe {
             let popover: id = msg_send![class!(NSPopover), alloc];
@@ -25,6 +88,10 @@ impl AuraPopover {
             let _: () = msg_send![popover, setContentSize: NSSize::new(340.0, 500.0)];
             let _: () = msg_send![popover, setBehavior: 1i64]; // Transient
             let _: () = msg_send![popover, setAnimates: YES];
+
+            // VoiceOver: mark the popover for accessibility
+            let a11y_label = NSString::alloc(nil).init_str("Aura conversation");
+            let _: () = msg_send![popover, setAccessibilityLabel: a11y_label];
 
             let vc: id = msg_send![class!(NSViewController), alloc];
             let vc: id = msg_send![vc, init];
@@ -79,11 +146,10 @@ impl AuraPopover {
             let top_constraint: id = msg_send![stack_top, constraintEqualToAnchor: clip_top];
             let _: () = msg_send![top_constraint, setActive: YES];
 
-            // Set background color on the scroll view's layer — warm dark charcoal
+            // Use system window background color for the scroll view layer
             let _: () = msg_send![scroll_view, setWantsLayer: YES];
             let layer: id = msg_send![scroll_view, layer];
-            let bg: id = msg_send![class!(NSColor),
-                colorWithRed: 0.11f64 green: 0.11f64 blue: 0.13f64 alpha: 1.0f64];
+            let bg: id = msg_send![class!(NSColor), windowBackgroundColor];
             let cg_color: id = msg_send![bg, CGColor];
             let _: () = msg_send![layer, setBackgroundColor: cg_color];
 
@@ -106,10 +172,14 @@ impl AuraPopover {
             let status_font: id = msg_send![class!(NSFont),
                 systemFontOfSize: 11.0f64 weight: 0.23f64]; // NSFontWeightMedium
             let _: () = msg_send![status_label, setFont: status_font];
-            let status_color: id = msg_send![class!(NSColor),
-                colorWithRed: 0.55f64 green: 0.55f64 blue: 0.58f64 alpha: 1.0f64];
+            // Use system semantic color for status text
+            let status_color: id = msg_send![class!(NSColor), secondaryLabelColor];
             let _: () = msg_send![status_label, setTextColor: status_color];
             let _: () = msg_send![status_label, setTranslatesAutoresizingMaskIntoConstraints: NO];
+
+            // VoiceOver: accessibility label on the status field
+            let status_a11y = NSString::alloc(nil).init_str("Aura connection status");
+            let _: () = msg_send![status_label, setAccessibilityLabel: status_a11y];
 
             // Subtle separator line between header and messages
             let separator: id = msg_send![class!(NSBox), alloc];
@@ -132,30 +202,36 @@ impl AuraPopover {
 
             let sl_leading: id = msg_send![status_label, leadingAnchor];
             let c_leading: id = msg_send![container, leadingAnchor];
-            let c2: id = msg_send![sl_leading, constraintEqualToAnchor: c_leading constant: 12.0f64];
+            let c2: id =
+                msg_send![sl_leading, constraintEqualToAnchor: c_leading constant: 12.0f64];
             let _: () = msg_send![c2, setActive: YES];
 
             let sl_trailing: id = msg_send![status_label, trailingAnchor];
             let c_trailing: id = msg_send![container, trailingAnchor];
-            let c3: id = msg_send![sl_trailing, constraintEqualToAnchor: c_trailing constant: -12.0f64];
+            let c3: id =
+                msg_send![sl_trailing, constraintEqualToAnchor: c_trailing constant: -12.0f64];
             let _: () = msg_send![c3, setActive: YES];
 
-            let sl_height: id = msg_send![status_label, heightAnchor];
-            let c4: id = msg_send![sl_height, constraintEqualToConstant: 20.0f64];
-            let _: () = msg_send![c4, setActive: YES];
+            // Auto-size status label height using intrinsicContentSize instead of fixed 20px.
+            // Content hugging at required priority ensures the label wraps its text tightly.
+            let _: () = msg_send![status_label,
+                setContentHuggingPriority: 999.0f32 forOrientation: 1i64]; // Vertical
 
             // Separator below status label
             let sep_top: id = msg_send![separator, topAnchor];
             let sl_bottom: id = msg_send![status_label, bottomAnchor];
-            let sep_c1: id = msg_send![sep_top, constraintEqualToAnchor: sl_bottom constant: 6.0f64];
+            let sep_c1: id =
+                msg_send![sep_top, constraintEqualToAnchor: sl_bottom constant: 6.0f64];
             let _: () = msg_send![sep_c1, setActive: YES];
 
             let sep_leading: id = msg_send![separator, leadingAnchor];
-            let sep_c2: id = msg_send![sep_leading, constraintEqualToAnchor: c_leading constant: 12.0f64];
+            let sep_c2: id =
+                msg_send![sep_leading, constraintEqualToAnchor: c_leading constant: 12.0f64];
             let _: () = msg_send![sep_c2, setActive: YES];
 
             let sep_trailing: id = msg_send![separator, trailingAnchor];
-            let sep_c3: id = msg_send![sep_trailing, constraintEqualToAnchor: c_trailing constant: -12.0f64];
+            let sep_c3: id =
+                msg_send![sep_trailing, constraintEqualToAnchor: c_trailing constant: -12.0f64];
             let _: () = msg_send![sep_c3, setActive: YES];
 
             let sep_height: id = msg_send![separator, heightAnchor];
@@ -194,6 +270,11 @@ impl AuraPopover {
         }
     }
 
+    /// Toggle the popover's visibility relative to the given view.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
+    /// `relative_to` must be a valid NSView pointer.
     pub unsafe fn toggle(&self, relative_to: id) {
         unsafe {
             let shown: bool = msg_send![self.popover, isShown];
@@ -208,6 +289,10 @@ impl AuraPopover {
         }
     }
 
+    /// Append a chat message bubble to the popover's scroll view.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
     pub unsafe fn add_message(&mut self, text: &str, is_user: bool) {
         unsafe {
             // Remove oldest message if at capacity
@@ -230,15 +315,13 @@ impl AuraPopover {
             let bubble_layer: id = msg_send![bubble, layer];
             let _: () = msg_send![bubble_layer, setCornerRadius: 14.0f64];
 
-            // Bubble background color — refined palette
+            // Bubble background color — use system semantic colors for dark/light mode
             let bg_color: id = if is_user {
-                // Vibrant teal-blue accent
-                msg_send![class!(NSColor),
-                    colorWithRed: 0.18f64 green: 0.52f64 blue: 0.92f64 alpha: 1.0f64]
+                // System accent-based tint for user messages
+                msg_send![class!(NSColor), controlAccentColor]
             } else {
-                // Subtle elevated surface
-                msg_send![class!(NSColor),
-                    colorWithRed: 0.18f64 green: 0.18f64 blue: 0.20f64 alpha: 1.0f64]
+                // Elevated surface using system color
+                msg_send![class!(NSColor), controlBackgroundColor]
             };
             let cg_bg: id = msg_send![bg_color, CGColor];
             let _: () = msg_send![bubble_layer, setBackgroundColor: cg_bg];
@@ -262,9 +345,14 @@ impl AuraPopover {
             let font: id = msg_send![class!(NSFont), systemFontOfSize: 13.0f64];
             let _: () = msg_send![label, setFont: font];
 
-            // Text color — slightly off-white for better readability
-            let text_color: id = msg_send![class!(NSColor),
-                colorWithRed: 0.95f64 green: 0.95f64 blue: 0.97f64 alpha: 1.0f64];
+            // Text color — use system semantic colors for proper dark/light mode
+            let text_color: id = if is_user {
+                // White text on accent-colored bubble
+                msg_send![class!(NSColor), alternateSelectedControlTextColor]
+            } else {
+                // Standard label color for assistant bubbles
+                msg_send![class!(NSColor), labelColor]
+            };
             let _: () = msg_send![label, setTextColor: text_color];
 
             // Add label inside bubble with inner padding
@@ -289,14 +377,14 @@ impl AuraPopover {
 
             let l_trailing: id = msg_send![label, trailingAnchor];
             let b_trailing: id = msg_send![bubble, trailingAnchor];
-            let lr: id = msg_send![l_trailing, constraintEqualToAnchor: b_trailing constant: -10.0f64];
+            let lr: id =
+                msg_send![l_trailing, constraintEqualToAnchor: b_trailing constant: -10.0f64];
             let _: () = msg_send![lr, setActive: YES];
 
             // Create a wrapper NSView that fills the stack width for alignment
             let wrapper: id = msg_send![class!(NSView), alloc];
             let wrapper: id = msg_send![wrapper, init];
-            let _: () =
-                msg_send![wrapper, setTranslatesAutoresizingMaskIntoConstraints: NO];
+            let _: () = msg_send![wrapper, setTranslatesAutoresizingMaskIntoConstraints: NO];
             let _: () = msg_send![wrapper, addSubview: bubble];
 
             // Constrain bubble vertically within wrapper
@@ -357,45 +445,34 @@ impl AuraPopover {
             if new_y > 0.0 {
                 let point = NSPoint::new(0.0, new_y);
                 let _: () = msg_send![clip_view, scrollToPoint: point];
-                let _: () =
-                    msg_send![self.scroll_view, reflectScrolledClipView: clip_view];
+                let _: () = msg_send![self.scroll_view, reflectScrolledClipView: clip_view];
             }
         }
     }
 
+    /// Update the status header text and color based on connection state.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
     pub unsafe fn set_status(&self, text: &str) {
         unsafe {
+            let status = StatusColor::from_status_text(text);
+
             // Prepend a colored dot based on status
-            let decorated = if text.contains("Connected") || text.contains("Listening") {
-                format!("\u{25CF} {text}")  // Filled circle — green context
-            } else if text.contains("Reconnecting") || text.contains("Running") {
-                format!("\u{25CF} {text}")  // Filled circle — amber context
-            } else if text.contains("Error") || text.contains("Mic") {
-                format!("\u{25CF} {text}")  // Filled circle — red context
-            } else {
-                format!("\u{25CB} {text}")  // Empty circle — inactive
-            };
+            let decorated = format!("{} {text}", status.dot_char());
             let ns_text = NSString::alloc(nil).init_str(&decorated);
             let _: () = msg_send![self.status_label, setStringValue: ns_text];
 
-            // Update status label color based on state
-            let color: id = if text.contains("Connected") || text.contains("Listening") {
-                msg_send![class!(NSColor),
-                    colorWithRed: 0.30f64 green: 0.75f64 blue: 0.45f64 alpha: 1.0f64]
-            } else if text.contains("Reconnecting") || text.contains("Running") {
-                msg_send![class!(NSColor),
-                    colorWithRed: 0.90f64 green: 0.72f64 blue: 0.25f64 alpha: 1.0f64]
-            } else if text.contains("Error") || text.contains("Mic") {
-                msg_send![class!(NSColor),
-                    colorWithRed: 0.90f64 green: 0.30f64 blue: 0.30f64 alpha: 1.0f64]
-            } else {
-                msg_send![class!(NSColor),
-                    colorWithRed: 0.50f64 green: 0.50f64 blue: 0.52f64 alpha: 1.0f64]
-            };
+            // Update status label color based on enum
+            let color: id = status.ns_color();
             let _: () = msg_send![self.status_label, setTextColor: color];
         }
     }
 
+    /// Remove all chat message bubbles from the popover.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
     pub unsafe fn clear_messages(&mut self) {
         unsafe {
             let subviews: id = msg_send![self.stack_view, arrangedSubviews];
@@ -410,7 +487,6 @@ impl AuraPopover {
     }
 }
 
-#[allow(deprecated)]
 impl Drop for AuraPopover {
     fn drop(&mut self) {
         unsafe {

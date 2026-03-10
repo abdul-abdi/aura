@@ -1,7 +1,12 @@
 use crate::event::AuraEvent;
-use anyhow::Result;
 use tokio::sync::broadcast;
 
+/// Event bus for distributing [`AuraEvent`]s to multiple consumers.
+///
+/// Uses `tokio::sync::broadcast` because both the [`crate::daemon::Daemon`] event loop
+/// and the Gemini processor (in `main.rs`) subscribe independently and must each
+/// receive every event. An `mpsc` channel would only deliver each event to a single
+/// consumer, which would break the fan-out requirement.
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<AuraEvent>,
@@ -13,9 +18,15 @@ impl EventBus {
         Self { tx }
     }
 
-    pub fn send(&self, event: AuraEvent) -> Result<()> {
-        self.tx.send(event)?;
-        Ok(())
+    /// Send an event to all subscribers.
+    ///
+    /// Errors (e.g., no active receivers) are logged internally.
+    /// Callers never need to handle send failures since the bus is
+    /// best-effort — dropped events are acceptable.
+    pub fn send(&self, event: AuraEvent) {
+        if let Err(e) = self.tx.send(event) {
+            tracing::debug!("EventBus send failed (no receivers): {e}");
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AuraEvent> {

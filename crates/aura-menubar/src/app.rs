@@ -35,20 +35,37 @@ struct AppState {
     rx: mpsc::Receiver<MenuBarMessage>,
     pulsing: bool,
     pulse_bright: bool,
+    pulse_counter: u32,
     reconnect_tx: Option<mpsc::Sender<()>>,
+    shutdown_tx: Option<mpsc::Sender<()>>,
 }
 
 pub struct MenuBarApp {
     rx: mpsc::Receiver<MenuBarMessage>,
     reconnect_tx: mpsc::Sender<()>,
+    shutdown_tx: mpsc::Sender<()>,
 }
 
-#[allow(deprecated)]
 impl MenuBarApp {
-    pub fn new() -> (Self, mpsc::Sender<MenuBarMessage>, mpsc::Receiver<()>) {
+    pub fn new() -> (
+        Self,
+        mpsc::Sender<MenuBarMessage>,
+        mpsc::Receiver<()>,
+        mpsc::Receiver<()>,
+    ) {
         let (tx, rx) = mpsc::channel(64);
         let (reconnect_tx, reconnect_rx) = mpsc::channel(4);
-        (Self { rx, reconnect_tx }, tx, reconnect_rx)
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(4);
+        (
+            Self {
+                rx,
+                reconnect_tx,
+                shutdown_tx,
+            },
+            tx,
+            reconnect_rx,
+            shutdown_rx,
+        )
     }
 
     /// Run the menu bar app. Blocks forever on the main thread.
@@ -81,7 +98,9 @@ impl MenuBarApp {
                     rx: self.rx,
                     pulsing: false,
                     pulse_bright: true,
+                    pulse_counter: 0,
                     reconnect_tx: Some(self.reconnect_tx),
+                    shutdown_tx: Some(self.shutdown_tx),
                 });
             }
 
@@ -138,7 +157,6 @@ fn register_click_handler_class() -> &'static objc::runtime::Class {
     decl.register()
 }
 
-#[allow(deprecated)]
 extern "C" fn handle_click(_this: &Object, _cmd: Sel, sender: id) {
     let guard = GLOBAL_STATE.lock();
     let borrow = guard.borrow();
@@ -164,7 +182,6 @@ extern "C" fn handle_click(_this: &Object, _cmd: Sel, sender: id) {
     }
 }
 
-#[allow(deprecated)]
 unsafe fn show_context_menu(handler: &Object, _sender: id, raw_item: id) {
     unsafe {
         let menu: id = msg_send![class!(NSMenu), alloc];
@@ -218,26 +235,26 @@ unsafe fn show_context_menu(handler: &Object, _sender: id, raw_item: id) {
     }
 }
 
-#[allow(deprecated)]
 extern "C" fn menu_reconnect(_this: &Object, _cmd: Sel, _sender: id) {
     let guard = GLOBAL_STATE.lock();
     let borrow = guard.borrow();
-    if let Some(ref state) = *borrow {
-        if let Some(ref tx) = state.reconnect_tx {
-            let _ = tx.try_send(());
-        }
+    if let Some(ref state) = *borrow
+        && let Some(ref tx) = state.reconnect_tx
+    {
+        let _ = tx.try_send(());
     }
 }
 
-#[allow(deprecated)]
 extern "C" fn menu_quit(_this: &Object, _cmd: Sel, _sender: id) {
-    unsafe {
-        let app = NSApp();
-        let _: () = msg_send![app, terminate: nil];
+    let guard = GLOBAL_STATE.lock();
+    let borrow = guard.borrow();
+    if let Some(ref state) = *borrow
+        && let Some(ref tx) = state.shutdown_tx
+    {
+        let _ = tx.try_send(());
     }
 }
 
-#[allow(deprecated)]
 extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
     unsafe {
         let pool: id = msg_send![class!(NSAutoreleasePool), new];
@@ -278,11 +295,8 @@ extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
 
             // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
             if state.pulsing {
-                // Use a simple counter approach: toggle every 10th poll (50ms * 10 = 500ms)
-                static PULSE_COUNTER: std::sync::atomic::AtomicU32 =
-                    std::sync::atomic::AtomicU32::new(0);
-                let count = PULSE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if count % 10 == 0 {
+                state.pulse_counter = state.pulse_counter.wrapping_add(1);
+                if state.pulse_counter.is_multiple_of(10) {
                     state.pulse_bright = !state.pulse_bright;
                     let color = if state.pulse_bright {
                         DotColor::Green

@@ -1,5 +1,5 @@
 use cocoa::base::{NO, id};
-use cocoa::foundation::{NSPoint, NSRect, NSSize};
+use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc::{class, msg_send, sel, sel_impl};
 
 use std::sync::Arc;
@@ -15,16 +15,35 @@ pub enum DotColor {
     GreenDim = 4,
 }
 
+impl DotColor {
+    /// Human-readable label for VoiceOver accessibility.
+    fn accessibility_label(self) -> &'static str {
+        match self {
+            DotColor::Gray => "Aura: disconnected",
+            DotColor::Green => "Aura: connected",
+            DotColor::Amber => "Aura: reconnecting",
+            DotColor::Red => "Aura: error",
+            DotColor::GreenDim => "Aura: listening (dim)",
+        }
+    }
+}
+
 pub struct AuraStatusItem {
     status_item: id,
     color: Arc<AtomicU8>,
 }
 
+// SAFETY: AuraStatusItem holds Objective-C `id` pointers that are only accessed
+// on the main thread via the NSTimer / ObjC callback path. The `Arc<AtomicU8>`
+// field is inherently Send. The raw `id` is sent once during initialization but
+// all subsequent access is main-thread-only, mediated by the GLOBAL_STATE lock.
 unsafe impl Send for AuraStatusItem {}
 
-#[allow(deprecated)]
 impl AuraStatusItem {
-    /// MUST be called on the main thread.
+    /// Create a new status item in the system menu bar.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
     pub unsafe fn new() -> Self {
         unsafe {
             let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
@@ -35,14 +54,31 @@ impl AuraStatusItem {
             let color = Arc::new(AtomicU8::new(DotColor::Gray as u8));
             let item = Self { status_item, color };
             item.update_icon(DotColor::Gray);
+
+            // Set VoiceOver accessibility on the button
+            let button: id = msg_send![status_item, button];
+            let label = NSString::alloc(cocoa::base::nil).init_str("Aura: disconnected");
+            let _: () = msg_send![button, setAccessibilityLabel: label];
+            let tooltip = NSString::alloc(cocoa::base::nil).init_str("Aura AI Assistant");
+            let _: () = msg_send![button, setToolTip: tooltip];
+
             item
         }
     }
 
+    /// Update the dot color of the status item icon.
+    ///
+    /// # Safety
+    /// Must be called on the main thread (AppKit requirement).
     pub unsafe fn set_color(&self, color: DotColor) {
         self.color.store(color as u8, Ordering::Relaxed);
         unsafe {
             self.update_icon(color);
+
+            // Update VoiceOver accessibility label
+            let button: id = msg_send![self.status_item, button];
+            let label = NSString::alloc(cocoa::base::nil).init_str(color.accessibility_label());
+            let _: () = msg_send![button, setAccessibilityLabel: label];
         }
     }
 
@@ -92,7 +128,8 @@ impl AuraStatusItem {
                     NSPoint::new(offset - glow_inset, offset - glow_inset),
                     NSSize::new(dot_size + glow_inset * 2.0, dot_size + glow_inset * 2.0),
                 );
-                let glow_path: id = msg_send![class!(NSBezierPath), bezierPathWithOvalInRect: glow_rect];
+                let glow_path: id =
+                    msg_send![class!(NSBezierPath), bezierPathWithOvalInRect: glow_rect];
                 let _: () = msg_send![glow_path, fill];
             }
 
@@ -119,7 +156,6 @@ impl AuraStatusItem {
     }
 }
 
-#[allow(deprecated)]
 impl Drop for AuraStatusItem {
     fn drop(&mut self) {
         unsafe {

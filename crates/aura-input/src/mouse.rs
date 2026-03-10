@@ -6,20 +6,18 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
 fn event_source() -> Result<CGEventSource> {
-    CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))
+    CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| {
+        let errno = std::io::Error::last_os_error();
+        anyhow::anyhow!("Failed to create CGEventSource (HIDSystemState): os error {errno}")
+    })
 }
 
 pub fn move_mouse(x: f64, y: f64) -> Result<()> {
     let source = event_source()?;
     let point = CGPoint::new(x, y);
-    let event = CGEvent::new_mouse_event(
-        source,
-        CGEventType::MouseMoved,
-        point,
-        CGMouseButton::Left,
-    )
-    .map_err(|_| anyhow::anyhow!("Failed to create mouse move event"))?;
+    let event =
+        CGEvent::new_mouse_event(source, CGEventType::MouseMoved, point, CGMouseButton::Left)
+            .map_err(|_| anyhow::anyhow!("Failed to create mouse move event"))?;
     event.post(CGEventTapLocation::HID);
     Ok(())
 }
@@ -66,10 +64,10 @@ pub fn scroll(dx: i32, dy: i32) -> Result<()> {
     let event = CGEvent::new_scroll_event(
         source,
         ScrollEventUnit::PIXEL,
-        2, // wheel_count
-        dy,     // wheel1 (vertical)
-        dx,     // wheel2 (horizontal)
-        0,      // wheel3
+        2,  // wheel_count
+        dy, // wheel1 (vertical)
+        dx, // wheel2 (horizontal)
+        0,  // wheel3
     )
     .map_err(|_| anyhow::anyhow!("Failed to create scroll event"))?;
     event.post(CGEventTapLocation::HID);
@@ -108,13 +106,8 @@ pub fn drag(from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> Result<()> {
 
     // Mouse up at destination
     let up_source = event_source()?;
-    let up = CGEvent::new_mouse_event(
-        up_source,
-        CGEventType::LeftMouseUp,
-        to,
-        CGMouseButton::Left,
-    )
-    .map_err(|_| anyhow::anyhow!("Failed to create drag up event"))?;
+    let up = CGEvent::new_mouse_event(up_source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
+        .map_err(|_| anyhow::anyhow!("Failed to create drag up event"))?;
     up.post(CGEventTapLocation::HID);
 
     Ok(())

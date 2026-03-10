@@ -69,12 +69,20 @@ pub struct PrebuiltVoiceConfig {
     pub voice_name: String,
 }
 
+/// Role of a content block — either "user" or "model".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ContentRole {
+    User,
+    Model,
+}
+
 /// A content block containing one or more parts.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Content {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
+    pub role: Option<ContentRole>,
 
     pub parts: Vec<Part>,
 }
@@ -129,26 +137,6 @@ pub struct ContextWindowCompression {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlidingWindow {}
-
-/// Real-time audio input sent during a session.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RealtimeInputMessage {
-    pub realtime_input: RealtimeInput,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RealtimeInput {
-    pub media_chunks: Vec<MediaChunk>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaChunk {
-    pub mime_type: String,
-    pub data: String,
-}
 
 /// Real-time video input using the new separate video field.
 #[derive(Debug, Serialize)]
@@ -353,23 +341,23 @@ mod tests {
     }
 
     #[test]
-    fn serialize_realtime_input() {
-        let msg = RealtimeInputMessage {
-            realtime_input: RealtimeInput {
-                media_chunks: vec![MediaChunk {
+    fn serialize_realtime_audio_input() {
+        let msg = RealtimeAudioMessage {
+            realtime_input: RealtimeAudioInput {
+                audio: Blob {
                     mime_type: "audio/pcm;rate=16000".into(),
                     data: "AQIDBA==".into(),
-                }],
+                },
             },
         };
 
         let value = serde_json::to_value(&msg).unwrap();
 
         assert_eq!(
-            value["realtimeInput"]["mediaChunks"][0]["mimeType"],
+            value["realtimeInput"]["audio"]["mimeType"],
             "audio/pcm;rate=16000"
         );
-        assert_eq!(value["realtimeInput"]["mediaChunks"][0]["data"], "AQIDBA==");
+        assert_eq!(value["realtimeInput"]["audio"]["data"], "AQIDBA==");
     }
 
     #[test]
@@ -471,7 +459,7 @@ mod tests {
         let msg = ClientContentMessage {
             client_content: ClientContent {
                 turns: vec![Content {
-                    role: Some("user".into()),
+                    role: Some(ContentRole::User),
                     parts: vec![Part {
                         text: Some("Hello, world!".into()),
                         inline_data: None,
@@ -539,7 +527,10 @@ mod tests {
             },
         };
         let value = serde_json::to_value(&msg).unwrap();
-        assert_eq!(value["realtimeInput"]["audio"]["mimeType"], "audio/pcm;rate=16000");
+        assert_eq!(
+            value["realtimeInput"]["audio"]["mimeType"],
+            "audio/pcm;rate=16000"
+        );
         assert_eq!(value["realtimeInput"]["audio"]["data"], "AQIDBA==");
     }
 }

@@ -6,7 +6,7 @@ async fn test_event_bus_send_receive() {
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe();
 
-    bus.send(AuraEvent::WakeWordDetected).unwrap();
+    bus.send(AuraEvent::WakeWordDetected);
 
     let event = rx.recv().await.unwrap();
     assert!(matches!(event, AuraEvent::WakeWordDetected));
@@ -22,8 +22,7 @@ async fn test_event_bus_multiple_subscribers() {
         name: "run_applescript".into(),
         success: true,
         output: "done".into(),
-    })
-    .unwrap();
+    });
 
     let e1 = rx1.recv().await.unwrap();
     let e2 = rx2.recv().await.unwrap();

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -50,7 +52,7 @@ pub struct Message {
 }
 
 pub struct SessionMemory {
-    pub(crate) conn: Connection,
+    conn: Connection,
 }
 
 impl SessionMemory {
@@ -58,6 +60,7 @@ impl SessionMemory {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -163,13 +166,120 @@ impl SessionMemory {
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM settings WHERE key = ?1")?;
         let result = stmt.query_row(rusqlite::params![key], |row| row.get(0));
         match result {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Delete sessions (and their messages) older than `max_age_days` days.
+    /// Returns the number of sessions deleted.
+    pub fn prune_old_sessions(&self, max_age_days: u32) -> Result<usize> {
+        // We delete messages first since the schema has no ON DELETE CASCADE.
+        // Use datetime() to normalize RFC 3339 timestamps for comparison.
+        let cutoff = format!("-{max_age_days} days");
+        self.conn.execute(
+            "DELETE FROM messages WHERE session_id IN (
+                SELECT id FROM sessions
+                WHERE datetime(started_at) < datetime('now', ?1)
+            )",
+            params![cutoff],
+        )?;
+        let deleted = self.conn.execute(
+            "DELETE FROM sessions WHERE datetime(started_at) < datetime('now', ?1)",
+            params![cutoff],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Return a brief summary of the last `max_sessions` sessions, including
+    /// timestamps and which tools were used (with counts).
+    pub fn get_recent_summary(&self, max_sessions: usize) -> Result<String> {
+        let sessions = self.list_sessions(max_sessions)?;
+        if sessions.is_empty() {
+            return Ok(String::new());
+        }
+
+        let mut lines = Vec::new();
+        lines.push("Recent history:".to_string());
+
+        for session in &sessions {
+            // Collect tool calls for this session
+            let mut stmt = self.conn.prepare(
+                "SELECT content FROM messages WHERE session_id = ?1 AND role = 'tool_call' ORDER BY id ASC",
+            )?;
+            let tool_names: Vec<String> = stmt
+                .query_map(params![session.id], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .filter_map(|content| {
+                    // Content format is "tool_name: {args}" — extract the name
+                    content.split(':').next().map(|s| s.trim().to_string())
+                })
+                .collect();
+
+            if tool_names.is_empty() {
+                continue;
+            }
+
+            // Count occurrences of each tool
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            for name in &tool_names {
+                *counts.entry(name.clone()).or_insert(0) += 1;
+            }
+
+            // Format: "tool_name (Nx)" sorted by count descending
+            let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            let tool_summary: Vec<String> = sorted
+                .iter()
+                .map(|(name, count)| {
+                    if *count > 1 {
+                        format!("{name} ({count}x)")
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+
+            // Format timestamp — truncate to minutes
+            let ts = &session.started_at;
+            let display_ts = if ts.len() >= 16 { &ts[..16] } else { ts };
+
+            lines.push(format!(
+                "- Session {display_ts}: Used {}",
+                tool_summary.join(", ")
+            ));
+        }
+
+        if lines.len() <= 1 {
+            // Only the header, no actual sessions with tools
+            return Ok(String::new());
+        }
+
+        Ok(lines.join("\n"))
+    }
+
+    /// Run VACUUM to reclaim disk space after pruning.
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
+    /// Query a PRAGMA value. Useful for inspecting database configuration.
+    #[cfg(test)]
+    pub(crate) fn pragma_query_value<T: rusqlite::types::FromSql>(
+        &self,
+        pragma_name: &str,
+    ) -> Result<T> {
+        let value = self
+            .conn
+            .pragma_query_value(None, pragma_name, |row| row.get(0))?;
+        Ok(value)
     }
 }
 
@@ -181,10 +291,7 @@ mod tests {
     fn wal_mode_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
-        let mode: String = mem
-            .conn
-            .pragma_query_value(None, "journal_mode", |row| row.get(0))
-            .unwrap();
+        let mode: String = mem.pragma_query_value("journal_mode").unwrap();
         assert_eq!(mode, "wal");
     }
 
@@ -213,5 +320,47 @@ mod tests {
         mem.set_setting("handle", "v1").unwrap();
         mem.set_setting("handle", "v2").unwrap();
         assert_eq!(mem.get_setting("handle").unwrap(), Some("v2".into()));
+    }
+
+    #[test]
+    fn recent_summary_empty_when_no_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        let summary = mem.get_recent_summary(3).unwrap();
+        assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn recent_summary_includes_tool_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+
+        let sid = mem.start_session().unwrap();
+        mem.add_message(&sid, MessageRole::ToolCall, "click: {}", None)
+            .unwrap();
+        mem.add_message(&sid, MessageRole::ToolCall, "click: {}", None)
+            .unwrap();
+        mem.add_message(&sid, MessageRole::ToolCall, "type_text: {}", None)
+            .unwrap();
+        mem.end_session(&sid, None).unwrap();
+
+        let summary = mem.get_recent_summary(3).unwrap();
+        assert!(summary.contains("Recent history:"));
+        assert!(summary.contains("click (2x)"));
+        assert!(summary.contains("type_text"));
+    }
+
+    #[test]
+    fn recent_summary_skips_sessions_without_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+
+        let sid = mem.start_session().unwrap();
+        mem.add_message(&sid, MessageRole::User, "hello", None)
+            .unwrap();
+        mem.end_session(&sid, None).unwrap();
+
+        let summary = mem.get_recent_summary(3).unwrap();
+        assert!(summary.is_empty());
     }
 }

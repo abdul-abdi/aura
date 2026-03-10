@@ -3,8 +3,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use core_graphics::display::CGDisplay;
 use image::codecs::jpeg::JpegEncoder;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum width to send to Gemini (downscale retina captures).
 const MAX_WIDTH: u32 = 1920;
@@ -24,6 +24,10 @@ pub struct CapturedFrame {
     /// Retina scale factor (e.g. 2.0 on Retina displays).
     /// Ratio of raw pixel width to logical display width.
     pub scale_factor: f64,
+    /// Logical display width in macOS points (used for coordinate mapping).
+    pub logical_width: u32,
+    /// Logical display height in macOS points (used for coordinate mapping).
+    pub logical_height: u32,
 }
 
 unsafe extern "C" {
@@ -37,6 +41,10 @@ unsafe extern "C" {
 
 /// Get the display ID containing the mouse cursor.
 fn active_display_id() -> Option<u32> {
+    // SAFETY: CGGetDisplaysWithPoint is a CoreGraphics C API. We pass valid mutable
+    // pointers to stack-allocated u32 values with max_displays=1, so the function
+    // writes at most one display ID. The event source and mouse event are created
+    // via safe Rust wrappers and remain valid for the duration of the call.
     unsafe {
         let mut display_id: u32 = 0;
         let mut count: u32 = 0;
@@ -70,7 +78,11 @@ pub fn capture_screen() -> Result<CapturedFrame> {
     let raw_width = width as f64;
     let display_bounds = display.bounds();
     let logical_width = display_bounds.size.width;
-    let scale_factor = if logical_width > 0.0 { raw_width / logical_width } else { 1.0 };
+    let scale_factor = if logical_width > 0.0 {
+        raw_width / logical_width
+    } else {
+        1.0
+    };
     let bytes_per_row = cg_image.bytes_per_row();
     let data = cg_image.data();
     let raw_bytes = data.bytes();
@@ -83,7 +95,7 @@ pub fn capture_screen() -> Result<CapturedFrame> {
             let px = row_start + x * 4;
             rgb.push(raw_bytes[px + 2]); // R
             rgb.push(raw_bytes[px + 1]); // G
-            rgb.push(raw_bytes[px]);     // B
+            rgb.push(raw_bytes[px]); // B
         }
     }
 
@@ -118,7 +130,18 @@ pub fn capture_screen() -> Result<CapturedFrame> {
 
     let jpeg_base64 = BASE64.encode(&jpeg_buf);
 
-    Ok(CapturedFrame { jpeg_base64, hash, width: final_w, height: final_h, scale_factor })
+    let logical_w = display_bounds.size.width as u32;
+    let logical_h = display_bounds.size.height as u32;
+
+    Ok(CapturedFrame {
+        jpeg_base64,
+        hash,
+        width: final_w,
+        height: final_h,
+        scale_factor,
+        logical_width: logical_w,
+        logical_height: logical_h,
+    })
 }
 
 /// Compute an FNV-1a hash by sampling 2048 pixels across the frame.
@@ -148,12 +171,87 @@ mod tests {
         let h2 = compute_frame_hash(&frame2);
         assert_ne!(h1, h2, "Hash should detect single-pixel change");
     }
+
+    #[test]
+    fn trigger_sets_flag() {
+        let trigger = CaptureTrigger::new();
+        trigger.trigger();
+        assert!(
+            trigger.flag.load(Ordering::Relaxed),
+            "trigger() should set the flag"
+        );
+    }
+
+    #[test]
+    fn check_and_clear_returns_true_and_clears() {
+        let trigger = CaptureTrigger::new();
+        trigger.trigger();
+        assert!(
+            trigger.check_and_clear(),
+            "check_and_clear() should return true after trigger()"
+        );
+        assert!(
+            !trigger.flag.load(Ordering::Relaxed),
+            "flag should be cleared after check_and_clear()"
+        );
+    }
+
+    #[test]
+    fn check_and_clear_returns_false_when_not_triggered() {
+        let trigger = CaptureTrigger::new();
+        assert!(
+            !trigger.check_and_clear(),
+            "check_and_clear() should return false when not triggered"
+        );
+    }
+
+    #[test]
+    fn multiple_triggers_before_check_produce_one_true() {
+        let trigger = CaptureTrigger::new();
+        trigger.trigger();
+        trigger.trigger();
+        trigger.trigger();
+        assert!(
+            trigger.check_and_clear(),
+            "first check_and_clear() should return true"
+        );
+        assert!(
+            !trigger.check_and_clear(),
+            "second check_and_clear() should return false"
+        );
+    }
+
+    #[test]
+    fn default_creates_untriggered_instance() {
+        let trigger = CaptureTrigger::default();
+        assert!(
+            !trigger.check_and_clear(),
+            "default CaptureTrigger should not be triggered"
+        );
+    }
+
+    #[test]
+    fn clone_shares_flag() {
+        let trigger = CaptureTrigger::new();
+        let cloned = trigger.clone();
+        trigger.trigger();
+        assert!(
+            cloned.check_and_clear(),
+            "cloned trigger should see the original's trigger"
+        );
+    }
 }
 
 /// Handle for triggering immediate captures (post-action).
 #[derive(Clone)]
 pub struct CaptureTrigger {
     flag: Arc<AtomicBool>,
+}
+
+impl Default for CaptureTrigger {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CaptureTrigger {

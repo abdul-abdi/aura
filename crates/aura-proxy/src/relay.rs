@@ -1,16 +1,28 @@
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
+
+/// Max WebSocket message/frame size for the Gemini upstream: 1 MiB.
+const WS_MAX_SIZE: usize = 1_048_576;
 
 /// Relay WebSocket frames between client and Gemini.
 pub async fn relay_websocket(client_ws: WebSocket, gemini_url: String) {
-    let gemini_conn = match tokio_tungstenite::connect_async(&gemini_url).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
-            tracing::error!("Failed to connect to Gemini: {e}");
-            return;
-        }
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(WS_MAX_SIZE),
+        max_frame_size: Some(WS_MAX_SIZE),
+        ..Default::default()
     };
+
+    let gemini_conn =
+        match tokio_tungstenite::connect_async_with_config(&gemini_url, Some(ws_config), false)
+            .await
+        {
+            Ok((ws, _)) => ws,
+            Err(e) => {
+                tracing::error!("Failed to connect to Gemini: {e}");
+                return;
+            }
+        };
 
     let (mut client_tx, mut client_rx) = client_ws.split();
     let (mut gemini_tx, mut gemini_rx) = gemini_conn.split();

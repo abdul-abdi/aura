@@ -4,6 +4,7 @@
 .DS_Store
 .claude/
 .code_index/
-docs/
+docs/plans/
+docs/HANDOFF.md
 HANDOFF.md
 .worktrees/

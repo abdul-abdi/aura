@@ -3,6 +3,9 @@ name = "aura-menubar"
 version.workspace = true
 edition.workspace = true
 
+[lints.rust]
+unexpected_cfgs = "allow"
+
 [dependencies]
 tokio.workspace = true
 tracing.workspace = true

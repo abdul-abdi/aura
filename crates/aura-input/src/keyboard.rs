@@ -3,8 +3,10 @@ use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode}
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
 fn event_source() -> Result<CGEventSource> {
-    CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))
+    CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|_| {
+        let errno = std::io::Error::last_os_error();
+        anyhow::anyhow!("Failed to create CGEventSource (HIDSystemState): os error {errno}")
+    })
 }
 
 /// Type a string by posting key events for each character.
@@ -112,6 +114,179 @@ pub fn keycode_from_name(name: &str) -> Option<CGKeyCode> {
         "x" => Some(7),
         "y" => Some(16),
         "z" => Some(6),
+        // Number keys (main keyboard row)
+        "0" => Some(29),
+        "1" => Some(18),
+        "2" => Some(19),
+        "3" => Some(20),
+        "4" => Some(21),
+        "5" => Some(23),
+        "6" => Some(22),
+        "7" => Some(26),
+        "8" => Some(28),
+        "9" => Some(25),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Special keys ---
+
+    #[test]
+    fn keycode_return() {
+        assert_eq!(keycode_from_name("return"), Some(36));
+        assert_eq!(keycode_from_name("enter"), Some(36));
+        assert_eq!(keycode_from_name("Return"), Some(36));
+        assert_eq!(keycode_from_name("ENTER"), Some(36));
+    }
+
+    #[test]
+    fn keycode_tab() {
+        assert_eq!(keycode_from_name("tab"), Some(48));
+        assert_eq!(keycode_from_name("Tab"), Some(48));
+    }
+
+    #[test]
+    fn keycode_space() {
+        assert_eq!(keycode_from_name("space"), Some(49));
+        assert_eq!(keycode_from_name("SPACE"), Some(49));
+    }
+
+    #[test]
+    fn keycode_delete() {
+        assert_eq!(keycode_from_name("delete"), Some(51));
+        assert_eq!(keycode_from_name("backspace"), Some(51));
+        assert_eq!(keycode_from_name("Delete"), Some(51));
+    }
+
+    #[test]
+    fn keycode_escape() {
+        assert_eq!(keycode_from_name("escape"), Some(53));
+        assert_eq!(keycode_from_name("esc"), Some(53));
+        assert_eq!(keycode_from_name("Escape"), Some(53));
+    }
+
+    // --- Arrow keys ---
+
+    #[test]
+    fn keycode_arrows() {
+        assert_eq!(keycode_from_name("left"), Some(123));
+        assert_eq!(keycode_from_name("right"), Some(124));
+        assert_eq!(keycode_from_name("down"), Some(125));
+        assert_eq!(keycode_from_name("up"), Some(126));
+        assert_eq!(keycode_from_name("Left"), Some(123));
+        assert_eq!(keycode_from_name("UP"), Some(126));
+    }
+
+    // --- Function keys ---
+
+    #[test]
+    fn keycode_function_keys() {
+        assert_eq!(keycode_from_name("f1"), Some(122));
+        assert_eq!(keycode_from_name("f2"), Some(120));
+        assert_eq!(keycode_from_name("f3"), Some(99));
+        assert_eq!(keycode_from_name("f4"), Some(118));
+        assert_eq!(keycode_from_name("f5"), Some(96));
+        assert_eq!(keycode_from_name("f6"), Some(97));
+        assert_eq!(keycode_from_name("f7"), Some(98));
+        assert_eq!(keycode_from_name("f8"), Some(100));
+        assert_eq!(keycode_from_name("f9"), Some(101));
+        assert_eq!(keycode_from_name("f10"), Some(109));
+        assert_eq!(keycode_from_name("f11"), Some(103));
+        assert_eq!(keycode_from_name("f12"), Some(111));
+        // Case insensitive
+        assert_eq!(keycode_from_name("F1"), Some(122));
+        assert_eq!(keycode_from_name("F12"), Some(111));
+    }
+
+    // --- Letters ---
+
+    #[test]
+    fn keycode_all_letters() {
+        let expected: &[(&str, CGKeyCode)] = &[
+            ("a", 0),
+            ("b", 11),
+            ("c", 8),
+            ("d", 2),
+            ("e", 14),
+            ("f", 3),
+            ("g", 5),
+            ("h", 4),
+            ("i", 34),
+            ("j", 38),
+            ("k", 40),
+            ("l", 37),
+            ("m", 46),
+            ("n", 45),
+            ("o", 31),
+            ("p", 35),
+            ("q", 12),
+            ("r", 15),
+            ("s", 1),
+            ("t", 17),
+            ("u", 32),
+            ("v", 9),
+            ("w", 13),
+            ("x", 7),
+            ("y", 16),
+            ("z", 6),
+        ];
+        for &(name, code) in expected {
+            assert_eq!(
+                keycode_from_name(name),
+                Some(code),
+                "keycode for '{name}' should be {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn keycode_uppercase_letters() {
+        // Should be case-insensitive
+        assert_eq!(keycode_from_name("A"), Some(0));
+        assert_eq!(keycode_from_name("Z"), Some(6));
+        assert_eq!(keycode_from_name("M"), Some(46));
+    }
+
+    // --- Unknown keys ---
+
+    // --- Number keys ---
+
+    #[test]
+    fn keycode_number_keys() {
+        let expected: &[(&str, CGKeyCode)] = &[
+            ("0", 29),
+            ("1", 18),
+            ("2", 19),
+            ("3", 20),
+            ("4", 21),
+            ("5", 23),
+            ("6", 22),
+            ("7", 26),
+            ("8", 28),
+            ("9", 25),
+        ];
+        for &(name, code) in expected {
+            assert_eq!(
+                keycode_from_name(name),
+                Some(code),
+                "keycode for '{name}' should be {code}"
+            );
+        }
+    }
+
+    // --- Unknown keys ---
+
+    #[test]
+    fn keycode_unknown_returns_none() {
+        assert_eq!(keycode_from_name("unknown"), None);
+        assert_eq!(keycode_from_name(""), None);
+        assert_eq!(keycode_from_name("f13"), None);
+        assert_eq!(keycode_from_name("ctrl"), None);
+        assert_eq!(keycode_from_name("shift"), None);
+        assert_eq!(keycode_from_name("cmd"), None);
     }
 }

@@ -15,7 +15,6 @@ impl Daemon {
         tracing::info!("Aura daemon running");
 
         let mut rx = self.bus.subscribe();
-        let bus = self.bus.clone();
 
         loop {
             tokio::select! {
@@ -42,18 +41,12 @@ impl Daemon {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Ctrl+C received, shutting down");
-                    send_event(&bus, AuraEvent::Shutdown);
+                    self.bus.send(AuraEvent::Shutdown);
                     break;
                 }
             }
         }
 
         Ok(())
-    }
-}
-
-fn send_event(bus: &EventBus, event: AuraEvent) {
-    if let Err(e) = bus.send(event) {
-        tracing::warn!("Failed to send event: {e}");
     }
 }

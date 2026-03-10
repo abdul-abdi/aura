@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub enum AuraEvent {
     // Voice
     WakeWordDetected,
-    ListeningStarted,
 
     // Gemini session
     GeminiConnected,
@@ -13,12 +12,6 @@ pub enum AuraEvent {
     },
 
     // Conversation
-    AssistantSpeaking {
-        text: String,
-    },
-    UserTranscription {
-        text: String,
-    },
     BargeIn,
 
     // Tool execution

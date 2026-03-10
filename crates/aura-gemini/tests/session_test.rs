@@ -123,7 +123,9 @@ async fn test_session_connect_and_receive_audio() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     // Should receive Connected
@@ -174,7 +176,9 @@ async fn test_session_send_audio() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     // Wait for connection
@@ -242,7 +246,9 @@ async fn test_session_tool_call_and_response() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     expect_event(
@@ -309,7 +315,9 @@ async fn test_session_interrupted() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     expect_event(
@@ -341,7 +349,9 @@ async fn test_session_turn_complete() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     expect_event(
@@ -415,7 +425,9 @@ async fn test_session_tool_call_cancellation() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     expect_event(
@@ -459,7 +471,9 @@ async fn test_session_transcription() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     expect_event(
@@ -494,7 +508,9 @@ async fn test_session_reconnect_on_server_close() {
     })
     .await;
 
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     expect_event(
@@ -533,7 +549,9 @@ async fn test_session_connect_failure() {
     drop(listener);
 
     let url = format!("ws://{addr}");
-    let session = GeminiLiveSession::connect(test_config(url)).await.unwrap();
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
     let mut rx = session.subscribe();
 
     // The session spawns background tasks, so connect() succeeds.
@@ -563,6 +581,174 @@ async fn test_session_connect_failure() {
             GeminiEvent::Reconnecting { .. } | GeminiEvent::Error { .. }
         ),
         "Expected Reconnecting or Error, got: {event:?}"
+    );
+
+    session.disconnect();
+}
+
+/// Start a mock WebSocket server that accepts multiple connections.
+/// Each connection is handled by the closure, which receives the stream and
+/// a connection index (0-based).
+async fn start_multi_mock_server<F, Fut>(max_connections: usize, handler: F) -> String
+where
+    F: Fn(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, usize) -> Fut
+        + Send
+        + Sync
+        + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handler = std::sync::Arc::new(handler);
+    tokio::spawn(async move {
+        for i in 0..max_connections {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            let h = handler.clone();
+            tokio::spawn(async move {
+                h(ws, i).await;
+            });
+        }
+    });
+    format!("ws://{addr}")
+}
+
+#[tokio::test]
+async fn test_go_away_triggers_reconnect() {
+    let url = start_multi_mock_server(2, |mut ws, conn_index| async move {
+        complete_setup(&mut ws).await;
+        if conn_index == 0 {
+            // First connection: send goAway to trigger reconnect
+            let msg = json!({"goAway": {"timeToTransfer": "5s"}});
+            ws.send(Message::Text(msg.to_string())).await.unwrap();
+            // Keep alive briefly
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                while ws.next().await.is_some() {}
+            })
+            .await;
+        } else {
+            // Second connection: just stay alive
+            while ws.next().await.is_some() {}
+        }
+    })
+    .await;
+
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
+    let mut rx = session.subscribe();
+
+    // First Connected
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected (first)",
+    )
+    .await;
+
+    // Should see Reconnecting after goAway
+    let event = expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Reconnecting { .. }),
+        "Reconnecting after goAway",
+    )
+    .await;
+    assert!(
+        matches!(event, GeminiEvent::Reconnecting { attempt: 1 }),
+        "Expected attempt 1, got: {event:?}"
+    );
+
+    // Should reconnect and get Connected again
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected (second)",
+    )
+    .await;
+
+    session.disconnect();
+}
+
+#[tokio::test]
+async fn test_binary_frame_handled_like_text() {
+    let url = start_mock_server(|mut ws| async move {
+        complete_setup(&mut ws).await;
+
+        // Send a server message as a Binary frame instead of Text
+        let msg = json!({
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{"text": "Hello from binary"}]
+                }
+            }
+        });
+        ws.send(Message::Binary(msg.to_string().into_bytes()))
+            .await
+            .unwrap();
+
+        // Keep connection open
+        while ws.next().await.is_some() {}
+    })
+    .await;
+
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
+    let mut rx = session.subscribe();
+
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Connected),
+        "Connected",
+    )
+    .await;
+
+    let event = expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::Transcription { .. }),
+        "Transcription from binary frame",
+    )
+    .await;
+
+    let GeminiEvent::Transcription { text } = event else {
+        panic!("Expected Transcription, got: {event:?}");
+    };
+    assert_eq!(text, "Hello from binary");
+
+    session.disconnect();
+}
+
+#[tokio::test]
+async fn test_setup_timeout_triggers_reconnect() {
+    let url = start_multi_mock_server(2, |mut ws, _conn_index| async move {
+        // Read setup but never send setupComplete — let the timeout fire.
+        let _msg = ws.next().await;
+        // Keep alive so the connection doesn't close before the timeout.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    })
+    .await;
+
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
+    let mut rx = session.subscribe();
+
+    // The setup has a 15-second timeout. We should eventually see Reconnecting.
+    let event = timeout(Duration::from_secs(20), async {
+        loop {
+            match rx.recv().await {
+                Ok(event) if matches!(event, GeminiEvent::Reconnecting { .. }) => return event,
+                Ok(_) => continue,
+                Err(e) => panic!("Channel error: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("Timed out waiting for Reconnecting event after setup timeout");
+
+    assert!(
+        matches!(event, GeminiEvent::Reconnecting { attempt: 1 }),
+        "Expected attempt 1, got: {event:?}"
     );
 
     session.disconnect();

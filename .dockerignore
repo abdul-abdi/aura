@@ -1,0 +1,34 @@
+# Build artifacts — largest exclusion, prevents gigabytes of cache from being sent
+target/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# CI / editor / tooling
+.github/
+.vscode/
+.idea/
+*.iml
+.claude/
+
+# Scripts and docs (not needed in the image)
+scripts/
+*.md
+LICENSE
+
+# macOS noise
+.DS_Store
+**/.DS_Store
+
+# Env files that must never leak into images
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Test artifacts
+**/*.profraw
+**/coverage/

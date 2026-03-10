@@ -61,7 +61,7 @@ impl GeminiConfig {
         let api_key = std::env::var("GEMINI_API_KEY")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_file_key())
+            .or_else(read_config_file_key)
             .context(
                 "No API key found. Set GEMINI_API_KEY env var or add api_key to ~/.config/aura/config.toml",
             )?;
@@ -127,20 +127,13 @@ fn read_config_file_proxy_url() -> Option<String> {
 
 fn read_config_value(key: &str) -> Option<String> {
     let path = dirs::config_dir()?.join("aura/config.toml");
+    read_config_value_from_path(&path, key)
+}
+
+fn read_config_value_from_path(path: &std::path::Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key) {
-            let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_prefix('=') {
-                let value = rest.trim().trim_matches('"').trim_matches('\'');
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-    None
+    let table: toml::Table = content.parse().ok()?;
+    table.get(key)?.as_str().map(String::from)
 }
 
 #[cfg(test)]
@@ -159,8 +152,8 @@ mod tests {
         let result = GeminiConfig::from_env();
         // If a config file exists with an API key, from_env() will succeed via fallback.
         // Only assert error when no config file provides a key.
-        if result.is_err() {
-            let err = result.unwrap_err().to_string();
+        if let Err(e) = result {
+            let err = e.to_string();
             assert!(
                 err.contains("API key") || err.contains("GEMINI_API_KEY"),
                 "Error should mention API key, got: {err}"
@@ -204,27 +197,28 @@ mod tests {
     }
 
     #[test]
-    fn test_read_config_file_key_parses_toml_line() {
-        // Test the parsing logic directly with temp file
+    fn test_read_config_file_key_parses_toml() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         std::fs::write(&config_path, "api_key = \"my-secret-key-123\"\n").unwrap();
 
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        let mut found = None;
-        for line in content.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("api_key") {
-                let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('=') {
-                    let value = rest.trim().trim_matches('"').trim_matches('\'');
-                    if !value.is_empty() {
-                        found = Some(value.to_string());
-                    }
-                }
-            }
-        }
+        let found = read_config_value_from_path(&config_path, "api_key");
         assert_eq!(found, Some("my-secret-key-123".to_string()));
+    }
+
+    #[test]
+    fn test_read_config_value_no_prefix_matching_bug() {
+        // Ensure `api_key` does not match `api_key_backup`
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "api_key_backup = \"wrong\"\napi_key = \"correct\"\n",
+        )
+        .unwrap();
+
+        let found = read_config_value_from_path(&config_path, "api_key");
+        assert_eq!(found, Some("correct".to_string()));
     }
 
     #[test]

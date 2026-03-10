@@ -62,8 +62,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
             },
             FunctionDeclaration {
                 name: "move_mouse".into(),
-                description: "Move the mouse cursor to the specified screen coordinates."
-                    .into(),
+                description: "Move the mouse cursor to the specified screen coordinates.".into(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

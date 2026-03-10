@@ -1,16 +1,25 @@
 (version 1)
 (deny default)
-;; Allow forking and executing child processes
+;; Allow forking (needed by osascript internally)
 (allow process-fork)
-(allow process-exec*)
-;; Allow read access to the whole filesystem (scripts need to read app state)
+;; Only allow executing osascript and core system binaries
+(allow process-exec
+  (literal "/usr/bin/osascript")
+  (literal "/usr/bin/pbcopy")
+  (literal "/usr/bin/pbpaste")
+  (literal "/usr/bin/open")
+  (literal "/bin/sh")
+  (literal "/bin/bash")
+  (literal "/usr/bin/env"))
+;; Read-only filesystem access (scripts read app state)
 (allow file-read*)
-;; Allow writes only to /tmp (scripts must not touch arbitrary paths)
+;; Writes only to /tmp
 (allow file-write* (subpath "/tmp"))
-;; Allow Mach IPC (required for AppleScript automation / Apple Events)
+;; Mach IPC required for Apple Events (AppleScript automation)
 (allow mach-lookup)
+;; Allow sysctl reads (system info queries)
 (allow sysctl-read)
-(allow system-socket)
-(allow iokit-open)
-;; Block all network access from the sandboxed script process
+;; Block network, iokit, and system-socket
 (deny network*)
+(deny system-socket)
+(deny iokit-open)

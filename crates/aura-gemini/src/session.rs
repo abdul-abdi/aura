@@ -12,17 +12,16 @@ use crate::config::GeminiConfig;
 use crate::protocol::*;
 use crate::tools::build_tool_declarations;
 
-// Protocol documentation constants — not directly referenced in code but
-// record the sample rates and chunk duration used by the Gemini Live API.
-#[allow(dead_code)]
-const AUDIO_CHUNK_DURATION_MS: u64 = 100;
-#[allow(dead_code)]
-const INPUT_SAMPLE_RATE: u32 = 16_000;
-#[allow(dead_code)]
-const OUTPUT_SAMPLE_RATE: u32 = 24_000;
+// Gemini Live API audio protocol parameters:
+// - Audio chunk duration: 100ms
+// - Input sample rate: 16,000 Hz (PCM 16-bit LE)
+// - Output sample rate: 24,000 Hz (PCM 16-bit LE)
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const INITIAL_BACKOFF_MS: u64 = 200;
 const MAX_BACKOFF_MS: u64 = 30_000;
+/// Minimum duration a connection must be alive before we consider it "stable"
+/// and reset the reconnection attempt counter.
+const MIN_STABLE_CONNECTION_SECS: u64 = 30;
 
 /// Events emitted by the Gemini session.
 #[derive(Debug, Clone)]
@@ -70,7 +69,11 @@ pub struct GeminiLiveSession {
 impl GeminiLiveSession {
     /// Connect to the Gemini Live API and start the streaming loop.
     /// Spawns background tasks for sending and receiving.
-    pub async fn connect(config: GeminiConfig) -> Result<Self> {
+    /// If `initial_resumption_handle` is provided, it will be used to resume a previous session.
+    pub async fn connect(
+        config: GeminiConfig,
+        initial_resumption_handle: Option<String>,
+    ) -> Result<Self> {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
         let (video_tx, video_rx) = mpsc::channel::<String>(8);
         let (tool_response_tx, tool_response_rx) =
@@ -82,7 +85,7 @@ impl GeminiLiveSession {
 
         let session_state = SessionState {
             config: Arc::new(config),
-            resumption_handle: Arc::new(Mutex::new(None)),
+            resumption_handle: Arc::new(Mutex::new(initial_resumption_handle)),
             is_first_connect: Arc::clone(&is_first_connect),
         };
 
@@ -91,7 +94,16 @@ impl GeminiLiveSession {
         let tx = event_tx.clone();
         let token = cancel.clone();
         tokio::spawn(async move {
-            connection_loop(state, audio_rx, video_rx, tool_response_rx, text_rx, tx, token).await;
+            connection_loop(
+                state,
+                audio_rx,
+                video_rx,
+                tool_response_rx,
+                text_rx,
+                tx,
+                token,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -155,7 +167,8 @@ impl GeminiLiveSession {
     /// Returns true if this is the first connection (not a reconnection).
     /// After the first connection, this returns false.
     pub fn is_first_connect(&self) -> bool {
-        self.is_first_connect.load(std::sync::atomic::Ordering::Relaxed)
+        self.is_first_connect
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -176,19 +189,35 @@ struct SessionState {
 struct StreamOutcome {
     /// Whether setupComplete was received before the error.
     was_connected: bool,
+    /// How long the connection was alive after setupComplete.
+    connected_duration: Duration,
     error: anyhow::Error,
+}
+
+/// Channel receivers for inbound user data (audio, video, text, tool responses).
+struct StreamChannels {
+    audio_rx: mpsc::Receiver<Vec<f32>>,
+    video_rx: mpsc::Receiver<String>,
+    text_rx: mpsc::Receiver<String>,
+    tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
 }
 
 /// Main connection loop with reconnection logic.
 async fn connection_loop(
     state: SessionState,
-    mut audio_rx: mpsc::Receiver<Vec<f32>>,
-    mut video_rx: mpsc::Receiver<String>,
-    mut tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
-    mut text_rx: mpsc::Receiver<String>,
+    audio_rx: mpsc::Receiver<Vec<f32>>,
+    video_rx: mpsc::Receiver<String>,
+    tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
+    text_rx: mpsc::Receiver<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
+    let mut channels = StreamChannels {
+        audio_rx,
+        video_rx,
+        text_rx,
+        tool_response_rx,
+    };
     let mut attempt: u32 = 0;
 
     loop {
@@ -196,26 +225,18 @@ async fn connection_loop(
             break;
         }
 
-        match connect_and_stream(
-            &state,
-            &mut audio_rx,
-            &mut video_rx,
-            &mut tool_response_rx,
-            &mut text_rx,
-            &event_tx,
-            &cancel,
-        )
-        .await
-        {
+        match connect_and_stream(&state, &mut channels, &event_tx, &cancel).await {
             Ok(()) => {
                 // Clean disconnect
                 let _ = event_tx.send(GeminiEvent::Disconnected);
                 break;
             }
             Err(outcome) => {
-                // Reset counter if we had a successful session — transient drops
-                // hours apart should not accumulate toward the max.
-                if outcome.was_connected {
+                // Only reset counter if the connection was stable for long enough
+                // — connections that drop immediately should not reset the backoff.
+                if outcome.was_connected
+                    && outcome.connected_duration.as_secs() >= MIN_STABLE_CONNECTION_SECS
+                {
                     attempt = 0;
                 }
 
@@ -230,9 +251,12 @@ async fn connection_loop(
                 tracing::warn!(attempt, error = %outcome.error, "Connection lost, reconnecting");
                 let _ = event_tx.send(GeminiEvent::Reconnecting { attempt });
 
-                let backoff = Duration::from_millis(
-                    (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(MAX_BACKOFF_MS),
-                );
+                let base_backoff_ms =
+                    (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(MAX_BACKOFF_MS);
+                // Deterministic jitter: +-25% based on attempt number
+                let jitter_factor = (attempt as f64 * 7.0 % 1.0) * 0.5 + 0.75;
+                let backoff =
+                    Duration::from_millis((base_backoff_ms as f64 * jitter_factor) as u64);
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = tokio::time::sleep(backoff) => {}
@@ -245,42 +269,36 @@ async fn connection_loop(
 /// Connect to WebSocket, send setup, and enter the streaming loop.
 async fn connect_and_stream(
     state: &SessionState,
-    audio_rx: &mut mpsc::Receiver<Vec<f32>>,
-    video_rx: &mut mpsc::Receiver<String>,
-    tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
-    text_rx: &mut mpsc::Receiver<String>,
+    channels: &mut StreamChannels,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> std::result::Result<(), StreamOutcome> {
     let mut was_connected = false;
+    let connected_at = std::time::Instant::now();
 
-    let result = connect_and_stream_inner(
-        state,
-        audio_rx,
-        video_rx,
-        tool_response_rx,
-        text_rx,
-        event_tx,
-        cancel,
-        &mut was_connected,
-    )
-    .await;
+    let result =
+        connect_and_stream_inner(state, channels, event_tx, cancel, &mut was_connected).await;
 
     match result {
         Ok(()) => Ok(()),
-        Err(error) => Err(StreamOutcome {
-            was_connected,
-            error,
-        }),
+        Err(error) => {
+            let connected_duration = if was_connected {
+                connected_at.elapsed()
+            } else {
+                Duration::ZERO
+            };
+            Err(StreamOutcome {
+                was_connected,
+                connected_duration,
+                error,
+            })
+        }
     }
 }
 
 async fn connect_and_stream_inner(
     state: &SessionState,
-    audio_rx: &mut mpsc::Receiver<Vec<f32>>,
-    video_rx: &mut mpsc::Receiver<String>,
-    tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
-    text_rx: &mut mpsc::Receiver<String>,
+    channels: &mut StreamChannels,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     was_connected: &mut bool,
@@ -301,7 +319,7 @@ async fn connect_and_stream_inner(
     let resumption_handle = state.resumption_handle.lock().await.clone();
     let setup = build_setup_message(&state.config, resumption_handle);
     let setup_json = serde_json::to_string(&setup)?;
-    tracing::debug!("Sending setup: {setup_json}");
+    tracing::debug!("Sending setup message (system prompt and tool declarations redacted)");
     ws_sink.send(Message::Text(setup_json)).await?;
 
     // Wait for setupComplete with timeout
@@ -318,11 +336,9 @@ async fn connect_and_stream_inner(
             _ = cancel.cancelled() => return Ok(()),
         };
 
-        let json_text = match &msg {
-            Message::Text(text) => Some(text.clone()),
-            Message::Binary(bytes) => {
-                String::from_utf8(bytes.clone()).ok()
-            }
+        let json_text = match msg {
+            Message::Text(text) => Some(text),
+            Message::Binary(bytes) => String::from_utf8(bytes).ok(),
             Message::Close(frame) => {
                 anyhow::bail!("Server closed connection during setup: {frame:?}");
             }
@@ -341,10 +357,10 @@ async fn connect_and_stream_inner(
     *was_connected = true;
     let _ = event_tx.send(GeminiEvent::Connected);
     // Set after sending so the receiver sees true on first connect
-    state.is_first_connect.store(false, std::sync::atomic::Ordering::Relaxed);
+    state
+        .is_first_connect
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     tracing::info!("Gemini Live session connected");
-
-    let ws_sink = Arc::new(Mutex::new(ws_sink));
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
     ping_interval.tick().await; // skip immediate first tick
@@ -390,21 +406,21 @@ async fn connect_and_stream_inner(
                 }
             }
 
-            Some((id, name, response)) = tool_response_rx.recv() => {
+            Some((id, name, response)) = channels.tool_response_rx.recv() => {
                 let msg = ToolResponseMessage {
                     tool_response: ToolResponse {
                         function_responses: vec![FunctionResponse { id, name, response }],
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
+                ws_sink.send(Message::Text(json)).await?;
             }
 
-            Some(text) = text_rx.recv() => {
+            Some(text) = channels.text_rx.recv() => {
                 let msg = ClientContentMessage {
                     client_content: ClientContent {
                         turns: vec![Content {
-                            role: Some("user".into()),
+                            role: Some(ContentRole::User),
                             parts: vec![Part {
                                 text: Some(text),
                                 inline_data: None,
@@ -414,14 +430,14 @@ async fn connect_and_stream_inner(
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
+                ws_sink.send(Message::Text(json)).await?;
             }
 
             _ = ping_interval.tick() => {
-                ws_sink.lock().await.send(Message::Ping(vec![])).await?;
+                ws_sink.send(Message::Ping(vec![])).await?;
             }
 
-            Some(jpeg_b64) = video_rx.recv() => {
+            Some(jpeg_b64) = channels.video_rx.recv() => {
                 let msg = RealtimeVideoMessage {
                     realtime_input: RealtimeVideoInput {
                         video: Blob {
@@ -431,13 +447,13 @@ async fn connect_and_stream_inner(
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
+                ws_sink.send(Message::Text(json)).await?;
             }
 
-            Some(pcm) = audio_rx.recv() => {
+            Some(pcm) = channels.audio_rx.recv() => {
                 let msg = encode_audio_message(&pcm);
                 let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
+                ws_sink.send(Message::Text(json)).await?;
             }
         }
     }
@@ -610,9 +626,7 @@ mod tests {
     fn pcm_bytes_roundtrip() {
         let original = vec![0.0_f32, 0.5, -0.5, 0.25, -0.25];
         let msg = encode_audio_message(&original);
-        let bytes = BASE64
-            .decode(&msg.realtime_input.audio.data)
-            .unwrap();
+        let bytes = BASE64.decode(&msg.realtime_input.audio.data).unwrap();
         let decoded = pcm_bytes_to_f32(&bytes);
 
         assert_eq!(decoded.len(), original.len());
@@ -660,9 +674,7 @@ mod tests {
     fn clamp_audio_values() {
         let pcm = vec![2.0, -2.0]; // out of range
         let msg = encode_audio_message(&pcm);
-        let bytes = BASE64
-            .decode(&msg.realtime_input.audio.data)
-            .unwrap();
+        let bytes = BASE64.decode(&msg.realtime_input.audio.data).unwrap();
         let samples = pcm_bytes_to_f32(&bytes);
         assert!((samples[0] - 1.0).abs() < 0.001); // clamped to 1.0
         assert!((samples[1] - (-1.0)).abs() < 0.001); // clamped to -1.0
