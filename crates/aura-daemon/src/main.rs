@@ -292,6 +292,7 @@ async fn run_daemon(
     let proc_bus = bus.clone();
     let proc_cancel = cancel.clone();
     let proc_speaking = Arc::clone(&is_speaking);
+    let is_interrupted = Arc::new(AtomicBool::new(false));
     let processor_handle = tokio::spawn(async move {
         if let Err(e) = run_processor(
             proc_session,
@@ -301,6 +302,7 @@ async fn run_daemon(
             session_id,
             menubar_tx,
             proc_speaking,
+            is_interrupted,
         )
         .await
         {
@@ -337,6 +339,7 @@ async fn run_processor(
     session_id: String,
     menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     is_speaking: Arc<AtomicBool>,
+    is_interrupted: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut events = session.subscribe();
 
@@ -420,6 +423,7 @@ async fn run_processor(
                 match event {
                     Ok(GeminiEvent::Connected) => {
                         tracing::info!("Gemini session connected");
+                        is_interrupted.store(false, Ordering::Relaxed);
                         let _ = bus.send(AuraEvent::GeminiConnected);
 
                         // Enable pulsing dot + status
@@ -493,6 +497,10 @@ async fn run_processor(
                         }
                     }
                     Ok(GeminiEvent::AudioResponse { samples }) => {
+                        // Ignore audio that arrived after barge-in
+                        if is_interrupted.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         is_speaking.store(true, Ordering::Relaxed);
                         if let Some(ref p) = player
                             && let Err(e) = p.append(samples)
@@ -599,6 +607,7 @@ async fn run_processor(
                     Ok(GeminiEvent::Interrupted) => {
                         tracing::info!("Gemini interrupted — stopping playback");
                         is_speaking.store(false, Ordering::Relaxed);
+                        is_interrupted.store(true, Ordering::Relaxed);
                         if let Some(ref p) = player {
                             p.stop();
                         }
@@ -613,6 +622,7 @@ async fn run_processor(
                     }
                     Ok(GeminiEvent::TurnComplete) => {
                         is_speaking.store(false, Ordering::Relaxed);
+                        is_interrupted.store(false, Ordering::Relaxed);
                         tracing::debug!("Turn complete");
                     }
                     Ok(GeminiEvent::Error { message }) => {
