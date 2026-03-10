@@ -248,14 +248,13 @@ unsafe fn show_context_menu(handler: &Object, _sender: id, raw_item: id) {
             inView: button
         ];
 
-        // Clean up — we own the alloc/init refs
-        let _: () = msg_send![quit_item, release];
+        // Clean up — release NSStrings we own (alloc/init = +1).
+        // Menu items are NOT released here: addItem: retains them,
+        // and NSMenu releases them when the menu itself is released.
         let _: () = msg_send![quit_str, release];
         let _: () = msg_send![quit_key, release];
-        let _: () = msg_send![reconnect_item, release];
         let _: () = msg_send![reconnect_str, release];
         let _: () = msg_send![reconnect_key, release];
-        let _: () = msg_send![title_item, release];
         let _: () = msg_send![title_str, release];
         let _: () = msg_send![title_key, release];
         let _: () = msg_send![menu, release];
@@ -286,53 +285,64 @@ extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
     unsafe {
         let pool: id = msg_send![class!(NSAutoreleasePool), new];
 
-        let guard = GLOBAL_STATE.lock();
-        let mut borrow = guard.borrow_mut();
-        if let Some(ref mut state) = *borrow {
-            // Drain all pending messages (non-blocking)
-            while let Ok(msg) = state.rx.try_recv() {
-                match msg {
-                    MenuBarMessage::SetColor(color) => {
+        let mut should_terminate = false;
+
+        {
+            let guard = GLOBAL_STATE.lock();
+            let mut borrow = guard.borrow_mut();
+            if let Some(ref mut state) = *borrow {
+                // Drain all pending messages (non-blocking)
+                while let Ok(msg) = state.rx.try_recv() {
+                    match msg {
+                        MenuBarMessage::SetColor(color) => {
+                            state.status_item.set_color(color);
+                        }
+                        MenuBarMessage::AddMessage { text, is_user } => {
+                            state.popover.add_message(&text, is_user);
+                        }
+                        MenuBarMessage::SetStatus { text } => {
+                            state.popover.set_status(&text);
+                        }
+                        MenuBarMessage::SetPulsing(enabled) => {
+                            state.pulsing = enabled;
+                            if !enabled {
+                                // Reset to solid green when pulsing stops
+                                state.status_item.set_color(DotColor::Green);
+                            }
+                        }
+                        MenuBarMessage::Reconnect => {
+                            if let Some(ref tx) = state.reconnect_tx {
+                                let _ = tx.try_send(());
+                            }
+                        }
+                        MenuBarMessage::Shutdown => {
+                            should_terminate = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
+                if state.pulsing {
+                    state.pulse_counter = state.pulse_counter.wrapping_add(1);
+                    if state.pulse_counter.is_multiple_of(10) {
+                        state.pulse_bright = !state.pulse_bright;
+                        let color = if state.pulse_bright {
+                            DotColor::Green
+                        } else {
+                            DotColor::GreenDim
+                        };
                         state.status_item.set_color(color);
                     }
-                    MenuBarMessage::AddMessage { text, is_user } => {
-                        state.popover.add_message(&text, is_user);
-                    }
-                    MenuBarMessage::SetStatus { text } => {
-                        state.popover.set_status(&text);
-                    }
-                    MenuBarMessage::SetPulsing(enabled) => {
-                        state.pulsing = enabled;
-                        if !enabled {
-                            // Reset to solid green when pulsing stops
-                            state.status_item.set_color(DotColor::Green);
-                        }
-                    }
-                    MenuBarMessage::Reconnect => {
-                        if let Some(ref tx) = state.reconnect_tx {
-                            let _ = tx.try_send(());
-                        }
-                    }
-                    MenuBarMessage::Shutdown => {
-                        let app = NSApp();
-                        let _: () = msg_send![app, terminate: nil];
-                    }
                 }
             }
+        } // borrow + guard dropped here
 
-            // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
-            if state.pulsing {
-                state.pulse_counter = state.pulse_counter.wrapping_add(1);
-                if state.pulse_counter.is_multiple_of(10) {
-                    state.pulse_bright = !state.pulse_bright;
-                    let color = if state.pulse_bright {
-                        DotColor::Green
-                    } else {
-                        DotColor::GreenDim
-                    };
-                    state.status_item.set_color(color);
-                }
-            }
+        // Terminate AFTER releasing borrow — terminate: runs a nested event loop
+        // that can re-fire the NSTimer, which would panic on double borrow_mut.
+        if should_terminate {
+            let app = NSApp();
+            let _: () = msg_send![app, terminate: nil];
         }
 
         let _: () = msg_send![pool, drain];
