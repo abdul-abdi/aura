@@ -180,6 +180,7 @@ name = "aura-input"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "core-foundation 0.10.1",
  "core-graphics",
  "core-graphics-types",
  "tracing",
@@ -206,6 +207,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-graphics",
  "objc",
+ "parking_lot",
  "serde",
  "serde_json",
  "tokio",
@@ -252,6 +254,7 @@ dependencies = [
  "cpal",
  "dirs",
  "rodio",
+ "rubato 0.16.2",
  "rustpotter",
  "tokio",
  "tokio-util",
@@ -2415,6 +2418,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rubato"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
+dependencies = [
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "realfft",
+]
+
+[[package]]
 name = "rusqlite"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2504,7 +2519,7 @@ dependencies = [
  "candle-nn",
  "ciborium",
  "hound",
- "rubato",
+ "rubato 0.14.1",
  "rustfft",
  "serde",
 ]
