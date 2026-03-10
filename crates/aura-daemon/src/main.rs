@@ -360,9 +360,12 @@ async fn run_processor(
 
     // Screen capture loop: 1 FPS JPEG screenshots with change detection
     let capture_trigger = CaptureTrigger::new();
+    let cap_notify = Arc::new(tokio::sync::Notify::new());
+    let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
     let cap_session = Arc::clone(&session);
     let cap_cancel = cancel.clone();
     let cap_trigger = capture_trigger.clone();
+    let cap_notify_loop = cap_notify.clone();
     tokio::spawn(async move {
         let mut last_hash: u64 = 0;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -372,9 +375,10 @@ async fn run_processor(
             tokio::select! {
                 _ = cap_cancel.cancelled() => break,
                 _ = interval.tick() => {},
+                _ = cap_notify_loop.notified() => {},
             }
 
-            // Also clear any pending trigger flag
+            // Clear trigger flag (may have been set alongside notify)
             let _ = cap_trigger.check_and_clear();
 
             // Capture in a blocking task (JPEG encoding is CPU-bound)
@@ -539,7 +543,10 @@ async fn run_processor(
                         let tool_executor = executor.clone();
                         let tool_screen_reader = screen_reader.clone();
                         let tool_capture_trigger = capture_trigger.clone();
+                        let tool_cap_notify = cap_notify.clone();
+                        let tool_semaphore = Arc::clone(&tool_semaphore);
                         tokio::spawn(async move {
+                            let _permit = tool_semaphore.acquire().await.expect("semaphore closed");
                             // Set amber status
                             if let Some(ref tx) = tool_menubar_tx {
                                 let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
@@ -578,6 +585,7 @@ async fn run_processor(
 
                             // Trigger immediate screen capture so Gemini sees the result
                             tool_capture_trigger.trigger();
+                            tool_cap_notify.notify_one();
 
                             // Send tool response back to Gemini
                             if let Err(e) = tool_session.send_tool_response(id, name, response).await {
@@ -733,64 +741,61 @@ async fn execute_tool(
         "move_mouse" => {
             let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            match aura_input::mouse::move_mouse(x, y) {
-                Ok(()) => serde_json::json!({ "success": true }),
-                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-            }
+            run_input_blocking(move || aura_input::mouse::move_mouse(x, y)).await
         }
         "click" => {
             let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left").to_string();
             let count = args.get("click_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            match aura_input::mouse::click(x, y, button, count) {
-                Ok(()) => serde_json::json!({ "success": true }),
-                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-            }
+            run_input_blocking(move || aura_input::mouse::click(x, y, &button, count)).await
         }
         "type_text" => {
-            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            match aura_input::keyboard::type_text(text) {
-                Ok(()) => serde_json::json!({ "success": true }),
-                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-            }
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            run_input_blocking(move || aura_input::keyboard::type_text(&text)).await
         }
         "press_key" => {
-            let key_name = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
-            let modifiers: Vec<&str> = args.get("modifiers")
+            let key_name = args.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let modifiers: Vec<String> = args.get("modifiers")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default();
-            match aura_input::keyboard::keycode_from_name(key_name) {
-                Some(keycode) => match aura_input::keyboard::press_key(keycode, &modifiers) {
-                    Ok(()) => serde_json::json!({ "success": true }),
-                    Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-                },
+            match aura_input::keyboard::keycode_from_name(&key_name) {
+                Some(keycode) => run_input_blocking(move || {
+                    let mod_refs: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
+                    aura_input::keyboard::press_key(keycode, &mod_refs)
+                }).await,
                 None => serde_json::json!({ "success": false, "error": format!("Unknown key: {key_name}") }),
             }
         }
         "scroll" => {
             let dx = args.get("dx").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let dy = args.get("dy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            match aura_input::mouse::scroll(dx, dy) {
-                Ok(()) => serde_json::json!({ "success": true }),
-                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-            }
+            run_input_blocking(move || aura_input::mouse::scroll(dx, dy)).await
         }
         "drag" => {
             let fx = args.get("from_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let fy = args.get("from_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let tx = args.get("to_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let ty = args.get("to_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            match aura_input::mouse::drag(fx, fy, tx, ty) {
-                Ok(()) => serde_json::json!({ "success": true }),
-                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-            }
+            run_input_blocking(move || aura_input::mouse::drag(fx, fy, tx, ty)).await
         }
         other => serde_json::json!({
             "success": false,
             "error": format!("Unknown tool: {other}"),
         }),
+    }
+}
+
+/// Run a blocking input operation on a dedicated thread to avoid blocking tokio.
+async fn run_input_blocking<F>(f: F) -> serde_json::Value
+where
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(())) => serde_json::json!({ "success": true }),
+        Ok(Err(e)) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+        Err(e) => serde_json::json!({ "success": false, "error": format!("Task panicked: {e}") }),
     }
 }
 

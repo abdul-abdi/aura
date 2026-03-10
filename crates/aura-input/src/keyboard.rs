@@ -13,10 +13,11 @@ pub fn type_text(text: &str) -> Result<()> {
     let source = event_source()?;
 
     for ch in text.chars() {
-        let buf = [ch as u16];
+        let mut buf = [0u16; 2];
+        let encoded = ch.encode_utf16(&mut buf);
         let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
             .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
-        down.set_string_from_utf16_unchecked(&buf);
+        down.set_string_from_utf16_unchecked(encoded);
         down.post(CGEventTapLocation::HID);
 
         let up_source = event_source()?;

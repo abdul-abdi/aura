@@ -5,8 +5,8 @@ use serde_json::json;
 
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
-/// Returns a `Vec<Tool>` with a single `Tool` containing three
-/// `FunctionDeclaration`s: `run_applescript`, `get_screen_context`, and `shutdown_aura`.
+/// Returns a `Vec<Tool>` with a single `Tool` containing nine
+/// `FunctionDeclaration`s for macOS automation and computer control.
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![Tool {
         function_declarations: vec![
