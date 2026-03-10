@@ -1,4 +1,5 @@
 /target
+AuraApp/.build/
 *.swp
 *.swo
 .DS_Store
