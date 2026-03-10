@@ -117,6 +117,10 @@ fn main() -> Result<()> {
             let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
             rt.block_on(async {
                 loop {
+                    // session.rs connection_loop handles transient WebSocket drops with fast retries.
+                    // When it exhausts retries (permanent failure), run_daemon returns and this
+                    // outer loop creates a fresh session after user/auto-reconnect signal.
+
                     // Create a new session for each connection attempt
                     let session_id = {
                         let mem = Arc::clone(&memory);
