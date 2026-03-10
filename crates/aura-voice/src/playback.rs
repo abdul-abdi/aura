@@ -13,6 +13,14 @@ pub enum PlaybackCommand {
     IsPlaying(mpsc::Sender<bool>),
 }
 
+/// Pre-buffer for absorbing network jitter before starting playback.
+/// Buffers ~200ms of audio samples before creating and starting the Sink.
+struct PreBuffer {
+    samples: Vec<f32>,
+    sample_rate: u32,
+    target_samples: usize,
+}
+
 /// Thread-safe handle to the audio player running on a dedicated thread.
 /// rodio's OutputStream is !Send, so all playback happens on a background thread.
 #[derive(Clone)]
@@ -37,6 +45,8 @@ impl AudioPlayer {
                 // Current sink and its sample rate, kept together so Append
                 // knows the rate without the caller resending it each time.
                 let mut current: Option<(Sink, u32)> = None;
+                // Pre-buffer to absorb network jitter before starting playback
+                let mut pre_buffer: Option<PreBuffer> = None;
 
                 while let Ok(cmd) = rx.recv() {
                     match cmd {
@@ -46,23 +56,67 @@ impl AudioPlayer {
                                 sink.stop();
                             }
 
-                            match Sink::try_new(&handle) {
-                                Ok(sink) => {
-                                    current = Some((sink, sample_rate));
-                                    tracing::debug!(sample_rate, "Audio stream started");
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to create audio sink: {e}");
-                                }
-                            }
+                            // Enter buffering mode: accumulate ~200ms before starting Sink
+                            let target_samples = (sample_rate as usize * 200) / 1000; // 200ms
+                            pre_buffer = Some(PreBuffer {
+                                samples: Vec::with_capacity(target_samples),
+                                sample_rate,
+                                target_samples,
+                            });
+                            tracing::debug!(
+                                sample_rate,
+                                target_samples,
+                                "Buffering audio stream"
+                            );
                         }
                         PlaybackCommand::Append { samples } => {
-                            // Auto-create a stream if none exists (e.g. after barge-in)
-                            if current.is_none() {
+                            // If we're buffering, accumulate in pre-buffer first
+                            if let Some(ref mut buf) = pre_buffer {
+                                buf.samples.extend_from_slice(&samples);
+                                // Once we have enough pre-buffered audio, flush to Sink
+                                if buf.samples.len() >= buf.target_samples {
+                                    match Sink::try_new(&handle) {
+                                        Ok(sink) => {
+                                            let source = rodio::buffer::SamplesBuffer::new(
+                                                1,
+                                                buf.sample_rate,
+                                                buf.samples.clone(),
+                                            );
+                                            sink.append(source);
+                                            current = Some((sink, buf.sample_rate));
+                                            tracing::debug!(
+                                                "Audio pre-buffer flushed, playback started"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to create audio sink: {e}");
+                                        }
+                                    }
+                                    pre_buffer = None;
+                                }
+                            } else if let Some((ref sink, sample_rate)) = current {
+                                // We have an active sink, append directly
+                                let source = rodio::buffer::SamplesBuffer::new(
+                                    1,
+                                    sample_rate,
+                                    samples,
+                                );
+                                sink.append(source);
+                            } else {
+                                // Auto-create a stream if none exists (e.g. after barge-in)
                                 let default_rate = 24_000;
                                 match Sink::try_new(&handle) {
                                     Ok(sink) => {
-                                        tracing::debug!(sample_rate = default_rate, "Auto-starting audio stream");
+                                        tracing::debug!(
+                                            sample_rate = default_rate,
+                                            "Auto-starting audio stream"
+                                        );
+                                        let source = rodio::buffer::SamplesBuffer::new(
+                                            1,
+                                            default_rate,
+                                            samples,
+                                        );
+                                        sink.append(source);
                                         current = Some((sink, default_rate));
                                     }
                                     Err(e) => {
@@ -70,17 +124,9 @@ impl AudioPlayer {
                                     }
                                 }
                             }
-
-                            if let Some((ref sink, sample_rate)) = current {
-                                let source = rodio::buffer::SamplesBuffer::new(
-                                    1,
-                                    sample_rate,
-                                    samples,
-                                );
-                                sink.append(source);
-                            }
                         }
                         PlaybackCommand::Stop => {
+                            pre_buffer = None;
                             if let Some((sink, _)) = current.take() {
                                 sink.stop();
                             }
