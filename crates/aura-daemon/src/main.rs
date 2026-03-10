@@ -185,6 +185,7 @@ fn main() -> Result<()> {
                 // Persist permission error flag across reconnection attempts so the
                 // "Connecting..." status doesn't overwrite a mic permission error.
                 let has_permission_error = Arc::new(AtomicBool::new(false));
+                let mut first_error = true;
 
                 // Spawn a dedicated task that listens for the menu Quit signal.
                 // This fires even while run_daemon is active, triggering graceful
@@ -244,10 +245,13 @@ fn main() -> Result<()> {
                     {
                         tracing::error!("Daemon error: {e}");
 
-                        // U5: Show native dialog on first connection failure
-                        show_error_dialog(&format!(
-                            "Aura failed to connect:\n\n{e}\n\nCheck your API key and network connection."
-                        ));
+                        // U5: Show native dialog on first connection failure only
+                        if first_error {
+                            show_error_dialog(&format!(
+                                "Aura failed to connect:\n\n{e}\n\nCheck your API key and network connection."
+                            ));
+                            first_error = false;
+                        }
                     }
 
                     // If shutdown was requested, stop reconnecting
