@@ -17,6 +17,10 @@ pub struct CapturedFrame {
     pub jpeg_base64: String,
     /// Simple hash for change detection.
     pub hash: u64,
+    /// Width of the JPEG image (after downscale).
+    pub width: u32,
+    /// Height of the JPEG image (after downscale).
+    pub height: u32,
 }
 
 /// Capture the main display as a JPEG-encoded base64 string.
@@ -74,7 +78,7 @@ pub fn capture_screen() -> Result<CapturedFrame> {
 
     let jpeg_base64 = BASE64.encode(&jpeg_buf);
 
-    Ok(CapturedFrame { jpeg_base64, hash })
+    Ok(CapturedFrame { jpeg_base64, hash, width: final_w, height: final_h })
 }
 
 /// Compute a simple hash by sampling pixels across the frame.
