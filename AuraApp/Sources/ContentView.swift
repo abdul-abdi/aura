@@ -8,15 +8,31 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if appState.showOnboarding {
+            switch appState.onboardingStep {
+            case .welcome:
+                WelcomeView(onContinue: { appState.completeWelcome() })
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+            case .permissions:
                 PermissionsView(
                     checker: appState.permissionChecker,
                     onContinue: { appState.completeOnboarding() }
                 )
-            } else {
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .opacity
+                ))
+            case .done:
                 mainContent
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
             }
         }
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: appState.onboardingStep)
         .frame(width: 380, height: 520)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -32,7 +48,7 @@ struct ContentView: View {
 
             Divider()
 
-            ConversationView(messages: appState.messages)
+            ConversationView(messages: appState.messages, connectionState: appState.connectionState, isThinking: appState.isThinking)
                 .frame(maxHeight: .infinity)
 
             TextInputView { text in

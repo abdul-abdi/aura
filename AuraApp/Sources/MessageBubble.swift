@@ -42,24 +42,17 @@ struct MessageBubble: View {
 
     private var assistantBubble: some View {
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Aura")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .fontWeight(.medium)
-
-                Text(message.text)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        Color.secondary.opacity(0.08),
-                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    )
-                    .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-            }
+            Text(message.text)
+                .font(.system(size: 13))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    Color.secondary.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+                .frame(maxWidth: maxBubbleWidth, alignment: .leading)
             Spacer(minLength: 0)
         }
     }
@@ -73,9 +66,9 @@ struct MessageBubble: View {
                 .foregroundStyle(status.color)
 
             Text(message.text)
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
-                .lineLimit(3)
+                .lineLimit(5)
                 .textSelection(.enabled)
         }
         .padding(.horizontal, 10)
@@ -88,9 +81,7 @@ struct MessageBubble: View {
         .transition(.opacity)
     }
 
-    private var maxBubbleWidth: CGFloat {
-        380 * 0.85 // 85% of panel width
-    }
+    private let maxBubbleWidth: CGFloat = 300
 }
 
 // MARK: - ToolRunStatus styling

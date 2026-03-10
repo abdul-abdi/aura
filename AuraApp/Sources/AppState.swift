@@ -8,8 +8,17 @@ import SwiftUI
 final class AppState {
     // MARK: - Onboarding
 
-    var showOnboarding: Bool = true
+    enum OnboardingStep: Equatable {
+        case welcome       // API key setup (first run only)
+        case permissions   // macOS permission grants
+        case done          // normal app UI
+    }
+
+    var onboardingStep: OnboardingStep = .done
     var permissionChecker = PermissionChecker()
+
+    // Legacy shim — kept so nothing else breaks
+    var showOnboarding: Bool { onboardingStep != .done }
 
     // MARK: - Connection state
 
@@ -29,6 +38,7 @@ final class AppState {
     // MARK: - Conversation
 
     var messages: [ChatMessage] = []
+    var isThinking: Bool = false
 
     // MARK: - Status
 
@@ -43,14 +53,33 @@ final class AppState {
     // MARK: - Init
 
     init() {
-        showOnboarding = !UserDefaults.standard.bool(forKey: "aura.onboardingComplete")
+        let onboardingDone = UserDefaults.standard.bool(forKey: "aura.onboardingComplete")
+        if onboardingDone {
+            onboardingStep = .done
+        } else if Self.configFileHasKey() {
+            // Key already saved (e.g. re-install) — skip to permissions
+            onboardingStep = .permissions
+        } else {
+            onboardingStep = .welcome
+        }
     }
 
     // MARK: - Onboarding
 
+    func completeWelcome() {
+        onboardingStep = .permissions
+    }
+
     func completeOnboarding() {
-        showOnboarding = false
+        onboardingStep = .done
         UserDefaults.standard.set(true, forKey: "aura.onboardingComplete")
+    }
+
+    private static func configFileHasKey() -> Bool {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/aura/config.toml")
+        guard let contents = try? String(contentsOf: path, encoding: .utf8) else { return false }
+        return contents.contains("api_key")
     }
 
     // MARK: - Setup
@@ -67,6 +96,10 @@ final class AppState {
 
         connection.onDisconnect = { [weak self] in
             self?.handleDisconnect()
+        }
+
+        connection.onReconnect = { [weak self] in
+            self?.markConnected()
         }
     }
 
@@ -112,6 +145,7 @@ final class AppState {
             }
 
         case .assistant:
+            isThinking = false
             // Merge consecutive assistant transcripts (streaming)
             if let lastIndex = messages.indices.last,
                case .assistant = messages[lastIndex].role,
@@ -129,17 +163,36 @@ final class AppState {
         trimMessages()
     }
 
+    private func displayName(for toolName: String) -> String {
+        switch toolName {
+        case "run_applescript": return "Running script"
+        case "get_screen_context": return "Reading screen"
+        case "move_mouse": return "Moving mouse"
+        case "click": return "Clicking"
+        case "type_text": return "Typing"
+        case "press_key": return "Pressing key"
+        case "scroll": return "Scrolling"
+        case "drag": return "Dragging"
+        case "shutdown_aura": return "Shutting down"
+        default: return toolName.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
     private func handleToolStatus(_ update: ToolStatusUpdate) {
+        let name = displayName(for: update.name)
         let displayText: String
         switch update.status {
         case .running:
-            displayText = "\(update.name)"
+            isThinking = true
+            displayText = name
         case .completed:
+            isThinking = false
             let output = update.output.map { "\n\($0)" } ?? ""
-            displayText = "\(update.name)\(output)"
+            displayText = "\(name)\(output)"
         case .failed:
+            isThinking = false
             let output = update.output.map { "\n\($0)" } ?? ""
-            displayText = "\(update.name)\(output)"
+            displayText = "\(name)\(output)"
         }
 
         let message = ChatMessage(role: .tool(update.status), text: displayText)
@@ -151,10 +204,10 @@ final class AppState {
     }
 
     private func handleDisconnect() {
-        connectionState = .disconnected
-        statusMessage = "Disconnected"
-        dotColor = .gray
-        isPulsing = false
+        connectionState = .connecting  // auto-reconnect is in progress
+        statusMessage = "Reconnecting..."
+        dotColor = .amber
+        isPulsing = true
     }
 
     private func trimMessages() {
@@ -174,6 +227,7 @@ final class AppState {
             messages.append(message)
         }
 
+        isThinking = true
         connection?.send(.sendText(trimmed))
         trimMessages()
     }

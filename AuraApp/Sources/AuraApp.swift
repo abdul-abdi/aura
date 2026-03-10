@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var connection: DaemonConnection?
     private var daemonProcess: Process?
     private var hotKeyRef: UnsafeMutableRawPointer?
+    private var dotColorTimer: Timer?
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
     )
@@ -38,9 +39,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupFloatingPanel()
         setupGlobalHotKey()
         launchDaemonAndConnect()
+
+        // Auto-open panel on first launch so the user sees the welcome screen
+        if appState.showOnboarding {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.togglePanel()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        dotColorTimer?.invalidate()
+        dotColorTimer = nil
         appState.requestShutdown()
         connection?.disconnect()
         terminateDaemon()
@@ -61,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Accessibility
         button.setAccessibilityLabel("Aura: disconnected")
-        button.toolTip = "Aura AI Assistant"
+        button.toolTip = "Aura — ⌘⇧A to toggle"
     }
 
     private func updateStatusItemIcon(color: DotColorName) {
@@ -113,6 +123,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showContextMenu() {
         let menu = NSMenu()
 
+        let toggleItem = NSMenuItem(
+            title: "Toggle Panel  ⌘⇧A",
+            action: #selector(togglePanelClicked),
+            keyEquivalent: ""
+        )
+        toggleItem.target = self
+        menu.addItem(toggleItem)
+
+        menu.addItem(.separator())
+
         let reconnectItem = NSMenuItem(
             title: "Reconnect",
             action: #selector(reconnectClicked),
@@ -145,6 +165,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = nil
     }
 
+    @objc private func togglePanelClicked() {
+        togglePanel()
+    }
+
     @objc private func reconnectClicked() {
         appState.requestReconnect()
     }
@@ -163,22 +187,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView?.addSubview(hostingView)
 
         self.floatingPanel = panel
+
+        // Observe Escape-key dismiss notification posted by FloatingPanel.cancelOperation
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("AuraPanelDismiss"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.hidePanel()
+                // Reset guard after the animation so a subsequent Escape works
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                self?.floatingPanel?.resetHidingState()
+            }
+        }
     }
 
     func togglePanel() {
         guard let panel = floatingPanel else { return }
 
         if panel.isVisible {
-            panel.animator().alphaValue = 0
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                panel.orderOut(nil)
-                panel.alphaValue = 1
-            }
+            hidePanel()
         } else {
-            positionPanel()
-            panel.alphaValue = 0
-            panel.makeKeyAndOrderFront(nil)
+            showPanel()
+        }
+    }
+
+    private func showPanel() {
+        guard let panel = floatingPanel else { return }
+        positionPanel()
+
+        // Capture the final (correctly positioned) frame before we shrink it
+        let finalFrame = panel.frame
+        let scaledFrame = NSRect(
+            x: finalFrame.midX - finalFrame.width * 0.48,
+            y: finalFrame.midY - finalFrame.height * 0.48,
+            width: finalFrame.width * 0.96,
+            height: finalFrame.height * 0.96
+        )
+
+        // Start from a slightly-scaled-down, transparent state
+        panel.alphaValue = 0
+        panel.setFrame(scaledFrame, display: false)
+        panel.makeKeyAndOrderFront(nil)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
+            panel.animator().setFrame(finalFrame, display: true)
+        } completionHandler: {
+            // Notify SwiftUI views that the panel is visible so they can grab focus
+            NotificationCenter.default.post(
+                name: NSNotification.Name("AuraPanelDidShow"), object: nil
+            )
+        }
+    }
+
+    private func hidePanel() {
+        guard let panel = floatingPanel else { return }
+
+        let currentFrame = panel.frame
+        let scaledFrame = NSRect(
+            x: currentFrame.midX - currentFrame.width * 0.48,
+            y: currentFrame.midY - currentFrame.height * 0.48,
+            width: currentFrame.width * 0.96,
+            height: currentFrame.height * 0.96
+        )
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(scaledFrame, display: true)
+        } completionHandler: {
+            panel.orderOut(nil)
+            // Reset state for the next show
+            panel.alphaValue = 1
+            panel.setFrame(currentFrame, display: false)
         }
     }
 
@@ -301,8 +387,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func findDevelopmentDaemon() -> String? {
         // Check relative to workspace root during development
         let candidates = [
-            "../target/debug/aura-daemon",
             "../target/release/aura-daemon",
+            "../target/debug/aura-daemon",
         ]
 
         let bundlePath = Bundle.main.bundlePath
@@ -315,23 +401,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Check PATH
-        let whichProcess = Process()
-        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        whichProcess.arguments = ["aura-daemon"]
-        let pipe = Pipe()
-        whichProcess.standardOutput = pipe
-        whichProcess.standardError = FileHandle.nullDevice
-        try? whichProcess.run()
-        whichProcess.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(
-            in: .whitespacesAndNewlines)
-        if let path, !path.isEmpty {
-            return path
-        }
-
+        // In production the daemon is always in the bundle.
+        // Skip `which` lookup — it blocks the main thread.
         return nil
     }
 
@@ -344,10 +415,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func observeDotColor() {
         // Poll dot color changes to update the menu bar icon
         // Using a simple timer since @Observable doesn't bridge to NSStatusItem directly
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        dotColorTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 self.updateStatusItemIcon(color: self.appState.dotColor)
+                self.statusItem.button?.setAccessibilityLabel("Aura: \(self.appState.statusMessage)")
             }
         }
     }

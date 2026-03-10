@@ -33,22 +33,22 @@ final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
-    // Close on Escape key
+    // Guard against double-firing cancelOperation while a hide animation is already in flight
+    private var isHiding = false
+
+    /// Close on Escape — post notification so AppDelegate handles the animated dismiss.
     override func cancelOperation(_ sender: Any?) {
-        animator().alphaValue = 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.orderOut(nil)
-            self?.alphaValue = 1
-        }
+        guard !isHiding else { return }
+        isHiding = true
+        NotificationCenter.default.post(name: NSNotification.Name("AuraPanelDismiss"), object: nil)
     }
 
-    // Resign key when clicking outside
-    override func resignKey() {
-        super.resignKey()
-        animator().alphaValue = 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            self?.orderOut(nil)
-            self?.alphaValue = 1
-        }
+    /// Called by AppDelegate after the hide animation completes to reset the guard.
+    func resetHidingState() {
+        isHiding = false
     }
+
+    // resignKey() override intentionally removed — clicking outside should NOT auto-dismiss
+    // a floating panel. Users expect to interact with other apps while the panel stays open.
+    // Escape (cancelOperation) is the standard dismiss gesture.
 }

@@ -10,7 +10,7 @@ cargo check --workspace                # Compilation check (objc macro warnings 
 cargo build --release -p aura-daemon   # Release binary
 
 # Test
-cargo test --workspace                 # All tests (~157 tests)
+cargo test --workspace                 # All tests (~183 tests)
 cargo test -p aura-daemon              # Single crate
 cargo test -p aura-bridge test_timeout_kills_script  # Single test by name
 RUST_LOG=debug cargo test -- --nocapture             # With logging

@@ -8,10 +8,12 @@ final class DaemonConnection {
     private let socketPath: String
     private var fileDescriptor: Int32 = -1
     private var readTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
     private var buffer = Data()
 
     var onEvent: ((DaemonEvent) -> Void)?
     var onDisconnect: (() -> Void)?
+    var onReconnect: (() -> Void)?
 
     private(set) var isConnected = false
 
@@ -48,6 +50,39 @@ final class DaemonConnection {
         }
 
         onDisconnect?()
+    }
+
+    /// Reconnect with exponential backoff (500ms → 15s, up to 20 attempts).
+    func reconnect() {
+        disconnect()
+        reconnectTask = Task { [weak self] in
+            guard let self else { return }
+            var delay: UInt64 = 500_000_000  // 500ms
+            let maxDelay: UInt64 = 15_000_000_000  // 15s
+            let maxAttempts = 20
+
+            for _ in 1...maxAttempts {
+                if Task.isCancelled { return }
+                try? await Task.sleep(nanoseconds: delay)
+                if Task.isCancelled { return }
+
+                if tryConnect() {
+                    await MainActor.run {
+                        self.isConnected = true
+                        self.startReading()
+                        self.onReconnect?()
+                    }
+                    return
+                }
+
+                delay = min(delay * 2, maxDelay)
+            }
+
+            // All attempts exhausted
+            await MainActor.run {
+                self.onDisconnect?()
+            }
+        }
     }
 
     private func tryConnect() -> Bool {
@@ -160,18 +195,31 @@ final class DaemonConnection {
         data.append(UInt8(ascii: "\n"))
 
         let fd = fileDescriptor
-        data.withUnsafeBytes { ptr in
-            guard let baseAddress = ptr.baseAddress else { return }
-            _ = Darwin.write(fd, baseAddress, data.count)
+        let result = data.withUnsafeBytes { ptr -> Int in
+            guard let baseAddress = ptr.baseAddress else { return -1 }
+            return Darwin.write(fd, baseAddress, data.count)
+        }
+
+        if result < 0 {
+            // Write failed — connection is broken
+            handleDisconnect()
         }
     }
 
     private func handleDisconnect() {
+        let wasConnected = isConnected
         disconnect()
         onDisconnect?()
+
+        // Auto-reconnect if we were previously connected
+        if wasConnected {
+            reconnect()
+        }
     }
 
     func disconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
         readTask?.cancel()
         readTask = nil
         if fileDescriptor >= 0 {

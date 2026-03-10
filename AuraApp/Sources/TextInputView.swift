@@ -44,6 +44,16 @@ struct TextInputView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
+        // Grab focus when the view first appears (e.g. first launch)
+        .onAppear {
+            isFocused = true
+        }
+        // Re-focus every time the panel finishes its show animation
+        .onReceive(
+            NotificationCenter.default.publisher(for: NSNotification.Name("AuraPanelDidShow"))
+        ) { _ in
+            isFocused = true
+        }
     }
 
     private func sendMessage() {
