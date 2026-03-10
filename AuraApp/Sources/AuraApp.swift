@@ -187,9 +187,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Accessory apps have no default menu bar, so Cmd+Q doesn't work unless
     /// we install a minimal main menu with the Quit item.
+    /// The Edit menu provides Cut/Copy/Paste/Select All so text fields work properly
+    /// inside the floating panel (NSPanel + .nonactivatingPanel strips the default menu).
     private func setupMainMenu() {
         let mainMenu = NSMenu()
 
+        // App menu (Quit)
         let appMenu = NSMenu()
         let quitItem = NSMenuItem(
             title: "Quit Aura",
@@ -201,6 +204,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
+
+        // Edit menu (Cut/Copy/Paste/Select All — required for text fields in NSPanel)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let editMenuItem = NSMenuItem()
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
 
         NSApp.mainMenu = mainMenu
     }

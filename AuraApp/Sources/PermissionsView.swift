@@ -170,16 +170,15 @@ private struct PermissionRow: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.04), radius: 1, x: 0, y: 1)
+                .fill(Color.black.opacity(0.1))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(
                     granted
-                        ? auraGreen.opacity(0.3)
-                        : Color.white.opacity(0.06),
-                    lineWidth: 0.5
+                        ? auraGreen.opacity(0.4)
+                        : Color.white.opacity(0.12),
+                    lineWidth: 1
                 )
         )
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: granted)
@@ -195,22 +194,18 @@ private struct AuraButtonStyle: ButtonStyle {
         configuration.label
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        enabled
-                            ? AnyShapeStyle(auraGreen.opacity(0.85))
-                            : AnyShapeStyle(.ultraThinMaterial)
-                    )
+                    .fill(enabled ? auraGreen : Color.white.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
                         enabled
-                            ? auraGreen.opacity(0.4)
-                            : Color.white.opacity(0.06),
-                        lineWidth: 0.5
+                            ? auraGreen.opacity(0.6)
+                            : Color.white.opacity(0.12),
+                        lineWidth: 1
                     )
             )
-            .foregroundStyle(enabled ? Color.white : Color.primary.opacity(0.3))
+            .foregroundStyle(enabled ? Color.white : Color.primary.opacity(0.35))
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .opacity(configuration.isPressed ? 0.85 : 1.0)
             .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
@@ -226,11 +221,11 @@ private struct GrantButtonStyle: ButtonStyle {
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                    .fill(auraAmber.opacity(0.18))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(auraAmber.opacity(0.3), lineWidth: 0.5)
+                    .strokeBorder(auraAmber.opacity(0.35), lineWidth: 1)
             )
             .foregroundStyle(auraAmber)
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)

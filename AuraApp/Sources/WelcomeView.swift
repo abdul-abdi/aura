@@ -149,16 +149,15 @@ struct WelcomeView: View {
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.06), radius: 1, x: 0, y: 1)
+                    .fill(Color.black.opacity(0.15))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
                         isKeyValid
                             ? auraGreen.opacity(0.5)
-                            : Color.white.opacity(0.08),
-                        lineWidth: 0.5
+                            : Color.white.opacity(0.15),
+                        lineWidth: 1
                     )
             )
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isKeyValid)
@@ -273,8 +272,8 @@ struct WelcomeView: View {
 
 // MARK: - Glass Button Style
 
-/// Button that blends with vibrancy materials — uses a tinted glass fill when enabled,
-/// subtle material fill when disabled. Matches macOS popover control aesthetics.
+/// Button style for primary actions — solid green when enabled, subtle inset when disabled.
+/// Uses opaque fills that contrast against the panel's frosted glass background.
 private struct GlassButtonStyle: ButtonStyle {
     let enabled: Bool
 
@@ -282,22 +281,18 @@ private struct GlassButtonStyle: ButtonStyle {
         configuration.label
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        enabled
-                            ? AnyShapeStyle(auraGreen.opacity(0.85))
-                            : AnyShapeStyle(.ultraThinMaterial)
-                    )
+                    .fill(enabled ? auraGreen : Color.white.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
                         enabled
-                            ? auraGreen.opacity(0.4)
-                            : Color.white.opacity(0.06),
-                        lineWidth: 0.5
+                            ? auraGreen.opacity(0.6)
+                            : Color.white.opacity(0.12),
+                        lineWidth: 1
                     )
             )
-            .foregroundStyle(enabled ? Color.white : Color.primary.opacity(0.3))
+            .foregroundStyle(enabled ? Color.white : Color.primary.opacity(0.35))
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .opacity(configuration.isPressed ? 0.85 : 1.0)
             .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
