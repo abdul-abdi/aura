@@ -2,11 +2,12 @@ import AppKit
 
 /// A floating NSPanel that hovers above other windows.
 /// Used as the main Aura conversation interface, anchored to the menu bar.
+/// Styled as a borderless glass popover — no traffic lights, no title bar chrome.
 final class FloatingPanel: NSPanel {
     init() {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 520),
-            styleMask: [.titled, .closable, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -21,12 +22,14 @@ final class FloatingPanel: NSPanel {
         hasShadow = true
         animationBehavior = .utilityWindow
 
+        // Hide traffic light buttons — this is a menu bar popup, not a window
+        standardWindowButton(.closeButton)?.isHidden = true
+        standardWindowButton(.miniaturizeButton)?.isHidden = true
+        standardWindowButton(.zoomButton)?.isHidden = true
+
         // Size constraints
         minSize = NSSize(width: 320, height: 400)
         maxSize = NSSize(width: 500, height: 800)
-
-        // Allow the panel to become key (for text input) but not main
-        // canBecomeKey is overridden below
     }
 
     // Allow text input focus
@@ -43,12 +46,16 @@ final class FloatingPanel: NSPanel {
         NotificationCenter.default.post(name: NSNotification.Name("AuraPanelDismiss"), object: nil)
     }
 
+    /// Dismiss when the panel loses key status (user clicked outside).
+    override func resignKey() {
+        super.resignKey()
+        guard isVisible, !isHiding else { return }
+        isHiding = true
+        NotificationCenter.default.post(name: NSNotification.Name("AuraPanelDismiss"), object: nil)
+    }
+
     /// Called by AppDelegate after the hide animation completes to reset the guard.
     func resetHidingState() {
         isHiding = false
     }
-
-    // resignKey() override intentionally removed — clicking outside should NOT auto-dismiss
-    // a floating panel. Users expect to interact with other apps while the panel stays open.
-    // Escape (cancelOperation) is the standard dismiss gesture.
 }

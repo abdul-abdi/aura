@@ -63,6 +63,7 @@ pub struct GeminiLiveSession {
     text_tx: mpsc::Sender<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
+    reconnect_tx: mpsc::Sender<()>,
     is_first_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -79,6 +80,7 @@ impl GeminiLiveSession {
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
         let (text_tx, text_rx) = mpsc::channel::<String>(16);
+        let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
         let (event_tx, _) = broadcast::channel::<GeminiEvent>(128);
         let cancel = tokio_util::sync::CancellationToken::new();
         let is_first_connect = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -100,6 +102,7 @@ impl GeminiLiveSession {
                 video_rx,
                 tool_response_rx,
                 text_rx,
+                reconnect_rx,
                 tx,
                 token,
             )
@@ -113,6 +116,7 @@ impl GeminiLiveSession {
             text_tx,
             event_tx,
             cancel,
+            reconnect_tx,
             is_first_connect,
         })
     }
@@ -164,6 +168,11 @@ impl GeminiLiveSession {
         self.cancel.cancel();
     }
 
+    /// Force a reconnection — drops the current WebSocket and reconnects.
+    pub async fn reconnect(&self) {
+        let _ = self.reconnect_tx.send(()).await;
+    }
+
     /// Returns true if this is the first connection (not a reconnection).
     /// After the first connection, this returns false.
     pub fn is_first_connect(&self) -> bool {
@@ -203,12 +212,14 @@ struct StreamChannels {
 }
 
 /// Main connection loop with reconnection logic.
+#[allow(clippy::too_many_arguments)]
 async fn connection_loop(
     state: SessionState,
     audio_rx: mpsc::Receiver<Vec<f32>>,
     video_rx: mpsc::Receiver<String>,
     tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
     text_rx: mpsc::Receiver<String>,
+    mut reconnect_rx: mpsc::Receiver<()>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
@@ -225,7 +236,23 @@ async fn connection_loop(
             break;
         }
 
-        match connect_and_stream(&state, &mut channels, &event_tx, &cancel).await {
+        // Drain any pending reconnect signals before connecting
+        while reconnect_rx.try_recv().is_ok() {}
+
+        // Race the stream against a user-initiated reconnect request.
+        // If reconnect fires, the stream future is dropped (closing the WebSocket)
+        // and we loop back to reconnect immediately.
+        let stream_result = tokio::select! {
+            result = connect_and_stream(&state, &mut channels, &event_tx, &cancel) => result,
+            _ = reconnect_rx.recv() => {
+                tracing::info!("User-initiated reconnect, dropping current connection");
+                let _ = event_tx.send(GeminiEvent::Reconnecting { attempt: 0 });
+                attempt = 0;
+                continue;
+            }
+        };
+
+        match stream_result {
             Ok(go_away) => {
                 if go_away {
                     // goAway — reconnect immediately without counting as failure

@@ -233,8 +233,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Send an event
-        let _ = event_tx.send(DaemonEvent::ConnectionState {
-            state: crate::protocol::ConnectionState::Connected,
+        let _ = event_tx.send(DaemonEvent::Status {
             message: "test".into(),
         });
 
@@ -246,8 +245,8 @@ mod tests {
             .unwrap();
 
         let line = String::from_utf8_lossy(&buf[..n]);
-        assert!(line.contains("ConnectionState"));
-        assert!(line.contains("connected"));
+        assert!(line.contains("status"));
+        assert!(line.contains("test"));
 
         cancel.cancel();
     }

@@ -45,7 +45,7 @@ use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
 use aura_daemon::bus::EventBus;
 use aura_daemon::event::AuraEvent;
 use aura_daemon::ipc;
-use aura_daemon::protocol::{ConnectionState, DaemonEvent, Role, UICommand};
+use aura_daemon::protocol::{DaemonEvent, DotColorName, Role, ToolRunStatus, UICommand};
 use aura_daemon::setup::AuraSetup;
 use aura_gemini::config::GeminiConfig;
 use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
@@ -342,8 +342,11 @@ async fn run_daemon(
                 .await;
         }
     }
-    let _ = ipc_tx.send(DaemonEvent::ConnectionState {
-        state: ConnectionState::Connecting,
+    let _ = ipc_tx.send(DaemonEvent::DotColor {
+        color: DotColorName::Amber,
+        pulsing: false,
+    });
+    let _ = ipc_tx.send(DaemonEvent::Status {
         message: "Connecting...".into(),
     });
 
@@ -402,8 +405,11 @@ async fn run_daemon(
                     })
                     .await;
             }
-            let _ = ipc_tx.send(DaemonEvent::ConnectionState {
-                state: ConnectionState::Error,
+            let _ = ipc_tx.send(DaemonEvent::DotColor {
+                color: DotColorName::Red,
+                pulsing: false,
+            });
+            let _ = ipc_tx.send(DaemonEvent::Status {
                 message: "Mic access needed — check System Settings > Privacy".into(),
             });
             false
@@ -554,6 +560,13 @@ async fn run_daemon(
                         if let Err(e) = ipc_session.send_text(&text).await {
                             tracing::warn!("Failed to send IPC text to Gemini: {e}");
                         }
+                    }
+                    UICommand::Reconnect => {
+                        tracing::info!("Reconnect requested via IPC");
+                        ipc_session.reconnect().await;
+                    }
+                    UICommand::ToggleMic => {
+                        tracing::info!("Toggle mic requested via IPC");
                     }
                 }
             }
@@ -722,8 +735,11 @@ async fn run_processor(
                                 text: "Connected — Listening".into(),
                             }).await;
                         }
-                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
-                            state: ConnectionState::Connected,
+                        let _ = ipc_tx.send(DaemonEvent::DotColor {
+                            color: DotColorName::Green,
+                            pulsing: true,
+                        });
+                        let _ = ipc_tx.send(DaemonEvent::Status {
                             message: "Connected — Listening".into(),
                         });
 
@@ -829,9 +845,10 @@ async fn run_processor(
                                 })
                                 .await;
                         }
-                        let _ = ipc_tx.send(DaemonEvent::ToolStarted {
+                        let _ = ipc_tx.send(DaemonEvent::ToolStatus {
                             name: name.clone(),
-                            id: id.clone(),
+                            status: ToolRunStatus::Running,
+                            output: None,
                         });
 
                         // shutdown_aura stays inline — needs to break event loop
@@ -948,10 +965,15 @@ async fn run_processor(
                                     })
                                     .await;
                             }
-                            let _ = tool_ipc_tx.send(DaemonEvent::ToolFinished {
+                            let tool_output = response.get("stdout")
+                                .or(response.get("context"))
+                                .or(response.get("error"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let _ = tool_ipc_tx.send(DaemonEvent::ToolStatus {
                                 name: name.clone(),
-                                id: id.clone(),
-                                success: tool_success,
+                                status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
+                                output: tool_output,
                             });
 
                             tool_bus.send(AuraEvent::ToolExecuted {
@@ -1054,6 +1076,7 @@ async fn run_processor(
                             let _ = ipc_tx.send(DaemonEvent::Transcript {
                                 role: Role::Assistant,
                                 text: filtered,
+                                done: false,
                             });
                         }
                     }
@@ -1072,8 +1095,11 @@ async fn run_processor(
                                 text: format!("Error: {message}"),
                             }).await;
                         }
-                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
-                            state: ConnectionState::Error,
+                        let _ = ipc_tx.send(DaemonEvent::DotColor {
+                            color: DotColorName::Red,
+                            pulsing: false,
+                        });
+                        let _ = ipc_tx.send(DaemonEvent::Status {
                             message: format!("Error: {message}"),
                         });
                     }
@@ -1091,8 +1117,11 @@ async fn run_processor(
                                 }).await;
                             }
                         }
-                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
-                            state: ConnectionState::Reconnecting,
+                        let _ = ipc_tx.send(DaemonEvent::DotColor {
+                            color: DotColorName::Amber,
+                            pulsing: true,
+                        });
+                        let _ = ipc_tx.send(DaemonEvent::Status {
                             message: format!("Reconnecting (attempt {attempt})..."),
                         });
                     }
@@ -1106,8 +1135,11 @@ async fn run_processor(
                                 text: "Disconnected".into(),
                             }).await;
                         }
-                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
-                            state: ConnectionState::Disconnected,
+                        let _ = ipc_tx.send(DaemonEvent::DotColor {
+                            color: DotColorName::Gray,
+                            pulsing: false,
+                        });
+                        let _ = ipc_tx.send(DaemonEvent::Status {
                             message: "Disconnected".into(),
                         });
 

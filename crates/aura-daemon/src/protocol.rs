@@ -5,41 +5,55 @@ use serde::{Deserialize, Serialize};
 /// Each event is serialized as a single JSON line (JSONL) terminated by `\n`.
 /// Clients subscribe to a broadcast channel and receive all events — they can
 /// filter by variant on the Swift side.
+///
+/// Uses internally-tagged encoding (`#[serde(tag = "type")]`) so the JSON is
+/// flat — no `"data"` wrapper. Variant names are snake_case to match Swift
+/// `Decodable` expectations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonEvent {
-    /// Connection status changed.
-    ConnectionState {
-        state: ConnectionState,
-        message: String,
-    },
+    /// Dot color update for status bar icon.
+    DotColor { color: DotColorName, pulsing: bool },
 
     /// A transcript line from the user or the assistant.
-    Transcript { role: Role, text: String },
-
-    /// A tool call started executing.
-    ToolStarted { name: String, id: String },
-
-    /// A tool call finished.
-    ToolFinished {
-        name: String,
-        id: String,
-        success: bool,
+    Transcript {
+        role: Role,
+        text: String,
+        done: bool,
     },
+
+    /// Tool execution status.
+    ToolStatus {
+        name: String,
+        status: ToolRunStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+
+    /// Status message update.
+    Status { message: String },
 
     /// The daemon is shutting down.
     Shutdown,
 }
 
-/// Connection states exposed to the UI.
+/// Dot color names sent over IPC — maps to the Swift `DotColorName` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ConnectionState {
-    Connecting,
-    Connected,
-    Reconnecting,
-    Disconnected,
-    Error,
+pub enum DotColorName {
+    Gray,
+    Green,
+    Amber,
+    Red,
+}
+
+/// Tool execution lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRunStatus {
+    Running,
+    Completed,
+    Failed,
 }
 
 /// Conversation participant role.
@@ -54,10 +68,16 @@ pub enum Role {
 ///
 /// Each command is a single JSON line terminated by `\n`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum UICommand {
     /// Send a text message to the Gemini session (text input mode).
     SendText { text: String },
+
+    /// Toggle microphone on/off.
+    ToggleMic,
+
+    /// Request reconnection to Gemini.
+    Reconnect,
 
     /// Request a graceful shutdown.
     Shutdown,
@@ -68,50 +88,109 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_event_roundtrip() {
+    fn transcript_serialization() {
         let event = DaemonEvent::Transcript {
             role: Role::Assistant,
-            text: "Hello, world!".into(),
+            text: "Hello".into(),
+            done: false,
         };
         let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"transcript","role":"assistant","text":"Hello","done":false}"#
+        );
+
+        // Roundtrip
         let parsed: DaemonEvent = serde_json::from_str(&json).unwrap();
         match parsed {
-            DaemonEvent::Transcript { role, text } => {
+            DaemonEvent::Transcript {
+                role, text, done, ..
+            } => {
                 assert_eq!(role, Role::Assistant);
-                assert_eq!(text, "Hello, world!");
+                assert_eq!(text, "Hello");
+                assert!(!done);
             }
             _ => panic!("unexpected variant"),
         }
     }
 
     #[test]
-    fn ui_command_roundtrip() {
+    fn dot_color_serialization() {
+        let event = DaemonEvent::DotColor {
+            color: DotColorName::Green,
+            pulsing: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"dot_color","color":"green","pulsing":true}"#
+        );
+    }
+
+    #[test]
+    fn tool_status_serialization() {
+        let event = DaemonEvent::ToolStatus {
+            name: "click".into(),
+            status: ToolRunStatus::Running,
+            output: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"tool_status","name":"click","status":"running"}"#
+        );
+    }
+
+    #[test]
+    fn tool_status_with_output_serialization() {
+        let event = DaemonEvent::ToolStatus {
+            name: "click".into(),
+            status: ToolRunStatus::Completed,
+            output: Some("done".into()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"tool_status","name":"click","status":"completed","output":"done"}"#
+        );
+    }
+
+    #[test]
+    fn send_text_serialization() {
         let cmd = UICommand::SendText {
-            text: "test".into(),
+            text: "hello".into(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"type":"send_text","text":"hello"}"#);
+
+        // Roundtrip
         let parsed: UICommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            UICommand::SendText { text } => assert_eq!(text, "test"),
+            UICommand::SendText { text } => assert_eq!(text, "hello"),
             _ => panic!("unexpected variant"),
         }
     }
 
     #[test]
-    fn connection_state_roundtrip() {
-        let event = DaemonEvent::ConnectionState {
-            state: ConnectionState::Connected,
-            message: "Ready".into(),
+    fn reconnect_serialization() {
+        let cmd = UICommand::Reconnect;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"type":"reconnect"}"#);
+    }
+
+    #[test]
+    fn shutdown_serialization() {
+        let event = DaemonEvent::Shutdown;
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"shutdown"}"#);
+    }
+
+    #[test]
+    fn status_serialization() {
+        let event = DaemonEvent::Status {
+            message: "Connected".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"connected\""));
-        let parsed: DaemonEvent = serde_json::from_str(&json).unwrap();
-        match parsed {
-            DaemonEvent::ConnectionState { state, message } => {
-                assert_eq!(state, ConnectionState::Connected);
-                assert_eq!(message, "Ready");
-            }
-            _ => panic!("unexpected variant"),
-        }
+        assert_eq!(json, r#"{"type":"status","message":"Connected"}"#);
     }
 }

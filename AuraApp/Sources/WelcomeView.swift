@@ -11,6 +11,7 @@ struct WelcomeView: View {
     @State private var showKey = false
     @State private var appeared = false
     @State private var orbPulse = false
+    @State private var saveError: String?
 
     private var isKeyValid: Bool {
         apiKey.count >= 20
@@ -29,18 +30,14 @@ struct WelcomeView: View {
         .padding(.top, 36)
         .padding(.bottom, 24)
         .onAppear {
-            // Pre-populate from existing config
             if let existing = loadExistingKey() {
                 apiKey = existing
             }
-            // Staggered entry — trigger appeared flag with a slight delay so
-            // the view has rendered at its initial (hidden) state first.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
                     appeared = true
                 }
             }
-            // Orb breathing starts independently
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
                     orbPulse = true
@@ -53,27 +50,22 @@ struct WelcomeView: View {
 
     private var brandingSection: some View {
         VStack(spacing: 14) {
-            // Glowing orb — layered circles
             ZStack {
-                // Outermost diffuse glow
                 Circle()
                     .fill(auraGreen.opacity(0.08))
                     .frame(width: 110, height: 110)
                     .scaleEffect(orbPulse ? 1.08 : 0.94)
 
-                // Mid glow ring
                 Circle()
                     .fill(auraGreen.opacity(0.14))
                     .frame(width: 82, height: 82)
                     .scaleEffect(orbPulse ? 1.05 : 0.97)
 
-                // Inner soft glow
                 Circle()
                     .fill(auraGreen.opacity(0.28))
                     .frame(width: 60, height: 60)
                     .scaleEffect(orbPulse ? 1.03 : 0.98)
 
-                // Core orb
                 Circle()
                     .fill(
                         RadialGradient(
@@ -93,7 +85,6 @@ struct WelcomeView: View {
             .scaleEffect(appeared ? 1.0 : 0.5)
             .opacity(appeared ? 1.0 : 0.0)
 
-            // Title — staggered 0.2 s after orb
             Text("Aura")
                 .font(.title)
                 .fontWeight(.semibold)
@@ -106,7 +97,6 @@ struct WelcomeView: View {
                     value: appeared
                 )
 
-            // Subtitle — staggered 0.3 s
             Text("Your AI assistant for macOS")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -125,7 +115,6 @@ struct WelcomeView: View {
 
     private var inputSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Key field + visibility toggle
             HStack(spacing: 0) {
                 Group {
                     if showKey {
@@ -139,7 +128,6 @@ struct WelcomeView: View {
                 .frame(maxWidth: .infinity)
                 .autocorrectionDisabled()
 
-                // Validation checkmark
                 if isKeyValid {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 14, weight: .medium))
@@ -148,7 +136,6 @@ struct WelcomeView: View {
                         .padding(.trailing, 6)
                 }
 
-                // Show/hide toggle
                 Button {
                     showKey.toggle()
                 } label: {
@@ -161,21 +148,21 @@ struct WelcomeView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(
-                                isKeyValid
-                                    ? auraGreen.opacity(0.45)
-                                    : Color.primary.opacity(0.12),
-                                lineWidth: 1
-                            )
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.06), radius: 1, x: 0, y: 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        isKeyValid
+                            ? auraGreen.opacity(0.5)
+                            : Color.white.opacity(0.08),
+                        lineWidth: 0.5
                     )
             )
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isKeyValid)
 
-            // "Get a free key" link
             HStack(spacing: 3) {
                 Text("Don't have a key?")
                     .font(.caption)
@@ -208,9 +195,17 @@ struct WelcomeView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
             }
-            .buttonStyle(WelcomeButtonStyle(enabled: isKeyValid))
+            .buttonStyle(GlassButtonStyle(enabled: isKeyValid))
             .disabled(!isKeyValid)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isKeyValid)
+
+            if let error = saveError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 4)
+            }
         }
         .opacity(appeared ? 1.0 : 0.0)
         .offset(y: appeared ? 0 : 10)
@@ -229,7 +224,6 @@ struct WelcomeView: View {
         guard let contents = try? String(contentsOf: configFile, encoding: .utf8) else {
             return nil
         }
-        // Parse: api_key = "value"
         for line in contents.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("api_key") {
@@ -245,67 +239,67 @@ struct WelcomeView: View {
     }
 
     private func saveAPIKey() {
+        saveError = nil
         let fm = FileManager.default
         let configDir = fm.homeDirectoryForCurrentUser
             .appendingPathComponent(".config/aura")
 
-        // Create directory — ignore if already exists
         try? fm.createDirectory(
             at: configDir,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        // Enforce directory permissions regardless
         try? fm.setAttributes(
             [.posixPermissions: 0o700],
             ofItemAtPath: configDir.path
         )
 
-        // Write config file
         let configFile = configDir.appendingPathComponent("config.toml")
         let content = "api_key = \"\(apiKey)\"\n"
-        try? content.write(to: configFile, atomically: true, encoding: .utf8)
-        try? fm.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: configFile.path
-        )
+        do {
+            try content.write(to: configFile, atomically: true, encoding: .utf8)
+            try? fm.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: configFile.path
+            )
+        } catch {
+            saveError = "Failed to save API key: \(error.localizedDescription)"
+            return
+        }
 
         onContinue()
     }
 }
 
-// MARK: - Button Style
+// MARK: - Glass Button Style
 
-private struct WelcomeButtonStyle: ButtonStyle {
+/// Button that blends with vibrancy materials — uses a tinted glass fill when enabled,
+/// subtle material fill when disabled. Matches macOS popover control aesthetics.
+private struct GlassButtonStyle: ButtonStyle {
     let enabled: Bool
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(
                         enabled
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: [
-                                        Color(red: 0.35, green: 0.92, blue: 0.56),
-                                        Color(red: 0.25, green: 0.82, blue: 0.46),
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            : AnyShapeStyle(Color.primary.opacity(0.12))
+                            ? AnyShapeStyle(auraGreen.opacity(0.85))
+                            : AnyShapeStyle(.ultraThinMaterial)
                     )
             )
-            .foregroundStyle(enabled ? Color.black.opacity(0.85) : Color.primary.opacity(0.35))
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .shadow(
-                color: enabled ? auraGreen.opacity(0.35) : .clear,
-                radius: configuration.isPressed ? 4 : 8,
-                x: 0,
-                y: 3
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(
+                        enabled
+                            ? auraGreen.opacity(0.4)
+                            : Color.white.opacity(0.06),
+                        lineWidth: 0.5
+                    )
             )
+            .foregroundStyle(enabled ? Color.white : Color.primary.opacity(0.3))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
             .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }

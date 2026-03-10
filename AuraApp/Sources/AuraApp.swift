@@ -1,6 +1,5 @@
 import AppKit
 import Carbon
-import Sparkle
 import SwiftUI
 
 @main
@@ -25,20 +24,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var daemonProcess: Process?
     private var hotKeyRef: UnsafeMutableRawPointer?
     private var dotColorTimer: Timer?
-    private let updaterController = SPUStandardUpdaterController(
-        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil
-    )
+    private var daemonLaunched = false
 
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance enforcement — quit if another Aura is already running
+        let runningApps = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier == Bundle.main.bundleIdentifier
+        }
+        if runningApps.count > 1 {
+            NSApp.terminate(nil)
+            return
+        }
+
         // Hide dock icon — this is a menu bar app
         NSApp.setActivationPolicy(.accessory)
 
         setupStatusItem()
         setupFloatingPanel()
         setupGlobalHotKey()
-        launchDaemonAndConnect()
+        setupSleepWakeObserver()
+        setupMainMenu()
+
+        if !appState.showOnboarding {
+            launchDaemonAndConnect()
+            daemonLaunched = true
+        } else {
+            observeOnboardingCompletion()
+        }
 
         // Auto-open panel on first launch so the user sees the welcome screen
         if appState.showOnboarding {
@@ -141,14 +155,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reconnectItem.target = self
         menu.addItem(reconnectItem)
 
-        let updateItem = NSMenuItem(
-            title: "Check for Updates...",
-            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
-            keyEquivalent: ""
-        )
-        updateItem.target = updaterController
-        menu.addItem(updateItem)
-
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
@@ -175,6 +181,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitClicked() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Main Menu (Cmd+Q)
+
+    /// Accessory apps have no default menu bar, so Cmd+Q doesn't work unless
+    /// we install a minimal main menu with the Quit item.
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenu = NSMenu()
+        let quitItem = NSMenuItem(
+            title: "Quit Aura",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenu.addItem(quitItem)
+
+        let appMenuItem = NSMenuItem()
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     // MARK: - Floating Panel
@@ -283,6 +311,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setFrameTopLeftPoint(NSPoint(x: x, y: y))
     }
 
+    // MARK: - Sleep / Wake
+
+    private func setupSleepWakeObserver() {
+        let ws = NSWorkspace.shared.notificationCenter
+
+        ws.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.appState.statusMessage = "Sleeping..."
+                self?.appState.dotColor = .gray
+                self?.appState.isPulsing = false
+            }
+        }
+
+        ws.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.appState.statusMessage = "Reconnecting..."
+                self.appState.dotColor = .amber
+                // Trigger reconnect after a brief delay for network to come up
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    Task { @MainActor in
+                        self?.connection?.reconnect()
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Global Hot Key (Cmd+Shift+A)
 
     private func setupGlobalHotKey() {
@@ -365,6 +429,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let devPath = findDevelopmentDaemon()
             guard let path = devPath else {
                 appState.statusMessage = "Daemon not found"
+                appState.messages.append(ChatMessage(
+                    role: .assistant,
+                    text: "Could not find the Aura daemon. Please rebuild with `cargo build --release -p aura-daemon` and restart the app."
+                ))
                 return
             }
             daemonPath = path
@@ -379,8 +447,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try process.run()
             daemonProcess = process
+            monitorDaemon()
         } catch {
             appState.statusMessage = "Failed to launch daemon"
+        }
+    }
+
+    private func monitorDaemon() {
+        guard let process = daemonProcess else { return }
+        // Monitor on a background thread — waitUntilExit() blocks
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            process.waitUntilExit()
+            // Only relaunch if the app is still running (not during intentional quit)
+            DispatchQueue.main.async {
+                guard let self, self.daemonProcess != nil else { return }
+                let status = process.terminationStatus
+                if status != 0 {
+                    // Daemon crashed — relaunch after a brief delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        guard let self else { return }
+                        self.launchDaemon()
+                        // Reconnect the socket
+                        Task {
+                            await self.connection?.connect()
+                            if self.connection?.isConnected == true {
+                                self.appState.markConnected()
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -410,6 +506,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let process = daemonProcess, process.isRunning else { return }
         process.terminate()
         daemonProcess = nil
+    }
+
+    private func observeOnboardingCompletion() {
+        // When onboarding completes, launch the daemon
+        guard !daemonLaunched else { return }
+        // Use a simple timer to check (same pattern as dotColorTimer)
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            Task { @MainActor in
+                if self.appState.onboardingStep == .done && !self.daemonLaunched {
+                    self.daemonLaunched = true
+                    self.launchDaemonAndConnect()
+                    timer.invalidate()
+                }
+            }
+        }
     }
 
     private func observeDotColor() {

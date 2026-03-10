@@ -107,12 +107,30 @@ pub struct Blob {
     pub data: String,
 }
 
-/// A tool definition with function declarations.
+/// A tool definition — function declarations, Google Search, or Code Execution.
+///
+/// Each variant is a separate object in the `tools` array. Only one field should
+/// be set per `Tool` instance; the others serialize as absent via `skip_serializing_if`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
-    pub function_declarations: Vec<FunctionDeclaration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_declarations: Option<Vec<FunctionDeclaration>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_search: Option<GoogleSearch>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_execution: Option<CodeExecution>,
 }
+
+/// Enables Google Search grounding — Gemini can search the web for current info.
+#[derive(Debug, Serialize)]
+pub struct GoogleSearch {}
+
+/// Enables server-side Python code execution by Gemini.
+#[derive(Debug, Serialize)]
+pub struct CodeExecution {}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -336,7 +354,7 @@ mod tests {
             value["setup"]["systemInstruction"]["parts"][0]["text"],
             "You are a helpful assistant."
         );
-        // Optional fields that are None must be absent
+        // Optional fields that are None must be absent from JSON
         assert!(value["setup"].get("tools").is_none());
         assert!(value["setup"].get("sessionResumption").is_none());
     }
