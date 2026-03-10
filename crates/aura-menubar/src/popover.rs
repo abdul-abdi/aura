@@ -2,11 +2,14 @@ use cocoa::base::{NO, YES, id, nil};
 use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc::{class, msg_send, sel, sel_impl};
 
+const MAX_MESSAGES: u32 = 100;
+
 pub struct AuraPopover {
     popover: id,
     scroll_view: id,
     stack_view: id,
     status_label: id,
+    message_count: u32,
 }
 
 unsafe impl Send for AuraPopover {}
@@ -186,6 +189,7 @@ impl AuraPopover {
                 scroll_view,
                 stack_view,
                 status_label,
+                message_count: 0,
             }
         }
     }
@@ -204,8 +208,20 @@ impl AuraPopover {
         }
     }
 
-    pub unsafe fn add_message(&self, text: &str, is_user: bool) {
+    pub unsafe fn add_message(&mut self, text: &str, is_user: bool) {
         unsafe {
+            // Remove oldest message if at capacity
+            if self.message_count >= MAX_MESSAGES {
+                let subviews: id = msg_send![self.stack_view, arrangedSubviews];
+                let count: usize = msg_send![subviews, count];
+                if count > 0 {
+                    let first: id = msg_send![subviews, objectAtIndex: 0usize];
+                    let _: () = msg_send![self.stack_view, removeArrangedSubview: first];
+                    let _: () = msg_send![first, removeFromSuperview];
+                    self.message_count -= 1;
+                }
+            }
+
             // Create bubble container — this gives us inner padding
             let bubble: id = msg_send![class!(NSView), alloc];
             let bubble: id = msg_send![bubble, init];
@@ -327,6 +343,7 @@ impl AuraPopover {
 
             // Add wrapper to the stack view
             let _: () = msg_send![self.stack_view, addArrangedSubview: wrapper];
+            self.message_count += 1;
 
             // Force layout so frame sizes are computed before scrolling
             let _: () = msg_send![self.stack_view, layoutSubtreeIfNeeded];
@@ -379,7 +396,7 @@ impl AuraPopover {
         }
     }
 
-    pub unsafe fn clear_messages(&self) {
+    pub unsafe fn clear_messages(&mut self) {
         unsafe {
             let subviews: id = msg_send![self.stack_view, arrangedSubviews];
             let count: usize = msg_send![subviews, count];
@@ -388,6 +405,7 @@ impl AuraPopover {
                 let _: () = msg_send![self.stack_view, removeArrangedSubview: view];
                 let _: () = msg_send![view, removeFromSuperview];
             }
+            self.message_count = 0;
         }
     }
 }
