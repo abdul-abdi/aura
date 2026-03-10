@@ -226,6 +226,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -3024,6 +3025,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -3069,6 +3071,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
