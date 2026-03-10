@@ -139,6 +139,7 @@ dependencies = [
  "anyhow",
  "aura-bridge",
  "aura-gemini",
+ "aura-input",
  "aura-memory",
  "aura-menubar",
  "aura-screen",

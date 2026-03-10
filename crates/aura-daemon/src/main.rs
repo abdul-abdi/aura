@@ -427,48 +427,61 @@ async fn run_processor(
                             }).await;
                         }
 
-                        // Gather screen context for initial greeting
-                        let greeting_context = match screen_reader.capture_context() {
-                            Ok(ctx) => {
-                                let summary = ctx.summary();
-                                tracing::info!(context = %summary, "Screen context for greeting");
-                                summary
+                        let is_first = session.is_first_connect();
+
+                        if is_first {
+                            // First connection: send greeting with screen context + time
+                            let greeting_context = match screen_reader.capture_context() {
+                                Ok(ctx) => {
+                                    let summary = ctx.summary();
+                                    tracing::info!(context = %summary, "Screen context for greeting");
+                                    summary
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Screen context failed: {e}");
+                                    "No screen context available".into()
+                                }
+                            };
+
+                            let now = Local::now();
+                            let time_context = format!(
+                                "Current time: {} ({}). Date: {}.",
+                                now.format("%I:%M %p"),
+                                now.format("%Z"),
+                                now.format("%A, %B %-d, %Y"),
+                            );
+
+                            let context_msg = format!(
+                                "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}]"
+                            );
+
+                            if let Err(e) = memory.lock().unwrap().add_message(
+                                &session_id,
+                                MessageRole::User,
+                                &context_msg,
+                                None,
+                            ) {
+                                tracing::warn!("Failed to log greeting context to memory: {e}");
                             }
-                            Err(e) => {
-                                tracing::warn!("Screen context failed: {e}");
-                                "No screen context available".into()
+
+                            if let Err(e) = session.send_text(&context_msg).await {
+                                tracing::warn!("Failed to send greeting context to Gemini: {e}");
                             }
-                        };
+                        } else {
+                            // Reconnection: send brief context restoration
+                            let now = Local::now();
+                            let context_msg = format!(
+                                "[System: Session reconnected at {}. Continuing previous conversation. Do not re-greet the user.]",
+                                now.format("%I:%M %p"),
+                            );
+                            tracing::info!("Reconnection — sending context restoration");
 
-                        // Get rich time/location context
-                        let now = Local::now();
-                        let time_context = format!(
-                            "Current time: {} ({}). Date: {}.",
-                            now.format("%I:%M %p"),
-                            now.format("%Z"),
-                            now.format("%A, %B %-d, %Y"),
-                        );
-
-                        let context_msg = format!(
-                            "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}]"
-                        );
-
-                        // Log initial context to memory
-                        if let Err(e) = memory.lock().unwrap().add_message(
-                            &session_id,
-                            MessageRole::User,
-                            &context_msg,
-                            None,
-                        ) {
-                            tracing::warn!("Failed to log greeting context to memory: {e}");
+                            if let Err(e) = session.send_text(&context_msg).await {
+                                tracing::warn!("Failed to send reconnection context: {e}");
+                            }
                         }
 
-                        // Send greeting context to Gemini
-                        if let Err(e) = session.send_text(&context_msg).await {
-                            tracing::warn!("Failed to send greeting context to Gemini: {e}");
-                        }
-
-                        // Start the audio stream so incoming chunks queue seamlessly
+                        // Always start audio stream
                         if let Some(ref p) = player {
                             if let Err(e) = p.start_stream(OUTPUT_SAMPLE_RATE) {
                                 tracing::error!("Failed to start audio stream: {e}");
