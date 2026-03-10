@@ -416,9 +416,19 @@ async fn connect_and_stream_inner(
                 };
 
                 if let Some(text) = json_text {
-                    let server_msg: ServerMessage = serde_json::from_str(&text)?;
-                    if handle_server_message(server_msg, event_tx, state).await {
-                        return Err(anyhow::anyhow!("goAway: server requested reconnection"));
+                    match serde_json::from_str::<ServerMessage>(&text) {
+                        Ok(server_msg) => {
+                            if handle_server_message(server_msg, event_tx, state).await {
+                                return Err(anyhow::anyhow!("goAway: server requested reconnection"));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                text_preview = &text[..text.len().min(200)],
+                                "Failed to parse Gemini message, skipping"
+                            );
+                        }
                     }
                 }
             }
