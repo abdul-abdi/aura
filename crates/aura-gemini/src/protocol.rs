@@ -84,6 +84,7 @@ pub struct Content {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<ContentRole>,
 
+    #[serde(default)]
     pub parts: Vec<Part>,
 }
 
