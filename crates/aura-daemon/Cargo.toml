@@ -23,5 +23,4 @@ which = "7"
 
 [dev-dependencies]
 tempfile = "3"
-aura-bridge = { path = "../aura-bridge", features = ["test-support"] }
 aura-gemini = { path = "../aura-gemini" }

@@ -149,25 +149,3 @@ async fn test_daemon_shows_error_on_action_failed() {
     bus.send(AuraEvent::Shutdown).unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
-
-#[tokio::test]
-async fn test_gemini_tool_call_to_action_mapping() {
-    use aura_gemini::tools::function_call_to_action;
-    use serde_json::json;
-
-    // open_app maps correctly
-    let action = function_call_to_action("open_app", &json!({"app_name": "Safari"}));
-    assert!(action.is_some());
-
-    // search_files maps correctly
-    let action = function_call_to_action("search_files", &json!({"query": "readme"}));
-    assert!(action.is_some());
-
-    // summarize_screen returns None (handled specially)
-    let action = function_call_to_action("summarize_screen", &json!({}));
-    assert!(action.is_none());
-
-    // unknown function returns None
-    let action = function_call_to_action("unknown_func", &json!({}));
-    assert!(action.is_none());
-}

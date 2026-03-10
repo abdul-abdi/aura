@@ -1,7 +1,3 @@
-//! Aura OS bridge: platform-specific system actions
+//! Aura OS bridge: dynamic AppleScript execution
 
-pub mod actions;
 pub mod script;
-
-#[cfg(target_os = "macos")]
-pub mod macos;
