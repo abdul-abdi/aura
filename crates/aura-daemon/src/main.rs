@@ -113,9 +113,11 @@ fn main() -> Result<()> {
         Err(_) => {
             tracing::info!("No API key found, prompting user...");
             match prompt_api_key() {
-                Some(key) => {
+                Some(_) => {
                     tracing::info!("API key saved to config");
-                    GeminiConfig::from_env_inner(&key)
+                    // Re-read config to pick up proxy settings alongside the new key
+                    GeminiConfig::from_env()
+                        .context("Failed to load config after saving API key")?
                 }
                 None => {
                     anyhow::bail!(
