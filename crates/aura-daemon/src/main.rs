@@ -23,6 +23,7 @@ use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
 use aura_memory::{MessageRole, SessionMemory};
 use aura_menubar::app::{MenuBarApp, MenuBarMessage};
 use aura_menubar::status_item::DotColor;
+use aura_screen::capture::CaptureTrigger;
 use aura_screen::macos::MacOSScreenReader;
 use aura_voice::audio::AudioCapture;
 use aura_voice::playback::AudioPlayer;
@@ -357,49 +358,52 @@ async fn run_processor(
     // Screen reader for context gathering
     let screen_reader = MacOSScreenReader::new().context("Failed to initialize screen reader")?;
 
-    // Spawn periodic screen context updates (every 15s)
-    let ctx_session = Arc::clone(&session);
-    let ctx_cancel = cancel.clone();
+    // Screen capture loop: 1 FPS JPEG screenshots with change detection
+    let capture_trigger = CaptureTrigger::new();
+    let cap_session = Arc::clone(&session);
+    let cap_cancel = cancel.clone();
+    let cap_trigger = capture_trigger.clone();
     tokio::spawn(async move {
-        let reader = match MacOSScreenReader::new() {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Screen reader for periodic context failed: {e}");
-                return;
-            }
-        };
-        let mut last_summary = String::new();
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        let mut last_hash: u64 = 0;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.tick().await; // skip first immediate tick
 
         loop {
             tokio::select! {
-                _ = ctx_cancel.cancelled() => break,
-                _ = interval.tick() => {
-                    let summary = match reader.capture_context() {
-                        Ok(ctx) => ctx.summary(),
-                        Err(_) => continue,
-                    };
-
-                    // Only send if context actually changed
-                    if summary == last_summary {
-                        continue;
-                    }
-                    last_summary = summary.clone();
-
-                    let now = Local::now();
-                    let msg = format!(
-                        "[Screen update — {}]\n{}",
-                        now.format("%I:%M %p"),
-                        summary,
-                    );
-                    tracing::debug!("Sending periodic screen context");
-                    if let Err(e) = ctx_session.send_text(&msg).await {
-                        tracing::warn!("Failed to send periodic context: {e}");
-                        break;
-                    }
-                }
+                _ = cap_cancel.cancelled() => break,
+                _ = interval.tick() => {},
             }
+
+            // Also clear any pending trigger flag
+            let _ = cap_trigger.check_and_clear();
+
+            // Capture in a blocking task (JPEG encoding is CPU-bound)
+            let frame = match tokio::task::spawn_blocking(|| {
+                aura_screen::capture::capture_screen()
+            }).await {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(e)) => {
+                    tracing::warn!("Screen capture failed: {e}");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("Screen capture task panicked: {e}");
+                    continue;
+                }
+            };
+
+            // Skip if screen hasn't changed
+            if frame.hash == last_hash {
+                continue;
+            }
+            last_hash = frame.hash;
+
+            // Send to Gemini
+            if let Err(e) = cap_session.send_video(&frame.jpeg_base64).await {
+                tracing::warn!("Failed to send screen frame: {e}");
+                break;
+            }
+            tracing::debug!("Sent screen frame ({} KB)", frame.jpeg_base64.len() / 1024);
         }
     });
 
@@ -521,6 +525,7 @@ async fn run_processor(
                         let tool_menubar_tx = menubar_tx.clone();
                         let tool_executor = executor.clone();
                         let tool_screen_reader = screen_reader.clone();
+                        let tool_capture_trigger = capture_trigger.clone();
                         tokio::spawn(async move {
                             // Set amber status
                             if let Some(ref tx) = tool_menubar_tx {
@@ -557,6 +562,9 @@ async fn run_processor(
                                     text: "Connected — Listening".into(),
                                 }).await;
                             }
+
+                            // Trigger immediate screen capture so Gemini sees the result
+                            tool_capture_trigger.trigger();
 
                             // Send tool response back to Gemini
                             if let Err(e) = tool_session.send_tool_response(id, name, response).await {
