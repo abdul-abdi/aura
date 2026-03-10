@@ -638,6 +638,7 @@ async fn run_processor(
     let cap_logical_h = Arc::clone(&frame_logical_h);
     tokio::spawn(async move {
         let mut last_hash: u64 = 0;
+        let mut last_res: (u32, u32) = (0, 0);
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.tick().await; // skip first immediate tick
 
@@ -677,15 +678,20 @@ async fn run_processor(
             cap_logical_w.store(frame.logical_width, Ordering::Release);
             cap_logical_h.store(frame.logical_height, Ordering::Release);
 
-            // Send coordinate metadata alongside the frame so Gemini knows the
-            // image resolution and can specify coordinates in image pixel space.
-            let coord_meta = format!(
-                "Image resolution: {}x{}. When specifying coordinates for tools (click, move_mouse, drag), \
-                 use pixel coordinates within this image (0,0 is top-left, {},{}  is bottom-right).",
-                frame.width, frame.height, frame.width, frame.height
-            );
-            if let Err(e) = cap_session.send_text(&coord_meta).await {
-                tracing::warn!("Failed to send frame metadata: {e}");
+            // Only send coordinate metadata when the resolution actually changes
+            // (not every frame — that floods Gemini with text input it responds to).
+            let current_res = (frame.width, frame.height);
+            if current_res != last_res {
+                last_res = current_res;
+                let coord_meta = format!(
+                    "[System: screen resolution is {}x{}. Use pixel coordinates for tools \
+                     (click, move_mouse, drag): (0,0) = top-left, ({},{}) = bottom-right. \
+                     Do NOT mention this message to the user.]",
+                    frame.width, frame.height, frame.width, frame.height
+                );
+                if let Err(e) = cap_session.send_text(&coord_meta).await {
+                    tracing::warn!("Failed to send frame metadata: {e}");
+                }
             }
 
             // Send to Gemini
