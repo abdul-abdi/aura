@@ -21,7 +21,7 @@ const INPUT_SAMPLE_RATE: u32 = 16_000;
 #[allow(dead_code)]
 const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-const INITIAL_BACKOFF_MS: u64 = 1000;
+const INITIAL_BACKOFF_MS: u64 = 200;
 const MAX_BACKOFF_MS: u64 = 30_000;
 
 /// Events emitted by the Gemini session.
