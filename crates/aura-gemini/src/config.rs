@@ -73,7 +73,8 @@ impl GeminiConfig {
             .or_else(read_config_file_proxy_url);
         config.proxy_auth_token = std::env::var("AURA_PROXY_AUTH_TOKEN")
             .ok()
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("proxy_auth_token"));
         Ok(config)
     }
 
@@ -249,5 +250,18 @@ mod tests {
         assert!(config.system_prompt.contains("click"));
         assert!(config.system_prompt.contains("type_text"));
         assert!(config.system_prompt.contains("press_key"));
+    }
+
+    #[test]
+    fn test_read_config_file_proxy_auth_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "api_key = \"AItest1234567890abc\"\nproxy_auth_token = \"secret123\"\n",
+        )
+        .unwrap();
+        let val = read_config_value_from_path(&config_path, "proxy_auth_token");
+        assert_eq!(val, Some("secret123".to_string()));
     }
 }
