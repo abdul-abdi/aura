@@ -1,71 +1,63 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowBounds {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowInfo {
-    pub title: String,
-    pub app_name: String,
-    pub is_focused: bool,
-    pub bounds: WindowBounds,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenContext {
-    windows: Vec<WindowInfo>,
-    focused_text: Option<String>,
+    frontmost_app: String,
+    frontmost_title: Option<String>,
+    open_windows: Vec<String>,
+    clipboard: Option<String>,
 }
 
 impl ScreenContext {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_windows(windows: Vec<WindowInfo>, focused_text: Option<String>) -> Self {
+    pub fn empty() -> Self {
         Self {
-            windows,
-            focused_text,
+            frontmost_app: String::new(),
+            frontmost_title: None,
+            open_windows: Vec::new(),
+            clipboard: None,
         }
     }
 
-    pub fn windows(&self) -> &[WindowInfo] {
-        &self.windows
+    pub fn new_with_details(
+        frontmost_app: &str,
+        frontmost_title: Option<&str>,
+        open_windows: Vec<String>,
+        clipboard: Option<String>,
+    ) -> Self {
+        Self {
+            frontmost_app: frontmost_app.to_string(),
+            frontmost_title: frontmost_title.map(String::from),
+            open_windows,
+            clipboard,
+        }
     }
 
-    pub fn focused_window(&self) -> Option<&WindowInfo> {
-        self.windows.iter().find(|w| w.is_focused)
+    pub fn frontmost_app(&self) -> &str {
+        &self.frontmost_app
     }
 
-    pub fn focused_text(&self) -> Option<&str> {
-        self.focused_text.as_deref()
+    pub fn clipboard(&self) -> Option<&str> {
+        self.clipboard.as_deref()
     }
 
+    /// Human-readable summary for Gemini context injection.
     pub fn summary(&self) -> String {
-        let focused = self
-            .focused_window()
-            .map(|w| format!("{} - {}", w.app_name, w.title))
-            .unwrap_or_else(|| "No focused window".into());
-
-        if self.windows.is_empty() {
-            return format!("Focused: {}\nNo open windows", focused);
+        let mut parts = Vec::new();
+        parts.push(format!("Frontmost app: {}", self.frontmost_app));
+        if let Some(ref title) = self.frontmost_title {
+            parts.push(format!("Window title: {title}"));
         }
-
-        let window_list: Vec<String> = self
-            .windows
-            .iter()
-            .map(|w| format!("  {} - {}", w.app_name, w.title))
-            .collect();
-
-        format!(
-            "Focused: {}\nOpen windows:\n{}",
-            focused,
-            window_list.join("\n")
-        )
+        if !self.open_windows.is_empty() {
+            parts.push(format!("Open windows: {}", self.open_windows.join(", ")));
+        }
+        if let Some(ref clip) = self.clipboard {
+            let truncated = if clip.len() > 200 {
+                format!("{}...", &clip[..200])
+            } else {
+                clip.clone()
+            };
+            parts.push(format!("Clipboard: {truncated}"));
+        }
+        parts.join("\n")
     }
 }

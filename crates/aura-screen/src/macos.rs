@@ -1,5 +1,6 @@
+use std::process::Command;
+
 use anyhow::Result;
-use core_foundation::base::TCFType;
 
 use crate::context::ScreenContext;
 
@@ -11,28 +12,77 @@ impl MacOSScreenReader {
     }
 
     pub fn capture_context(&self) -> Result<ScreenContext> {
-        // TODO: Full implementation reads kCGWindowOwnerName, kCGWindowName,
-        // kCGWindowBounds from each dict entry. For now, returns empty context.
-        tracing::warn!("MacOSScreenReader::capture_context is not yet implemented");
+        let frontmost_app = get_frontmost_app().unwrap_or_default();
+        let frontmost_title = get_frontmost_title();
+        let open_windows = get_open_windows().unwrap_or_default();
+        let clipboard = get_clipboard();
 
-        let windows = unsafe {
-            let window_list = core_graphics::window::CGWindowListCopyWindowInfo(
-                core_graphics::window::kCGWindowListOptionOnScreenOnly
-                    | core_graphics::window::kCGWindowListExcludeDesktopElements,
-                core_graphics::window::kCGNullWindowID,
-            );
+        Ok(ScreenContext::new_with_details(
+            &frontmost_app,
+            frontmost_title.as_deref(),
+            open_windows,
+            clipboard,
+        ))
+    }
+}
 
-            let infos = Vec::new();
-            if !window_list.is_null() {
-                let _list = core_foundation::array::CFArray::<
-                    core_foundation::dictionary::CFDictionary,
-                >::wrap_under_create_rule(window_list as _);
+fn run_osascript(script: &str) -> Option<String> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() { None } else { Some(text) }
+    } else {
+        None
+    }
+}
 
-                // Placeholder: full dict parsing will be added in a follow-up task
-            }
-            infos
-        };
+fn get_frontmost_app() -> Option<String> {
+    run_osascript(
+        r#"tell application "System Events" to get name of first application process whose frontmost is true"#,
+    )
+}
 
-        Ok(ScreenContext::with_windows(windows, None))
+fn get_frontmost_title() -> Option<String> {
+    run_osascript(
+        r#"tell application "System Events"
+            set frontApp to first application process whose frontmost is true
+            tell frontApp
+                if (count of windows) > 0 then
+                    return name of window 1
+                else
+                    return ""
+                end if
+            end tell
+        end tell"#,
+    )
+}
+
+fn get_open_windows() -> Option<Vec<String>> {
+    let text = run_osascript(
+        r#"tell application "System Events"
+            set windowList to {}
+            repeat with proc in (every application process whose visible is true)
+                repeat with win in (every window of proc)
+                    set end of windowList to (name of proc) & " - " & (name of win)
+                end repeat
+            end repeat
+            set text item delimiters to linefeed
+            return windowList as text
+        end tell"#,
+    )?;
+    Some(text.lines().map(String::from).collect())
+}
+
+fn get_clipboard() -> Option<String> {
+    let output = Command::new("pbpaste").output().ok()?;
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        if text.is_empty() { None } else { Some(text) }
+    } else {
+        None
     }
 }
