@@ -17,14 +17,16 @@ pub fn type_text(text: &str) -> Result<()> {
     for ch in text.chars() {
         let mut buf = [0u16; 2];
         let encoded = ch.encode_utf16(&mut buf);
+
         let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
             .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
         down.set_string_from_utf16_unchecked(encoded);
-        down.post(CGEventTapLocation::HID);
 
-        let up_source = event_source()?;
-        let up = CGEvent::new_keyboard_event(up_source, 0, false)
+        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
             .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+
+        // Post both only after both are created
+        down.post(CGEventTapLocation::HID);
         up.post(CGEventTapLocation::HID);
 
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -53,12 +55,13 @@ pub fn press_key(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
     let down = CGEvent::new_keyboard_event(source.clone(), key, true)
         .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
     down.set_flags(flags);
-    down.post(CGEventTapLocation::HID);
 
-    let up_source = event_source()?;
-    let up = CGEvent::new_keyboard_event(up_source, key, false)
+    let up = CGEvent::new_keyboard_event(source.clone(), key, false)
         .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
-    up.set_flags(flags);
+    up.set_flags(CGEventFlags::CGEventFlagNull);
+
+    // Post both only after both are created
+    down.post(CGEventTapLocation::HID);
     up.post(CGEventTapLocation::HID);
 
     Ok(())

@@ -13,6 +13,7 @@ fn event_source() -> Result<CGEventSource> {
 }
 
 pub fn move_mouse(x: f64, y: f64) -> Result<()> {
+    anyhow::ensure!(x.is_finite() && y.is_finite(), "Invalid coordinates: ({x}, {y})");
     let source = event_source()?;
     let point = CGPoint::new(x, y);
     let event =
@@ -23,6 +24,7 @@ pub fn move_mouse(x: f64, y: f64) -> Result<()> {
 }
 
 pub fn click(x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
+    anyhow::ensure!(x.is_finite() && y.is_finite(), "Invalid coordinates: ({x}, {y})");
     let source = event_source()?;
     let point = CGPoint::new(x, y);
 
@@ -45,15 +47,16 @@ pub fn click(x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
         core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
         click_count as i64,
     );
-    down.post(CGEventTapLocation::HID);
 
-    let up_source = event_source()?;
-    let up = CGEvent::new_mouse_event(up_source, up_type, point, cg_button)
+    let up = CGEvent::new_mouse_event(source.clone(), up_type, point, cg_button)
         .map_err(|_| anyhow::anyhow!("Failed to create mouse up event"))?;
     up.set_integer_value_field(
         core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
         click_count as i64,
     );
+
+    // Post both only after both are created
+    down.post(CGEventTapLocation::HID);
     up.post(CGEventTapLocation::HID);
 
     Ok(())
@@ -75,11 +78,15 @@ pub fn scroll(dx: i32, dy: i32) -> Result<()> {
 }
 
 pub fn drag(from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> Result<()> {
+    anyhow::ensure!(
+        from_x.is_finite() && from_y.is_finite() && to_x.is_finite() && to_y.is_finite(),
+        "Invalid drag coordinates"
+    );
     let source = event_source()?;
     let from = CGPoint::new(from_x, from_y);
     let to = CGPoint::new(to_x, to_y);
 
-    // Mouse down at start
+    // Create all events upfront before posting any
     let down = CGEvent::new_mouse_event(
         source.clone(),
         CGEventType::LeftMouseDown,
@@ -87,27 +94,22 @@ pub fn drag(from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> Result<()> {
         CGMouseButton::Left,
     )
     .map_err(|_| anyhow::anyhow!("Failed to create drag down event"))?;
-    down.post(CGEventTapLocation::HID);
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    // Move to destination
-    let drag_source = event_source()?;
-    let drag = CGEvent::new_mouse_event(
-        drag_source,
+    let drag_ev = CGEvent::new_mouse_event(
+        source.clone(),
         CGEventType::LeftMouseDragged,
         to,
         CGMouseButton::Left,
     )
     .map_err(|_| anyhow::anyhow!("Failed to create drag move event"))?;
-    drag.post(CGEventTapLocation::HID);
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    // Mouse up at destination
-    let up_source = event_source()?;
-    let up = CGEvent::new_mouse_event(up_source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
+    let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
         .map_err(|_| anyhow::anyhow!("Failed to create drag up event"))?;
+
+    down.post(CGEventTapLocation::HID);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    drag_ev.post(CGEventTapLocation::HID);
+    std::thread::sleep(std::time::Duration::from_millis(50));
     up.post(CGEventTapLocation::HID);
 
     Ok(())
