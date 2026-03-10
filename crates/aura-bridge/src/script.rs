@@ -12,7 +12,8 @@ const MAX_OUTPUT_BYTES: usize = 10_240;
 /// Embedded sandbox profile (eliminates TOCTOU race from file-path lookup).
 const SANDBOX_PROFILE: &str = include_str!("../sandbox.sb");
 
-/// Blocked shell patterns — checked against ALL script content.
+/// Defense-in-depth shell command blocklist. NOT a security boundary —
+/// the sandbox profile is the primary enforcement mechanism.
 const BLOCKED_SHELL_PATTERNS: &[&str] = &[
     "rm -rf",
     "rm -r",
@@ -119,6 +120,7 @@ impl ScriptExecutor {
             {
                 Ok(child) => child,
                 Err(e) => {
+                    let _ = std::fs::remove_file(&sandbox_path);
                     return ScriptResult {
                         success: false,
                         stdout: String::new(),
@@ -129,7 +131,7 @@ impl ScriptExecutor {
 
             // Wait with timeout using a polling loop
             let start = std::time::Instant::now();
-            loop {
+            let result = loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         // Process finished — read output
@@ -155,7 +157,7 @@ impl ScriptExecutor {
                         truncate_output(&mut stdout);
                         truncate_output(&mut stderr);
 
-                        return ScriptResult {
+                        break ScriptResult {
                             success: status.success(),
                             stdout,
                             stderr,
@@ -166,7 +168,7 @@ impl ScriptExecutor {
                         if start.elapsed() >= timeout_dur {
                             let _ = child.kill();
                             let _ = child.wait(); // reap zombie
-                            return ScriptResult {
+                            break ScriptResult {
                                 success: false,
                                 stdout: String::new(),
                                 stderr: "Script timed out".into(),
@@ -175,14 +177,18 @@ impl ScriptExecutor {
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     Err(e) => {
-                        return ScriptResult {
+                        break ScriptResult {
                             success: false,
                             stdout: String::new(),
                             stderr: format!("Failed to check process status: {e}"),
                         };
                     }
                 }
-            }
+            };
+
+            // Clean up sandbox profile after process completes
+            let _ = std::fs::remove_file(&sandbox_path);
+            result
         });
 
         match handle.await {
