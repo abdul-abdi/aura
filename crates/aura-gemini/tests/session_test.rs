@@ -646,23 +646,12 @@ async fn test_go_away_triggers_reconnect() {
     )
     .await;
 
-    // Should see Reconnecting after goAway
-    let event = expect_event(
-        &mut rx,
-        |e| matches!(e, GeminiEvent::Reconnecting { .. }),
-        "Reconnecting after goAway",
-    )
-    .await;
-    assert!(
-        matches!(event, GeminiEvent::Reconnecting { attempt: 1 }),
-        "Expected attempt 1, got: {event:?}"
-    );
-
-    // Should reconnect and get Connected again
+    // goAway should reconnect immediately without emitting Reconnecting.
+    // The next event we care about is a second Connected.
     expect_event(
         &mut rx,
         |e| matches!(e, GeminiEvent::Connected),
-        "Connected (second)",
+        "Connected (second, after goAway)",
     )
     .await;
 

@@ -226,7 +226,12 @@ async fn connection_loop(
         }
 
         match connect_and_stream(&state, &mut channels, &event_tx, &cancel).await {
-            Ok(()) => {
+            Ok(go_away) => {
+                if go_away {
+                    // goAway — reconnect immediately without counting as failure
+                    tracing::info!("Server sent goAway, reconnecting immediately");
+                    continue;
+                }
                 // Clean disconnect
                 let _ = event_tx.send(GeminiEvent::Disconnected);
                 break;
@@ -272,7 +277,7 @@ async fn connect_and_stream(
     channels: &mut StreamChannels,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-) -> std::result::Result<(), StreamOutcome> {
+) -> std::result::Result<bool, StreamOutcome> {
     let mut was_connected = false;
     let connected_at = std::time::Instant::now();
 
@@ -280,7 +285,7 @@ async fn connect_and_stream(
         connect_and_stream_inner(state, channels, event_tx, cancel, &mut was_connected).await;
 
     match result {
-        Ok(()) => Ok(()),
+        Ok(go_away) => Ok(go_away),
         Err(error) => {
             let connected_duration = if was_connected {
                 connected_at.elapsed()
@@ -296,13 +301,15 @@ async fn connect_and_stream(
     }
 }
 
+/// Returns `Ok(false)` for clean disconnect, `Ok(true)` for goAway (reconnect without penalty),
+/// or `Err` for a real error.
 async fn connect_and_stream_inner(
     state: &SessionState,
     channels: &mut StreamChannels,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     was_connected: &mut bool,
-) -> Result<()> {
+) -> Result<bool> {
     let url = state.config.ws_url();
     tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
     let (ws_stream, _) = tokio::time::timeout(
@@ -333,7 +340,7 @@ async fn connect_and_stream_inner(
             _ = tokio::time::sleep_until(setup_deadline) => {
                 anyhow::bail!("Timed out waiting for setupComplete (15s). Model '{}' may not exist or may not support the Live API.", state.config.model);
             }
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Ok(false),
         };
 
         let json_text = match msg {
@@ -369,7 +376,7 @@ async fn connect_and_stream_inner(
         tokio::select! {
             biased;
 
-            _ = cancel.cancelled() => return Ok(()),
+            _ = cancel.cancelled() => return Ok(false),
 
             msg = ws_source.next() => {
                 let Some(msg) = msg else {
@@ -392,7 +399,7 @@ async fn connect_and_stream_inner(
                     match serde_json::from_str::<ServerMessage>(&text) {
                         Ok(server_msg) => {
                             if handle_server_message(server_msg, event_tx, state).await {
-                                return Err(anyhow::anyhow!("goAway: server requested reconnection"));
+                                return Ok(true); // goAway — reconnect without penalty
                             }
                         }
                         Err(e) => {
