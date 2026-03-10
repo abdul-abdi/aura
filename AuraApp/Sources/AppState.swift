@@ -57,8 +57,14 @@ final class AppState {
         if onboardingDone {
             onboardingStep = .done
         } else if Self.configFileHasKey() {
-            // Key already saved (e.g. re-install) — skip to permissions
-            onboardingStep = .permissions
+            // Key already saved (e.g. re-install) — check if permissions are also granted
+            permissionChecker.checkAll()
+            if permissionChecker.allGranted {
+                onboardingStep = .done
+                UserDefaults.standard.set(true, forKey: "aura.onboardingComplete")
+            } else {
+                onboardingStep = .permissions
+            }
         } else {
             onboardingStep = .welcome
         }
@@ -67,7 +73,13 @@ final class AppState {
     // MARK: - Onboarding
 
     func completeWelcome() {
-        onboardingStep = .permissions
+        // If permissions were already granted via native macOS dialogs, skip straight to done
+        permissionChecker.checkAll()
+        if permissionChecker.allGranted {
+            completeOnboarding()
+        } else {
+            onboardingStep = .permissions
+        }
     }
 
     func completeOnboarding() {

@@ -22,8 +22,14 @@ struct PermissionsView: View {
         .frame(width: 380)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .onAppear { checker.checkAll() }
-        .onReceive(timer) { _ in checker.checkAll() }
+        .onAppear {
+            checker.checkAll()
+            if checker.allGranted { onContinue() }
+        }
+        .onReceive(timer) { _ in
+            checker.checkAll()
+            if checker.allGranted { onContinue() }
+        }
     }
 
     // MARK: Header
