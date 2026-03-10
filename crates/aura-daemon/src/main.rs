@@ -302,10 +302,12 @@ async fn run_daemon(
     menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     has_permission_error: Arc<AtomicBool>,
 ) -> Result<()> {
-    // U9: Inject destructive action confirmation guardrail into system prompt
-    gemini_config
-        .system_prompt
-        .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
+    // U9: Inject destructive action confirmation guardrail into system prompt (once)
+    if !gemini_config.system_prompt.contains(DESTRUCTIVE_ACTION_GUARDRAIL) {
+        gemini_config
+            .system_prompt
+            .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
+    }
 
     // Connect to Gemini Live API
     if let Some(ref tx) = menubar_tx {
