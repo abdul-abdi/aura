@@ -49,8 +49,14 @@ fn test_check_auth_length_mismatch() {
 
 #[test]
 fn test_check_auth_different_lengths_still_compared() {
-    assert!(!aura_proxy::check_auth(Some("short"), Some("muchlongertoken")));
-    assert!(!aura_proxy::check_auth(Some("muchlongertoken"), Some("short")));
+    assert!(!aura_proxy::check_auth(
+        Some("short"),
+        Some("muchlongertoken")
+    ));
+    assert!(!aura_proxy::check_auth(
+        Some("muchlongertoken"),
+        Some("short")
+    ));
 }
 
 // ── Integration tests ────────────────────────────────────────────────

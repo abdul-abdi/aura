@@ -5,6 +5,20 @@ use tokio_tungstenite::tungstenite::{self, protocol::WebSocketConfig};
 /// Max WebSocket message/frame size for the Gemini upstream: 1 MiB.
 const WS_MAX_SIZE: usize = 1_048_576;
 
+/// Redact the API key from a Gemini WebSocket URL for safe logging.
+fn redact_url(url: &str) -> String {
+    if let Some(pos) = url.find("key=") {
+        let key_start = pos + 4;
+        let key_end = url[key_start..]
+            .find('&')
+            .map(|i| key_start + i)
+            .unwrap_or(url.len());
+        format!("{}key=REDACTED{}", &url[..key_start], &url[key_end..])
+    } else {
+        url.to_string()
+    }
+}
+
 /// Relay WebSocket frames between client and Gemini.
 pub async fn relay_websocket(client_ws: WebSocket, gemini_url: String) {
     let ws_config = WebSocketConfig {
@@ -21,11 +35,11 @@ pub async fn relay_websocket(client_ws: WebSocket, gemini_url: String) {
     {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => {
-            tracing::error!("Failed to connect to Gemini: {e}");
+            tracing::error!(url = %redact_url(&gemini_url), "Failed to connect to Gemini: {e}");
             return;
         }
         Err(_) => {
-            tracing::error!("Timed out connecting to Gemini");
+            tracing::error!(url = %redact_url(&gemini_url), "Timed out connecting to Gemini");
             return;
         }
     };

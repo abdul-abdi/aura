@@ -47,7 +47,7 @@ pub fn check_auth(token: Option<&str>, expected: Option<&str>) -> bool {
 
 /// Hash token to fixed-size output for constant-time comparison.
 fn hash_token(input: &[u8]) -> [u8; 32] {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(input);
     hasher.finalize().into()
@@ -78,10 +78,7 @@ async fn ws_handler_with_sem(
 }
 
 /// Auth-only endpoint for testing — validates token without requiring WS upgrade headers.
-async fn ws_auth_preflight_with_token(
-    params: ConnectParams,
-    expected: Option<String>,
-) -> Response {
+async fn ws_auth_preflight_with_token(params: ConnectParams, expected: Option<String>) -> Response {
     if !check_auth(params.auth_token.as_deref(), expected.as_deref()) {
         return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
@@ -98,19 +95,25 @@ pub async fn run_server(port: u16) -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/ws", get({
-            let sem = Arc::clone(&ws_semaphore);
-            let token = auth_token.clone();
-            move |ws: WebSocketUpgrade, Query(params): Query<ConnectParams>| {
-                ws_handler_with_sem(ws, params, token, sem)
-            }
-        }))
-        .route("/ws/auth", get({
-            let token = auth_token;
-            move |Query(params): Query<ConnectParams>| {
-                ws_auth_preflight_with_token(params, token)
-            }
-        }));
+        .route(
+            "/ws",
+            get({
+                let sem = Arc::clone(&ws_semaphore);
+                let token = auth_token.clone();
+                move |ws: WebSocketUpgrade, Query(params): Query<ConnectParams>| {
+                    ws_handler_with_sem(ws, params, token, sem)
+                }
+            }),
+        )
+        .route(
+            "/ws/auth",
+            get({
+                let token = auth_token;
+                move |Query(params): Query<ConnectParams>| {
+                    ws_auth_preflight_with_token(params, token)
+                }
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("Proxy listening on port {port}");

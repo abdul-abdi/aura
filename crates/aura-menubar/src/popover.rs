@@ -92,6 +92,7 @@ impl AuraPopover {
             // VoiceOver: mark the popover for accessibility
             let a11y_label = NSString::alloc(nil).init_str("Aura conversation");
             let _: () = msg_send![popover, setAccessibilityLabel: a11y_label];
+            let _: () = msg_send![a11y_label, release];
 
             let vc: id = msg_send![class!(NSViewController), alloc];
             let vc: id = msg_send![vc, init];
@@ -163,6 +164,7 @@ impl AuraPopover {
             let status_label: id = msg_send![status_label, init];
             let status_str = NSString::alloc(nil).init_str("\u{25CF} Connecting...");
             let _: () = msg_send![status_label, setStringValue: status_str];
+            let _: () = msg_send![status_str, release];
             let _: () = msg_send![status_label, setBezeled: NO];
             let _: () = msg_send![status_label, setDrawsBackground: NO];
             let _: () = msg_send![status_label, setEditable: NO];
@@ -180,6 +182,7 @@ impl AuraPopover {
             // VoiceOver: accessibility label on the status field
             let status_a11y = NSString::alloc(nil).init_str("Aura connection status");
             let _: () = msg_send![status_label, setAccessibilityLabel: status_a11y];
+            let _: () = msg_send![status_a11y, release];
 
             // Subtle separator line between header and messages
             let separator: id = msg_send![class!(NSBox), alloc];
@@ -322,6 +325,7 @@ impl AuraPopover {
 
             let ns_text = NSString::alloc(nil).init_str(text);
             let _: () = msg_send![label, setStringValue: ns_text];
+            let _: () = msg_send![ns_text, release];
             let _: () = msg_send![label, setBezeled: NO];
             let _: () = msg_send![label, setDrawsBackground: NO];
             let _: () = msg_send![label, setEditable: NO];
@@ -452,6 +456,7 @@ impl AuraPopover {
             let decorated = format!("{} {text}", status.dot_char());
             let ns_text = NSString::alloc(nil).init_str(&decorated);
             let _: () = msg_send![self.status_label, setStringValue: ns_text];
+            let _: () = msg_send![ns_text, release];
 
             // Update status label color based on enum
             let color: id = status.ns_color();

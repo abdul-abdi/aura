@@ -154,7 +154,12 @@ fn set_secret(project: &str, name: &str, value: &str) -> Result<()> {
 fn grant_secret_access(project: &str, secret_name: &str) -> Result<()> {
     // Get the project number for the default compute service account
     let output = ShellCommand::new("gcloud")
-        .args(["projects", "describe", project, "--format=value(projectNumber)"])
+        .args([
+            "projects",
+            "describe",
+            project,
+            "--format=value(projectNumber)",
+        ])
         .stderr(std::process::Stdio::null())
         .output()?;
     let project_number = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -364,19 +369,18 @@ pub fn run_deploy(auto_yes: bool) -> Result<()> {
     println!();
 
     // 5. Auth token
-    let auth_token = if auto_yes
-        || confirm_default_yes("  Generate a random auth token for the proxy?")?
-    {
-        let token = generate_auth_token();
-        println!(
-            "  Auth token: \x1b[2m{}...\x1b[0m (stored in Secret Manager)",
-            &token[..16]
-        );
-        Some(token)
-    } else {
-        println!("  \x1b[33mWarning:\x1b[0m Proxy will accept unauthenticated connections.");
-        None
-    };
+    let auth_token =
+        if auto_yes || confirm_default_yes("  Generate a random auth token for the proxy?")? {
+            let token = generate_auth_token();
+            println!(
+                "  Auth token: \x1b[2m{}...\x1b[0m (stored in Secret Manager)",
+                &token[..16]
+            );
+            Some(token)
+        } else {
+            println!("  \x1b[33mWarning:\x1b[0m Proxy will accept unauthenticated connections.");
+            None
+        };
     println!();
 
     // 6. Enable APIs
@@ -439,8 +443,7 @@ pub fn run_deploy(auto_yes: bool) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
         }
     }
 

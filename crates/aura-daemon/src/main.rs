@@ -309,7 +309,10 @@ async fn run_daemon(
     has_permission_error: Arc<AtomicBool>,
 ) -> Result<()> {
     // U9: Inject destructive action confirmation guardrail into system prompt (once)
-    if !gemini_config.system_prompt.contains(DESTRUCTIVE_ACTION_GUARDRAIL) {
+    if !gemini_config
+        .system_prompt
+        .contains(DESTRUCTIVE_ACTION_GUARDRAIL)
+    {
         gemini_config
             .system_prompt
             .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
@@ -828,19 +831,6 @@ async fn run_processor(
                             tracing::error!("active_tool_tokens lock poisoned");
                         }
 
-                        // Increment tools-in-flight counter
-                        let prev = tool_inflight.fetch_add(1, Ordering::AcqRel);
-                        if prev == 0 {
-                            // Transition from idle to busy — set amber
-                            if let Some(ref tx) = menubar_tx {
-                                let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
-                                let _ = tx.send(MenuBarMessage::SetColor(DotColor::Amber)).await;
-                                let _ = tx.send(MenuBarMessage::SetStatus {
-                                    text: format!("Running {name}..."),
-                                }).await;
-                            }
-                        }
-
                         tokio::spawn(async move {
                             let _permit = match tool_semaphore.acquire().await {
                                 Ok(permit) => permit,
@@ -849,6 +839,20 @@ async fn run_processor(
                                     return;
                                 }
                             };
+
+                            // Increment tools-in-flight counter AFTER acquiring semaphore.
+                            // This prevents counter leak when semaphore is closed.
+                            let prev = tool_inflight.fetch_add(1, Ordering::AcqRel);
+                            if prev == 0 {
+                                // Transition from idle to busy — set amber
+                                if let Some(ref tx) = tool_menubar_tx {
+                                    let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
+                                    let _ = tx.send(MenuBarMessage::SetColor(DotColor::Amber)).await;
+                                    let _ = tx.send(MenuBarMessage::SetStatus {
+                                        text: format!("Running {name}..."),
+                                    }).await;
+                                }
+                            }
 
                             let response = tokio::select! {
                                 result = execute_tool(&name, &args, &tool_executor, &tool_screen_reader, tool_dims) => result,
@@ -908,8 +912,11 @@ async fn run_processor(
                                 .await;
                             }
 
-                            // Decrement tools-in-flight counter
-                            let remaining = tool_inflight.fetch_sub(1, Ordering::AcqRel) - 1;
+                            // Decrement tools-in-flight counter (saturating to avoid underflow)
+                            let prev = tool_inflight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                                Some(n.saturating_sub(1))
+                            }).unwrap_or(0);
+                            let remaining = prev.saturating_sub(1);
                             if remaining == 0
                                 && let Some(ref tx) = tool_menubar_tx
                                 && !tool_permission_error.load(Ordering::Acquire)
@@ -1099,8 +1106,10 @@ fn validate_api_key(key: &str) -> bool {
 }
 
 /// Show a native macOS error dialog via osascript.
+/// Escapes backslashes and double-quotes to prevent AppleScript injection.
 fn show_error_dialog(message: &str) {
     let escaped = message
+        .replace('\\', "\\\\")
         .replace('\"', "\\\"")
         .replace('\n', "\" & return & \"");
     let script = format!(
@@ -1268,11 +1277,17 @@ async fn execute_tool(
             }
         }
         "scroll" => {
-            // S7: Clamp scroll amounts to -1000..=1000
-            let dx = args.get("dx").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let dy = args.get("dy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            let dx = dx.clamp(-SCROLL_MAX, SCROLL_MAX);
-            let dy = dy.clamp(-SCROLL_MAX, SCROLL_MAX);
+            // S7: Clamp scroll amounts to -1000..=1000 (clamp at i64 before cast to avoid wrap)
+            let dx = args
+                .get("dx")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .clamp(-(SCROLL_MAX as i64), SCROLL_MAX as i64) as i32;
+            let dy = args
+                .get("dy")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .clamp(-(SCROLL_MAX as i64), SCROLL_MAX as i64) as i32;
             run_input_blocking(move || aura_input::mouse::scroll(dx, dy)).await
         }
         "drag" => {

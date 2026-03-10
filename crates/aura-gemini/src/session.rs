@@ -258,8 +258,14 @@ async fn connection_loop(
 
                 let base_backoff_ms =
                     (INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1)).min(MAX_BACKOFF_MS);
-                // Deterministic jitter: +-25% based on attempt number
-                let jitter_factor = (attempt as f64 * 7.0 % 1.0) * 0.5 + 0.75;
+                // Jitter: +-25% using timestamp-based entropy to avoid thundering herd.
+                // Mixes attempt number with nanosecond timestamp for per-attempt variation.
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos();
+                let hash = (nanos as u64).wrapping_mul(2654435761) ^ (attempt as u64 * 7);
+                let jitter_factor = (hash % 1000) as f64 / 2000.0 + 0.75; // 0.75..1.25
                 let backoff =
                     Duration::from_millis((base_backoff_ms as f64 * jitter_factor) as u64);
                 tokio::select! {
@@ -281,8 +287,15 @@ async fn connect_and_stream(
     let mut was_connected = false;
     let mut connected_at = std::time::Instant::now();
 
-    let result =
-        connect_and_stream_inner(state, channels, event_tx, cancel, &mut was_connected, &mut connected_at).await;
+    let result = connect_and_stream_inner(
+        state,
+        channels,
+        event_tx,
+        cancel,
+        &mut was_connected,
+        &mut connected_at,
+    )
+    .await;
 
     match result {
         Ok(go_away) => Ok(go_away),
@@ -408,7 +421,7 @@ async fn connect_and_stream_inner(
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                text_preview = &text[..text.len().min(200)],
+                                text_preview = &text[..text.floor_char_boundary(200)],
                                 "Failed to parse Gemini message, skipping"
                             );
                         }

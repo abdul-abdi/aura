@@ -13,7 +13,10 @@ fn event_source() -> Result<CGEventSource> {
 }
 
 pub fn move_mouse(x: f64, y: f64) -> Result<()> {
-    anyhow::ensure!(x.is_finite() && y.is_finite(), "Invalid coordinates: ({x}, {y})");
+    anyhow::ensure!(
+        x.is_finite() && y.is_finite(),
+        "Invalid coordinates: ({x}, {y})"
+    );
     let source = event_source()?;
     let point = CGPoint::new(x, y);
     let event =
@@ -24,7 +27,10 @@ pub fn move_mouse(x: f64, y: f64) -> Result<()> {
 }
 
 pub fn click(x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
-    anyhow::ensure!(x.is_finite() && y.is_finite(), "Invalid coordinates: ({x}, {y})");
+    anyhow::ensure!(
+        x.is_finite() && y.is_finite(),
+        "Invalid coordinates: ({x}, {y})"
+    );
     let source = event_source()?;
     let point = CGPoint::new(x, y);
 

@@ -57,7 +57,30 @@ impl AudioPlayer {
                 // Pre-buffer to absorb network jitter before starting playback
                 let mut pre_buffer: Option<PreBuffer> = None;
 
-                while let Ok(cmd) = rx.recv() {
+                loop {
+                    // Use recv_timeout so we can periodically check if the sink
+                    // has naturally drained (all queued audio finished playing).
+                    // Without this, playing_flag stays true forever after playback ends.
+                    let cmd = if current.is_some() {
+                        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                            Ok(cmd) => cmd,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                // Check if sink has naturally drained
+                                if let Some((ref sink, _)) = current
+                                    && sink.empty()
+                                {
+                                    playing_flag.store(false, Ordering::Release);
+                                }
+                                continue;
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    } else {
+                        match rx.recv() {
+                            Ok(cmd) => cmd,
+                            Err(_) => break,
+                        }
+                    };
                     match cmd {
                         PlaybackCommand::StartStream { sample_rate } => {
                             // Tear down any previous stream
@@ -153,7 +176,9 @@ impl AudioPlayer {
             .context("Failed to spawn playback thread")?;
 
         // Wait for thread to confirm device opened
-        startup_rx.recv().context("Playback thread exited")?
+        startup_rx
+            .recv()
+            .context("Playback thread exited")?
             .context("Audio output device unavailable")?;
 
         Ok(Self { tx, playing })
@@ -336,7 +361,10 @@ mod tests {
         // Drop the receiver immediately
         drop(_rx);
 
-        let player = AudioPlayer { tx, playing: Arc::new(AtomicBool::new(false)) };
+        let player = AudioPlayer {
+            tx,
+            playing: Arc::new(AtomicBool::new(false)),
+        };
 
         // stop() should not panic — it should log a warning via tracing
         player.stop();

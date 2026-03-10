@@ -285,9 +285,11 @@ fn contains_standalone_token(haystack: &str, token: &str) -> bool {
 }
 
 /// Truncate output to `MAX_OUTPUT_BYTES`, appending a marker if truncated.
+/// Uses `floor_char_boundary` to avoid panicking on multi-byte UTF-8.
 fn truncate_output(output: &mut String) {
     if output.len() > MAX_OUTPUT_BYTES {
-        output.truncate(MAX_OUTPUT_BYTES);
+        let boundary = output.floor_char_boundary(MAX_OUTPUT_BYTES);
+        output.truncate(boundary);
         output.push_str("\n... [output truncated]");
     }
 }
