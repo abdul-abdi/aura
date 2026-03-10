@@ -22,6 +22,7 @@ fn test_config(url: String) -> GeminiConfig {
         system_prompt: "Test prompt".into(),
         temperature: 0.7,
         proxy_url: Some(format!("{url}/")),
+        proxy_auth_token: None,
     }
 }
 

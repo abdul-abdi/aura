@@ -138,9 +138,12 @@ mod tests {
 
     #[test]
     fn hash_detects_small_changes() {
-        let mut frame1 = vec![128u8; 1920 * 1080 * 3];
+        let size = 1920 * 1080 * 3;
+        let mut frame1 = vec![128u8; size];
         let frame2 = frame1.clone();
-        frame1[1920 * 540 * 3 + 960 * 3] = 129;
+        // Change a pixel at a sampled position (step-aligned)
+        let step = (size / 2048).max(1);
+        frame1[step * 1024] = 129; // middle of the sampled range
         let h1 = compute_frame_hash(&frame1);
         let h2 = compute_frame_hash(&frame2);
         assert_ne!(h1, h2, "Hash should detect single-pixel change");
