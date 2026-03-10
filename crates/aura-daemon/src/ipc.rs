@@ -185,10 +185,10 @@ async fn handle_client(
 
 /// Remove the socket file if it exists. Errors are logged and ignored.
 fn cleanup_socket(path: &Path) {
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(path) {
-            tracing::warn!(path = %path.display(), "Failed to remove stale socket: {e}");
-        }
+    if path.exists()
+        && let Err(e) = std::fs::remove_file(path)
+    {
+        tracing::warn!(path = %path.display(), "Failed to remove stale socket: {e}");
     }
 }
 

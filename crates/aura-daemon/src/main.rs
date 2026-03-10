@@ -37,13 +37,15 @@ const MIC_BRIDGE_CAPACITY: usize = 256;
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 mod deploy;
 use tokio_util::sync::CancellationToken;
 
 use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
 use aura_daemon::bus::EventBus;
 use aura_daemon::event::AuraEvent;
+use aura_daemon::ipc;
+use aura_daemon::protocol::{ConnectionState, DaemonEvent, UICommand};
 use aura_daemon::setup::AuraSetup;
 use aura_gemini::config::GeminiConfig;
 use aura_gemini::session::{GeminiEvent, GeminiLiveSession};
@@ -57,6 +59,7 @@ use aura_voice::playback::AudioPlayer;
 use tracing_subscriber::EnvFilter;
 
 const EVENT_BUS_CAPACITY: usize = 256;
+const IPC_BROADCAST_CAPACITY: usize = 256;
 const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
 /// Destructive action guardrail injected into the system prompt.
@@ -147,6 +150,8 @@ fn main() -> Result<()> {
     let bus = EventBus::new(EVENT_BUS_CAPACITY);
     let cancel = CancellationToken::new();
 
+    let (ipc_tx, _) = broadcast::channel::<DaemonEvent>(IPC_BROADCAST_CAPACITY);
+
     if cli.headless {
         // No menu bar — run tokio directly
         let session_id = {
@@ -167,6 +172,7 @@ fn main() -> Result<()> {
             session_id,
             None,
             has_permission_error,
+            ipc_tx.clone(),
         ))?;
     } else {
         // Create menu bar app (must run on main thread)
@@ -175,6 +181,7 @@ fn main() -> Result<()> {
         // Spawn tokio runtime on a background thread
         let bg_bus = bus.clone();
         let bg_cancel = cancel.clone();
+        let bg_ipc_tx = ipc_tx.clone();
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(rt) => rt,
@@ -242,6 +249,7 @@ fn main() -> Result<()> {
                         session_id,
                         Some(menu_tx.clone()),
                         Arc::clone(&has_permission_error),
+                        bg_ipc_tx.clone(),
                     )
                     .await
                     {
@@ -299,6 +307,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_daemon(
     mut gemini_config: GeminiConfig,
     bus: EventBus,
@@ -307,6 +316,7 @@ async fn run_daemon(
     session_id: String,
     menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     has_permission_error: Arc<AtomicBool>,
+    ipc_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<()> {
     // U9: Inject destructive action confirmation guardrail into system prompt (once)
     if !gemini_config
@@ -317,6 +327,9 @@ async fn run_daemon(
             .system_prompt
             .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
     }
+
+    // Start IPC server for UI clients (SwiftUI panel)
+    let mut ipc_cmd_rx = ipc::start_ipc_server(ipc_tx.clone(), cancel.clone());
 
     // Connect to Gemini Live API
     if let Some(ref tx) = menubar_tx {
@@ -329,6 +342,10 @@ async fn run_daemon(
                 .await;
         }
     }
+    let _ = ipc_tx.send(DaemonEvent::ConnectionState {
+        state: ConnectionState::Connecting,
+        message: "Connecting...".into(),
+    });
 
     // Load persisted session resumption handle (if any) for cross-restart continuity.
     let resumption_handle: Option<String> =
@@ -385,6 +402,10 @@ async fn run_daemon(
                     })
                     .await;
             }
+            let _ = ipc_tx.send(DaemonEvent::ConnectionState {
+                state: ConnectionState::Error,
+                message: "Mic access needed — check System Settings > Privacy".into(),
+            });
             false
         }
     };
@@ -485,6 +506,7 @@ async fn run_daemon(
     let proc_cancel = cancel.clone();
     let proc_speaking = Arc::clone(&is_speaking);
     let proc_permission_error = Arc::clone(&has_permission_error);
+    let proc_ipc_tx = ipc_tx.clone();
     let is_interrupted = Arc::new(AtomicBool::new(false));
     let processor_handle = tokio::spawn(async move {
         if let Err(e) = run_processor(
@@ -497,6 +519,7 @@ async fn run_daemon(
             proc_speaking,
             is_interrupted,
             proc_permission_error,
+            proc_ipc_tx,
         )
         .await
         {
@@ -505,7 +528,10 @@ async fn run_daemon(
     });
 
     // Run until either processor or daemon exits
-    let daemon = aura_daemon::daemon::Daemon::new(bus);
+    let daemon = aura_daemon::daemon::Daemon::new(bus.clone());
+    let ipc_session = Arc::clone(&session);
+    let ipc_bus = bus.clone();
+    let ipc_cancel = cancel.clone();
     tokio::select! {
         _ = processor_handle => {
             tracing::info!("Processor finished, ending session");
@@ -515,9 +541,29 @@ async fn run_daemon(
                 tracing::error!("Daemon error: {e}");
             }
         }
+        _ = async {
+            while let Some(cmd) = ipc_cmd_rx.recv().await {
+                match cmd {
+                    UICommand::Shutdown => {
+                        tracing::info!("Shutdown requested via IPC");
+                        ipc_bus.send(AuraEvent::Shutdown);
+                        ipc_cancel.cancel();
+                    }
+                    UICommand::SendText { text } => {
+                        tracing::info!(len = text.len(), "Text input via IPC");
+                        if let Err(e) = ipc_session.send_text(&text).await {
+                            tracing::warn!("Failed to send IPC text to Gemini: {e}");
+                        }
+                    }
+                }
+            }
+        } => {
+            tracing::debug!("IPC command channel closed");
+        }
     }
 
     // Shutdown
+    let _ = ipc_tx.send(DaemonEvent::Shutdown);
     cancel.cancel();
     mic_shutdown.store(true, Ordering::Release);
     session.disconnect();
@@ -536,6 +582,7 @@ async fn run_processor(
     is_speaking: Arc<AtomicBool>,
     is_interrupted: Arc<AtomicBool>,
     has_permission_error: Arc<AtomicBool>,
+    ipc_tx: broadcast::Sender<DaemonEvent>,
 ) -> Result<()> {
     let mut events = session.subscribe();
 
@@ -675,6 +722,10 @@ async fn run_processor(
                                 text: "Connected — Listening".into(),
                             }).await;
                         }
+                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
+                            state: ConnectionState::Connected,
+                            message: "Connected — Listening".into(),
+                        });
 
                         let is_first = session.is_first_connect();
 
@@ -778,6 +829,10 @@ async fn run_processor(
                                 })
                                 .await;
                         }
+                        let _ = ipc_tx.send(DaemonEvent::ToolStarted {
+                            name: name.clone(),
+                            id: id.clone(),
+                        });
 
                         // shutdown_aura stays inline — needs to break event loop
                         if name == "shutdown_aura" {
@@ -798,6 +853,7 @@ async fn run_processor(
                             if let Some(ref tx) = menubar_tx {
                                 let _ = tx.send(MenuBarMessage::Shutdown).await;
                             }
+                            let _ = ipc_tx.send(DaemonEvent::Shutdown);
                             bus.send(AuraEvent::Shutdown);
                             break;
                         }
@@ -816,6 +872,7 @@ async fn run_processor(
                         let tool_tokens = Arc::clone(&active_tool_tokens);
                         let tool_inflight = Arc::clone(&tools_in_flight);
                         let tool_permission_error = Arc::clone(&has_permission_error);
+                        let tool_ipc_tx = ipc_tx.clone();
                         let tool_dims = FrameDims {
                             img_w: frame_img_w.load(Ordering::Acquire),
                             img_h: frame_img_h.load(Ordering::Acquire),
@@ -891,6 +948,11 @@ async fn run_processor(
                                     })
                                     .await;
                             }
+                            let _ = tool_ipc_tx.send(DaemonEvent::ToolFinished {
+                                name: name.clone(),
+                                id: id.clone(),
+                                success: tool_success,
+                            });
 
                             tool_bus.send(AuraEvent::ToolExecuted {
                                 name: name.clone(),
@@ -992,6 +1054,10 @@ async fn run_processor(
                                 text: format!("Error: {message}"),
                             }).await;
                         }
+                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
+                            state: ConnectionState::Error,
+                            message: format!("Error: {message}"),
+                        });
                     }
                     Ok(GeminiEvent::Reconnecting { attempt }) => {
                         tracing::warn!(attempt, "Gemini reconnecting");
@@ -1007,6 +1073,10 @@ async fn run_processor(
                                 }).await;
                             }
                         }
+                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
+                            state: ConnectionState::Reconnecting,
+                            message: format!("Reconnecting (attempt {attempt})..."),
+                        });
                     }
                     Ok(GeminiEvent::Disconnected) => {
                         tracing::info!("Gemini session disconnected");
@@ -1018,6 +1088,10 @@ async fn run_processor(
                                 text: "Disconnected".into(),
                             }).await;
                         }
+                        let _ = ipc_tx.send(DaemonEvent::ConnectionState {
+                            state: ConnectionState::Disconnected,
+                            message: "Disconnected".into(),
+                        });
 
                         // End the memory session
                         let es_sid = session_id.clone();
