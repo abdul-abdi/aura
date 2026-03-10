@@ -56,10 +56,12 @@ pub enum GeminiEvent {
 /// Handle for interacting with a live Gemini session.
 pub struct GeminiLiveSession {
     audio_tx: mpsc::Sender<Vec<f32>>,
+    video_tx: mpsc::Sender<String>,
     tool_response_tx: mpsc::Sender<(String, String, serde_json::Value)>,
     text_tx: mpsc::Sender<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
     cancel: tokio_util::sync::CancellationToken,
+    is_first_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GeminiLiveSession {
@@ -67,15 +69,18 @@ impl GeminiLiveSession {
     /// Spawns background tasks for sending and receiving.
     pub async fn connect(config: GeminiConfig) -> Result<Self> {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
+        let (video_tx, video_rx) = mpsc::channel::<String>(8);
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
         let (text_tx, text_rx) = mpsc::channel::<String>(16);
         let (event_tx, _) = broadcast::channel::<GeminiEvent>(128);
         let cancel = tokio_util::sync::CancellationToken::new();
+        let is_first_connect = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         let session_state = SessionState {
             config: Arc::new(config),
             resumption_handle: Arc::new(Mutex::new(None)),
+            is_first_connect: Arc::clone(&is_first_connect),
         };
 
         // Spawn the connection manager task
@@ -83,15 +88,17 @@ impl GeminiLiveSession {
         let tx = event_tx.clone();
         let token = cancel.clone();
         tokio::spawn(async move {
-            connection_loop(state, audio_rx, tool_response_rx, text_rx, tx, token).await;
+            connection_loop(state, audio_rx, video_rx, tool_response_rx, text_rx, tx, token).await;
         });
 
         Ok(Self {
             audio_tx,
+            video_tx,
             tool_response_tx,
             text_tx,
             event_tx,
             cancel,
+            is_first_connect,
         })
     }
 
@@ -99,6 +106,14 @@ impl GeminiLiveSession {
     pub async fn send_audio(&self, pcm_16khz: &[f32]) -> Result<()> {
         self.audio_tx
             .send(pcm_16khz.to_vec())
+            .await
+            .map_err(|_| anyhow::anyhow!("Session closed"))
+    }
+
+    /// Send a JPEG screenshot frame to Gemini.
+    pub async fn send_video(&self, jpeg_base64: &str) -> Result<()> {
+        self.video_tx
+            .send(jpeg_base64.to_string())
             .await
             .map_err(|_| anyhow::anyhow!("Session closed"))
     }
@@ -133,6 +148,12 @@ impl GeminiLiveSession {
     pub fn disconnect(&self) {
         self.cancel.cancel();
     }
+
+    /// Returns true if this is the first connection (not a reconnection).
+    /// After the first connection, this returns false.
+    pub fn is_first_connect(&self) -> bool {
+        self.is_first_connect.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl Drop for GeminiLiveSession {
@@ -145,6 +166,7 @@ impl Drop for GeminiLiveSession {
 struct SessionState {
     config: Arc<GeminiConfig>,
     resumption_handle: Arc<Mutex<Option<String>>>,
+    is_first_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Outcome of a single connection attempt.
@@ -158,6 +180,7 @@ struct StreamOutcome {
 async fn connection_loop(
     state: SessionState,
     mut audio_rx: mpsc::Receiver<Vec<f32>>,
+    mut video_rx: mpsc::Receiver<String>,
     mut tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
     mut text_rx: mpsc::Receiver<String>,
     event_tx: broadcast::Sender<GeminiEvent>,
@@ -173,6 +196,7 @@ async fn connection_loop(
         match connect_and_stream(
             &state,
             &mut audio_rx,
+            &mut video_rx,
             &mut tool_response_rx,
             &mut text_rx,
             &event_tx,
@@ -219,6 +243,7 @@ async fn connection_loop(
 async fn connect_and_stream(
     state: &SessionState,
     audio_rx: &mut mpsc::Receiver<Vec<f32>>,
+    video_rx: &mut mpsc::Receiver<String>,
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
     text_rx: &mut mpsc::Receiver<String>,
     event_tx: &broadcast::Sender<GeminiEvent>,
@@ -229,6 +254,7 @@ async fn connect_and_stream(
     let result = connect_and_stream_inner(
         state,
         audio_rx,
+        video_rx,
         tool_response_rx,
         text_rx,
         event_tx,
@@ -249,6 +275,7 @@ async fn connect_and_stream(
 async fn connect_and_stream_inner(
     state: &SessionState,
     audio_rx: &mut mpsc::Receiver<Vec<f32>>,
+    video_rx: &mut mpsc::Receiver<String>,
     tool_response_rx: &mut mpsc::Receiver<(String, String, serde_json::Value)>,
     text_rx: &mut mpsc::Receiver<String>,
     event_tx: &broadcast::Sender<GeminiEvent>,
@@ -304,6 +331,7 @@ async fn connect_and_stream_inner(
     }
 
     *was_connected = true;
+    state.is_first_connect.store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = event_tx.send(GeminiEvent::Connected);
     tracing::info!("Gemini Live session connected");
 
@@ -315,6 +343,19 @@ async fn connect_and_stream_inner(
 
             Some(pcm) = audio_rx.recv() => {
                 let msg = encode_audio_message(&pcm);
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
+            }
+
+            Some(jpeg_b64) = video_rx.recv() => {
+                let msg = RealtimeVideoMessage {
+                    realtime_input: RealtimeVideoInput {
+                        video: Blob {
+                            mime_type: "image/jpeg".into(),
+                            data: jpeg_b64,
+                        },
+                    },
+                };
                 let json = serde_json::to_string(&msg)?;
                 ws_sink.lock().await.send(Message::Text(json)).await?;
             }
@@ -486,7 +527,7 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
 }
 
 /// Convert f32 PCM [-1.0, 1.0] to base64-encoded 16-bit LE PCM bytes.
-fn encode_audio_message(pcm: &[f32]) -> RealtimeInputMessage {
+fn encode_audio_message(pcm: &[f32]) -> RealtimeAudioMessage {
     let mut bytes = Vec::with_capacity(pcm.len() * 2);
     for &sample in pcm {
         let clamped = sample.clamp(-1.0, 1.0);
@@ -494,12 +535,12 @@ fn encode_audio_message(pcm: &[f32]) -> RealtimeInputMessage {
         bytes.extend_from_slice(&i16_val.to_le_bytes());
     }
 
-    RealtimeInputMessage {
-        realtime_input: RealtimeInput {
-            media_chunks: vec![MediaChunk {
+    RealtimeAudioMessage {
+        realtime_input: RealtimeAudioInput {
+            audio: Blob {
                 mime_type: "audio/pcm;rate=16000".into(),
                 data: BASE64.encode(&bytes),
-            }],
+            },
         },
     }
 }
@@ -523,7 +564,7 @@ mod tests {
     fn encode_f32_to_pcm_base64() {
         let pcm = vec![0.0, 1.0, -1.0, 0.5];
         let msg = encode_audio_message(&pcm);
-        let data = &msg.realtime_input.media_chunks[0].data;
+        let data = &msg.realtime_input.audio.data;
 
         // Decode and verify
         let bytes = BASE64.decode(data).unwrap();
@@ -541,7 +582,7 @@ mod tests {
         let original = vec![0.0_f32, 0.5, -0.5, 0.25, -0.25];
         let msg = encode_audio_message(&original);
         let bytes = BASE64
-            .decode(&msg.realtime_input.media_chunks[0].data)
+            .decode(&msg.realtime_input.audio.data)
             .unwrap();
         let decoded = pcm_bytes_to_f32(&bytes);
 
@@ -589,7 +630,7 @@ mod tests {
         let pcm = vec![2.0, -2.0]; // out of range
         let msg = encode_audio_message(&pcm);
         let bytes = BASE64
-            .decode(&msg.realtime_input.media_chunks[0].data)
+            .decode(&msg.realtime_input.audio.data)
             .unwrap();
         let samples = pcm_bytes_to_f32(&bytes);
         assert!((samples[0] - 1.0).abs() < 0.001); // clamped to 1.0
