@@ -81,14 +81,30 @@ pub fn capture_screen() -> Result<CapturedFrame> {
     Ok(CapturedFrame { jpeg_base64, hash, width: final_w, height: final_h })
 }
 
-/// Compute a simple hash by sampling pixels across the frame.
+/// Compute an FNV-1a hash by sampling 2048 pixels across the frame.
 fn compute_frame_hash(rgb: &[u8]) -> u64 {
-    let mut hash: u64 = 0;
-    let step = (rgb.len() / 256).max(1);
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    let step = (rgb.len() / 2048).max(1);
     for i in (0..rgb.len()).step_by(step) {
-        hash = hash.wrapping_mul(31).wrapping_add(rgb[i] as u64);
+        hash ^= rgb[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_detects_small_changes() {
+        let mut frame1 = vec![128u8; 1920 * 1080 * 3];
+        let frame2 = frame1.clone();
+        frame1[1920 * 540 * 3 + 960 * 3] = 129;
+        let h1 = compute_frame_hash(&frame1);
+        let h2 = compute_frame_hash(&frame2);
+        assert_ne!(h1, h2, "Hash should detect single-pixel change");
+    }
 }
 
 /// Handle for triggering immediate captures (post-action).
