@@ -486,7 +486,6 @@ async fn handle_server_message(
     if let Some(content) = msg.server_content {
         if content.interrupted == Some(true) {
             let _ = event_tx.send(GeminiEvent::Interrupted);
-            return false;
         }
 
         if let Some(model_turn) = content.model_turn {
