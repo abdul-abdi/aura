@@ -18,7 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 dirs = "6"
 which = "7"
 chrono = { version = "0.4", features = ["serde"] }

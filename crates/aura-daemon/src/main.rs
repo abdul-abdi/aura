@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -441,6 +442,10 @@ async fn run_processor(
         }
     });
 
+    // Map from tool call ID -> CancellationToken for in-flight tool tasks
+    let active_tool_tokens: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
     tracing::info!("Gemini event processor running");
 
     loop {
@@ -586,6 +591,12 @@ async fn run_processor(
                         let tool_capture_trigger = capture_trigger.clone();
                         let tool_cap_notify = cap_notify.clone();
                         let tool_semaphore = Arc::clone(&tool_semaphore);
+                        let tool_tokens = Arc::clone(&active_tool_tokens);
+
+                        // Create a cancellation token and register it before spawning
+                        let tool_cancel = CancellationToken::new();
+                        active_tool_tokens.lock().await.insert(id.clone(), tool_cancel.clone());
+
                         tokio::spawn(async move {
                             let _permit = tool_semaphore.acquire().await.expect("semaphore closed");
                             // Set amber status
@@ -597,7 +608,19 @@ async fn run_processor(
                                 }).await;
                             }
 
-                            let response = execute_tool(&name, &args, &tool_executor, &tool_screen_reader).await;
+                            let response = tokio::select! {
+                                result = execute_tool(&name, &args, &tool_executor, &tool_screen_reader) => result,
+                                _ = tool_cancel.cancelled() => {
+                                    tracing::info!(tool = %name, "Tool execution cancelled");
+                                    serde_json::json!({
+                                        "success": false,
+                                        "error": "Tool execution was cancelled",
+                                    })
+                                }
+                            };
+
+                            // Remove our token now that the task is done
+                            tool_tokens.lock().await.remove(&id);
 
                             let _ = tool_bus.send(AuraEvent::ToolExecuted {
                                 name: name.clone(),
@@ -640,6 +663,11 @@ async fn run_processor(
                     }
                     Ok(GeminiEvent::ToolCallCancellation { ids }) => {
                         tracing::info!(?ids, "Tool call(s) cancelled");
+                        for id in &ids {
+                            if let Some(token) = active_tool_tokens.lock().await.remove(id) {
+                                token.cancel();
+                            }
+                        }
                     }
                     Ok(GeminiEvent::Interrupted) => {
                         tracing::info!("Gemini interrupted — stopping playback");
