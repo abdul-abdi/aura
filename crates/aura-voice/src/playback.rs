@@ -57,6 +57,20 @@ impl AudioPlayer {
                             }
                         }
                         PlaybackCommand::Append { samples } => {
+                            // Auto-create a stream if none exists (e.g. after barge-in)
+                            if current.is_none() {
+                                let default_rate = 24_000;
+                                match Sink::try_new(&handle) {
+                                    Ok(sink) => {
+                                        tracing::debug!(sample_rate = default_rate, "Auto-starting audio stream");
+                                        current = Some((sink, default_rate));
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to create audio sink: {e}");
+                                    }
+                                }
+                            }
+
                             if let Some((ref sink, sample_rate)) = current {
                                 let source = rodio::buffer::SamplesBuffer::new(
                                     1,
@@ -64,10 +78,6 @@ impl AudioPlayer {
                                     samples,
                                 );
                                 sink.append(source);
-                            } else {
-                                tracing::warn!(
-                                    "Append received but no active stream — call start_stream first"
-                                );
                             }
                         }
                         PlaybackCommand::Stop => {

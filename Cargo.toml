@@ -9,6 +9,7 @@ members = [
     "crates/aura-memory",
     "crates/aura-menubar",
     "crates/aura-proxy",
+    "crates/aura-input",
 ]
 
 [workspace.package]

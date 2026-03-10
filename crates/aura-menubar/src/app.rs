@@ -65,8 +65,8 @@ impl MenuBarApp {
             let _: () = msg_send![button, setTarget: handler];
             let _: () = msg_send![button, setAction: sel!(handleClick:)];
 
-            // Enable right-click by sending action on both clicks
-            let _: () = msg_send![button, sendActionOn: 3i64]; // NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp
+            // Enable left+right click: NSEventMaskLeftMouseDown (2) | NSEventMaskRightMouseDown (8) = 10
+            let _: () = msg_send![button, sendActionOn: 10i64];
 
             // Store state globally for ObjC callbacks
             *GLOBAL_STATE.lock().unwrap() = Some(AppState {
@@ -139,10 +139,10 @@ extern "C" fn handle_click(_this: &Object, _cmd: Sel, sender: id) {
     unsafe {
         if let Some(ref state) = *guard {
             // Check if this is a right-click
-            let current_event: id = msg_send![class!(NSApp), currentEvent];
+            let current_event: id = msg_send![NSApp(), currentEvent];
             let event_type: u64 = msg_send![current_event, type];
-            // NSEventTypeRightMouseUp = 4
-            if event_type == 4 {
+            // NSEventTypeRightMouseDown = 3
+            if event_type == 3 {
                 show_context_menu(_this, sender, state);
             } else {
                 let button: id = msg_send![state.status_item.raw(), button];

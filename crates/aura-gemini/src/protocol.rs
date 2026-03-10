@@ -190,6 +190,7 @@ pub struct FunctionResponse {
 // ---------------------------------------------------------------------------
 
 /// Top-level server message — a flat struct with optional fields.
+/// Unknown fields are silently ignored to tolerate API additions.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerMessage {
@@ -258,7 +259,10 @@ pub struct ToolCallCancellation {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionResumptionUpdate {
-    pub new_handle: String,
+    #[serde(default)]
+    pub new_handle: Option<String>,
+    #[serde(default)]
+    pub resumable: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +422,21 @@ mod tests {
 
         let msg: ServerMessage = serde_json::from_str(&raw.to_string()).unwrap();
         let update = msg.session_resumption_update.unwrap();
-        assert_eq!(update.new_handle, "abc-resume-handle-xyz");
+        assert_eq!(update.new_handle.unwrap(), "abc-resume-handle-xyz");
+    }
+
+    #[test]
+    fn deserialize_session_resumption_update_without_handle() {
+        let raw = json!({
+            "sessionResumptionUpdate": {
+                "resumable": true
+            }
+        });
+
+        let msg: ServerMessage = serde_json::from_str(&raw.to_string()).unwrap();
+        let update = msg.session_resumption_update.unwrap();
+        assert!(update.new_handle.is_none());
+        assert_eq!(update.resumable, Some(true));
     }
 
     #[test]

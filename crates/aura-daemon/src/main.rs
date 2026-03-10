@@ -2,8 +2,14 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+/// RMS energy threshold for mic gating while Aura is speaking.
+/// Direct speech into the mic is typically 0.05–0.3 RMS; speaker bleed-through
+/// from laptop speakers is usually 0.005–0.02. This threshold filters echo
+/// while still allowing intentional barge-in.
+const BARGE_IN_ENERGY_THRESHOLD: f32 = 0.04;
+
 use anyhow::{Context, Result};
-use chrono::Timelike;
+use chrono::Local;
 use clap::Parser;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -193,6 +199,7 @@ async fn run_daemon(
     // Set up mic capture on a dedicated std::thread (cpal's Stream is !Send)
     let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let mic_shutdown = Arc::new(AtomicBool::new(false));
+    let is_speaking = Arc::new(AtomicBool::new(false));
 
     let _mic_available = match AudioCapture::new(None) {
         Ok(capture) => {
@@ -228,9 +235,11 @@ async fn run_daemon(
     };
 
     // Bridge std::sync::mpsc -> tokio -> session.send_audio()
+    // Applies energy gating while Aura is speaking to prevent echo-triggered barge-in.
     let audio_session = Arc::clone(&session);
     let audio_cancel = cancel.clone();
     let bridge_shutdown = Arc::clone(&mic_shutdown);
+    let bridge_speaking = Arc::clone(&is_speaking);
     tokio::spawn(async move {
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
 
@@ -258,6 +267,16 @@ async fn run_daemon(
             tokio::select! {
                 _ = audio_cancel.cancelled() => break,
                 Some(samples) = tokio_rx.recv() => {
+                    // When Aura is speaking, gate the mic to prevent echo-triggered barge-in.
+                    // Only send audio chunks with enough energy to be intentional speech.
+                    if bridge_speaking.load(Ordering::Relaxed) {
+                        let rms = rms_energy(&samples);
+                        if rms < BARGE_IN_ENERGY_THRESHOLD {
+                            continue; // Skip this chunk — likely speaker bleed-through
+                        }
+                        tracing::debug!(rms, "Barge-in detected while speaking");
+                    }
+
                     if let Err(e) = audio_session.send_audio(&samples).await {
                         tracing::warn!("Failed to send audio to Gemini: {e}");
                         break;
@@ -271,6 +290,7 @@ async fn run_daemon(
     let proc_session = Arc::clone(&session);
     let proc_bus = bus.clone();
     let proc_cancel = cancel.clone();
+    let proc_speaking = Arc::clone(&is_speaking);
     let processor_handle = tokio::spawn(async move {
         if let Err(e) = run_processor(
             proc_session,
@@ -279,6 +299,7 @@ async fn run_daemon(
             memory,
             session_id,
             menubar_tx,
+            proc_speaking,
         )
         .await
         {
@@ -286,15 +307,23 @@ async fn run_daemon(
         }
     });
 
-    // Run the daemon event loop
+    // Run until either processor or daemon exits
     let daemon = aura_daemon::daemon::Daemon::new(bus);
-    daemon.run().await?;
+    tokio::select! {
+        _ = processor_handle => {
+            tracing::info!("Processor finished, ending session");
+        }
+        result = daemon.run() => {
+            if let Err(e) = result {
+                tracing::error!("Daemon error: {e}");
+            }
+        }
+    }
 
     // Shutdown
     cancel.cancel();
     mic_shutdown.store(true, Ordering::Relaxed);
     session.disconnect();
-    let _ = processor_handle.await;
 
     Ok(())
 }
@@ -306,6 +335,7 @@ async fn run_processor(
     memory: Arc<Mutex<SessionMemory>>,
     session_id: String,
     menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
+    is_speaking: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut events = session.subscribe();
 
@@ -326,6 +356,52 @@ async fn run_processor(
 
     // Screen reader for context gathering
     let screen_reader = MacOSScreenReader::new().context("Failed to initialize screen reader")?;
+
+    // Spawn periodic screen context updates (every 15s)
+    let ctx_session = Arc::clone(&session);
+    let ctx_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let reader = match MacOSScreenReader::new() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Screen reader for periodic context failed: {e}");
+                return;
+            }
+        };
+        let mut last_summary = String::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        interval.tick().await; // skip first immediate tick
+
+        loop {
+            tokio::select! {
+                _ = ctx_cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let summary = match reader.capture_context() {
+                        Ok(ctx) => ctx.summary(),
+                        Err(_) => continue,
+                    };
+
+                    // Only send if context actually changed
+                    if summary == last_summary {
+                        continue;
+                    }
+                    last_summary = summary.clone();
+
+                    let now = Local::now();
+                    let msg = format!(
+                        "[Screen update — {}]\n{}",
+                        now.format("%I:%M %p"),
+                        summary,
+                    );
+                    tracing::debug!("Sending periodic screen context");
+                    if let Err(e) = ctx_session.send_text(&msg).await {
+                        tracing::warn!("Failed to send periodic context: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
 
     tracing::info!("Gemini event processor running");
 
@@ -360,15 +436,14 @@ async fn run_processor(
                             }
                         };
 
-                        // Get time-aware context
-                        let hour = chrono::Local::now().hour();
-                        let time_context = match hour {
-                            0..=5 => "It's very late at night.",
-                            6..=11 => "It's morning.",
-                            12..=16 => "It's afternoon.",
-                            17..=20 => "It's evening.",
-                            _ => "It's late at night.",
-                        };
+                        // Get rich time/location context
+                        let now = Local::now();
+                        let time_context = format!(
+                            "Current time: {} ({}). Date: {}.",
+                            now.format("%I:%M %p"),
+                            now.format("%Z"),
+                            now.format("%A, %B %-d, %Y"),
+                        );
 
                         let context_msg = format!(
                             "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}]"
@@ -397,6 +472,7 @@ async fn run_processor(
                         }
                     }
                     Ok(GeminiEvent::AudioResponse { samples }) => {
+                        is_speaking.store(true, Ordering::Relaxed);
                         if let Some(ref p) = player
                             && let Err(e) = p.append(samples)
                         {
@@ -538,33 +614,21 @@ async fn run_processor(
                     }
                     Ok(GeminiEvent::Interrupted) => {
                         tracing::info!("Gemini interrupted — stopping playback");
+                        is_speaking.store(false, Ordering::Relaxed);
                         if let Some(ref p) = player {
                             p.stop();
                         }
                         let _ = bus.send(AuraEvent::BargeIn);
                     }
                     Ok(GeminiEvent::Transcription { text }) => {
-                        let _ = bus.send(AuraEvent::AssistantSpeaking { text: text.clone() });
-
-                        // Log assistant speech to memory
-                        if let Err(e) = memory.lock().unwrap().add_message(
-                            &session_id,
-                            MessageRole::Assistant,
-                            &text,
-                            None,
-                        ) {
-                            tracing::warn!("Failed to log assistant speech to memory: {e}");
-                        }
-
-                        // Show in menu bar popover
-                        if let Some(ref tx) = menubar_tx {
-                            let _ = tx.send(MenuBarMessage::AddMessage {
-                                text,
-                                is_user: false,
-                            }).await;
-                        }
+                        // Native audio models generate text and audio independently.
+                        // The text is the model's internal reasoning — NOT a transcript
+                        // of the spoken audio. It's always longer/different from what's
+                        // actually said. Log it for debugging but don't display it.
+                        tracing::debug!(transcription = %text.lines().next().unwrap_or(""), "Gemini text (not displayed)");
                     }
                     Ok(GeminiEvent::TurnComplete) => {
+                        is_speaking.store(false, Ordering::Relaxed);
                         tracing::debug!("Turn complete");
                     }
                     Ok(GeminiEvent::Error { message }) => {
@@ -661,4 +725,13 @@ fn prompt_api_key() -> Option<String> {
     }
 
     Some(key)
+}
+
+/// Compute root-mean-square energy of an audio buffer.
+fn rms_energy(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
 }

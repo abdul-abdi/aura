@@ -175,6 +175,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aura-input"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "core-graphics",
+ "core-graphics-types",
+ "tracing",
+]
+
+[[package]]
 name = "aura-memory"
 version = "0.1.0"
 dependencies = [

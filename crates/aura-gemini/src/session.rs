@@ -266,17 +266,36 @@ async fn connect_and_stream_inner(
     let resumption_handle = state.resumption_handle.lock().await.clone();
     let setup = build_setup_message(&state.config, resumption_handle);
     let setup_json = serde_json::to_string(&setup)?;
+    tracing::debug!("Sending setup: {setup_json}");
     ws_sink.send(Message::Text(setup_json)).await?;
 
-    // Wait for setupComplete
+    // Wait for setupComplete with timeout
+    let setup_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        let msg = ws_source
-            .next()
-            .await
-            .context("Connection closed before setupComplete")?
-            .context("WebSocket error during setup")?;
+        let msg = tokio::select! {
+            msg = ws_source.next() => {
+                msg.context("Connection closed before setupComplete")?
+                    .context("WebSocket error during setup")?
+            }
+            _ = tokio::time::sleep_until(setup_deadline) => {
+                anyhow::bail!("Timed out waiting for setupComplete (15s). Model '{}' may not exist or may not support the Live API.", state.config.model);
+            }
+            _ = cancel.cancelled() => return Ok(()),
+        };
 
-        if let Message::Text(text) = msg {
+        let json_text = match &msg {
+            Message::Text(text) => Some(text.clone()),
+            Message::Binary(bytes) => {
+                String::from_utf8(bytes.clone()).ok()
+            }
+            Message::Close(frame) => {
+                anyhow::bail!("Server closed connection during setup: {frame:?}");
+            }
+            _ => None,
+        };
+
+        if let Some(text) = json_text {
+            tracing::debug!("Setup response: {text}");
             let server_msg: ServerMessage = serde_json::from_str(&text)?;
             if server_msg.setup_complete.is_some() {
                 break;
@@ -333,17 +352,22 @@ async fn connect_and_stream_inner(
                 };
                 let msg = msg?;
 
-                match msg {
-                    Message::Text(text) => {
-                        let server_msg: ServerMessage = serde_json::from_str(&text)?;
-                        if handle_server_message(server_msg, event_tx, state).await {
-                            return Err(anyhow::anyhow!("goAway: server requested reconnection"));
-                        }
+                let json_text = match msg {
+                    Message::Text(text) => Some(text),
+                    Message::Binary(bytes) => {
+                        String::from_utf8(bytes).ok()
                     }
                     Message::Close(_) => {
                         return Err(anyhow::anyhow!("Server closed connection"));
                     }
-                    _ => {}
+                    _ => None,
+                };
+
+                if let Some(text) = json_text {
+                    let server_msg: ServerMessage = serde_json::from_str(&text)?;
+                    if handle_server_message(server_msg, event_tx, state).await {
+                        return Err(anyhow::anyhow!("goAway: server requested reconnection"));
+                    }
                 }
             }
         }
@@ -358,8 +382,10 @@ async fn handle_server_message(
 ) -> bool {
     // Session resumption token update
     if let Some(update) = msg.session_resumption_update {
-        let mut handle = state.resumption_handle.lock().await;
-        *handle = Some(update.new_handle);
+        if let Some(new_handle) = update.new_handle {
+            let mut handle = state.resumption_handle.lock().await;
+            *handle = Some(new_handle);
+        }
         return false;
     }
 
@@ -529,7 +555,7 @@ mod tests {
     fn build_setup_message_includes_tools() {
         let config = GeminiConfig {
             api_key: "test".into(),
-            model: "models/gemini-live-2.5-flash-native-audio".into(),
+            model: "models/gemini-2.5-flash-native-audio-preview-12-2025".into(),
             voice: "Kore".into(),
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
@@ -547,7 +573,7 @@ mod tests {
     fn build_setup_message_with_resumption() {
         let config = GeminiConfig {
             api_key: "test".into(),
-            model: "models/gemini-live-2.5-flash-native-audio".into(),
+            model: "models/gemini-2.5-flash-native-audio-preview-12-2025".into(),
             voice: "Kore".into(),
             system_prompt: "Test prompt".into(),
             temperature: 0.9,

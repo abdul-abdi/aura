@@ -148,7 +148,7 @@ Aura isn't a generic assistant. It has opinions.
 
 > *"47 Chrome tabs? Bold choice."*
 
-Built with the `Kore` voice on Gemini's native audio model (`gemini-live-2.5-flash-native-audio`). Responses are concise — usually under 2 sentences.
+Built with the `Kore` voice on Gemini's native audio model (`gemini-2.5-flash-native-audio-preview-12-2025`). Responses are concise — usually under 2 sentences.
 
 ## Development
 

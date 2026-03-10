@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 const GEMINI_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/\
-    google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent";
+    google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 #[derive(Deserialize)]
 struct ConnectParams {

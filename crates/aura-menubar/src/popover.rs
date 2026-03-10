@@ -112,6 +112,7 @@ impl AuraPopover {
             let separator: id = msg_send![class!(NSBox), alloc];
             let separator: id = msg_send![separator, init];
             let _: () = msg_send![separator, setBoxType: 3i64]; // NSBoxSeparator
+            let _: () = msg_send![separator, setTitlePosition: 0i64]; // NSNoTitle
             let _: () = msg_send![separator, setTranslatesAutoresizingMaskIntoConstraints: NO];
 
             // Add all subviews to container
