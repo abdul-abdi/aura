@@ -87,6 +87,13 @@ pub fn capture_screen() -> Result<CapturedFrame> {
     let data = cg_image.data();
     let raw_bytes = data.bytes();
 
+    anyhow::ensure!(
+        raw_bytes.len() >= height * bytes_per_row,
+        "Screen capture buffer too small: {} < {}",
+        raw_bytes.len(),
+        height * bytes_per_row,
+    );
+
     // Convert BGRA to RGB
     let mut rgb = Vec::with_capacity(width * height * 3);
     for y in 0..height {
@@ -263,11 +270,11 @@ impl CaptureTrigger {
 
     /// Signal that an immediate capture should happen.
     pub fn trigger(&self) {
-        self.flag.store(true, Ordering::Relaxed);
+        self.flag.store(true, Ordering::Release);
     }
 
     /// Check and clear the trigger flag.
     pub fn check_and_clear(&self) -> bool {
-        self.flag.swap(false, Ordering::Relaxed)
+        self.flag.swap(false, Ordering::AcqRel)
     }
 }
