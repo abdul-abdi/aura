@@ -30,6 +30,7 @@ pub struct ScriptResult {
     pub stderr: String,
 }
 
+#[derive(Clone)]
 pub struct ScriptExecutor;
 
 impl ScriptExecutor {

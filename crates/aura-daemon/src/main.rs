@@ -490,124 +490,79 @@ async fn run_processor(
                             tracing::warn!("Failed to log tool call to memory: {e}");
                         }
 
-                        // Pause pulsing, set amber while executing
-                        if let Some(ref tx) = menubar_tx {
-                            let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
-                            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Amber)).await;
-                            let _ = tx.send(MenuBarMessage::SetStatus {
-                                text: format!("Running {name}..."),
-                            }).await;
-                        }
-
-                        let response = match name.as_str() {
-                            "run_applescript" => {
-                                let script = args.get("script")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let language = match args.get("language").and_then(|v| v.as_str()) {
-                                    Some("javascript") => ScriptLanguage::JavaScript,
-                                    _ => ScriptLanguage::AppleScript,
-                                };
-                                let timeout = args.get("timeout_secs")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(30);
-                                let result = executor.run(script, language, timeout).await;
-
-                                let _ = bus.send(AuraEvent::ToolExecuted {
-                                    name: name.clone(),
-                                    success: result.success,
-                                    output: result.stdout.clone(),
-                                });
-
-                                serde_json::json!({
-                                    "success": result.success,
-                                    "stdout": result.stdout,
-                                    "stderr": result.stderr,
-                                })
+                        // shutdown_aura stays inline — needs to break event loop
+                        if name == "shutdown_aura" {
+                            tracing::info!("Shutdown requested via voice command");
+                            let _ = bus.send(AuraEvent::ToolExecuted {
+                                name: name.clone(),
+                                success: true,
+                                output: "Shutting down Aura".into(),
+                            });
+                            let response = serde_json::json!({
+                                "success": true,
+                                "message": "Aura is shutting down. Goodbye!",
+                            });
+                            if let Err(e) = session.send_tool_response(id, name, response).await {
+                                tracing::error!("Failed to send shutdown tool response: {e}");
                             }
-                            "get_screen_context" => {
-                                match screen_reader.capture_context() {
-                                    Ok(ctx) => {
-                                        let summary = ctx.summary();
-                                        let _ = bus.send(AuraEvent::ToolExecuted {
-                                            name: name.clone(),
-                                            success: true,
-                                            output: summary.clone(),
-                                        });
-                                        serde_json::json!({
-                                            "success": true,
-                                            "context": summary,
-                                        })
-                                    }
-                                    Err(e) => {
-                                        let error = format!("{e}");
-                                        let _ = bus.send(AuraEvent::ToolExecuted {
-                                            name: name.clone(),
-                                            success: false,
-                                            output: error.clone(),
-                                        });
-                                        serde_json::json!({
-                                            "success": false,
-                                            "error": error,
-                                        })
-                                    }
-                                }
+                            tokio::time::sleep(Duration::from_secs(3)).await;
+                            if let Some(ref tx) = menubar_tx {
+                                let _ = tx.send(MenuBarMessage::Shutdown).await;
                             }
-                            "shutdown_aura" => {
-                                tracing::info!("Shutdown requested via voice command");
-                                let _ = bus.send(AuraEvent::ToolExecuted {
-                                    name: name.clone(),
-                                    success: true,
-                                    output: "Shutting down Aura".into(),
-                                });
+                            let _ = bus.send(AuraEvent::Shutdown);
+                            break;
+                        }
 
-                                // Send response before shutting down
-                                let response = serde_json::json!({
-                                    "success": true,
-                                    "message": "Aura is shutting down. Goodbye!",
-                                });
-                                if let Err(e) = session.send_tool_response(id, name, response).await {
-                                    tracing::error!("Failed to send shutdown tool response: {e}");
-                                }
-
-                                // Brief delay to let Gemini's goodbye audio play
-                                tokio::time::sleep(Duration::from_secs(3)).await;
-
-                                // Trigger shutdown
-                                if let Some(ref tx) = menubar_tx {
-                                    let _ = tx.send(MenuBarMessage::Shutdown).await;
-                                }
-                                let _ = bus.send(AuraEvent::Shutdown);
-                                break;
+                        // All other tools: spawn in background so audio keeps flowing
+                        let tool_session = Arc::clone(&session);
+                        let tool_bus = bus.clone();
+                        let tool_memory = Arc::clone(&memory);
+                        let tool_session_id = session_id.clone();
+                        let tool_menubar_tx = menubar_tx.clone();
+                        let tool_executor = executor.clone();
+                        let tool_screen_reader = screen_reader.clone();
+                        tokio::spawn(async move {
+                            // Set amber status
+                            if let Some(ref tx) = tool_menubar_tx {
+                                let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
+                                let _ = tx.send(MenuBarMessage::SetColor(DotColor::Amber)).await;
+                                let _ = tx.send(MenuBarMessage::SetStatus {
+                                    text: format!("Running {name}..."),
+                                }).await;
                             }
-                            other => serde_json::json!({
-                                "success": false,
-                                "error": format!("Unknown tool: {other}"),
-                            }),
-                        };
 
-                        // Log tool result to memory
-                        if let Err(e) = memory.lock().unwrap().add_message(
-                            &session_id,
-                            MessageRole::ToolResult,
-                            &response.to_string(),
-                            None,
-                        ) {
-                            tracing::warn!("Failed to log tool result to memory: {e}");
-                        }
+                            let response = execute_tool(&name, &args, &tool_executor, &tool_screen_reader).await;
 
-                        // Resume pulsing + green
-                        if let Some(ref tx) = menubar_tx {
-                            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Green)).await;
-                            let _ = tx.send(MenuBarMessage::SetPulsing(true)).await;
-                            let _ = tx.send(MenuBarMessage::SetStatus {
-                                text: "Connected — Listening".into(),
-                            }).await;
-                        }
+                            let _ = tool_bus.send(AuraEvent::ToolExecuted {
+                                name: name.clone(),
+                                success: response.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
+                                output: response.get("stdout").or(response.get("context")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            });
 
-                        if let Err(e) = session.send_tool_response(id, name, response).await {
-                            tracing::error!("Failed to send tool response: {e}");
-                        }
+                            // Log result
+                            if let Err(e) = tool_memory.lock().unwrap().add_message(
+                                &tool_session_id,
+                                MessageRole::ToolResult,
+                                &response.to_string(),
+                                None,
+                            ) {
+                                tracing::warn!("Failed to log tool result: {e}");
+                            }
+
+                            // Resume green status
+                            if let Some(ref tx) = tool_menubar_tx {
+                                let _ = tx.send(MenuBarMessage::SetColor(DotColor::Green)).await;
+                                let _ = tx.send(MenuBarMessage::SetPulsing(true)).await;
+                                let _ = tx.send(MenuBarMessage::SetStatus {
+                                    text: "Connected — Listening".into(),
+                                }).await;
+                            }
+
+                            // Send tool response back to Gemini
+                            if let Err(e) = tool_session.send_tool_response(id, name, response).await {
+                                tracing::error!("Failed to send tool response: {e}");
+                            }
+                        });
                     }
                     Ok(GeminiEvent::ToolCallCancellation { ids }) => {
                         tracing::info!(?ids, "Tool call(s) cancelled");
@@ -725,6 +680,97 @@ fn prompt_api_key() -> Option<String> {
     }
 
     Some(key)
+}
+
+async fn execute_tool(
+    name: &str,
+    args: &serde_json::Value,
+    executor: &ScriptExecutor,
+    screen_reader: &MacOSScreenReader,
+) -> serde_json::Value {
+    match name {
+        "run_applescript" => {
+            let script = args.get("script").and_then(|v| v.as_str()).unwrap_or("");
+            let language = match args.get("language").and_then(|v| v.as_str()) {
+                Some("javascript") => ScriptLanguage::JavaScript,
+                _ => ScriptLanguage::AppleScript,
+            };
+            let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(30);
+            let result = executor.run(script, language, timeout).await;
+            serde_json::json!({
+                "success": result.success,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            })
+        }
+        "get_screen_context" => {
+            match screen_reader.capture_context() {
+                Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
+                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+            }
+        }
+        "move_mouse" => {
+            let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            match aura_input::mouse::move_mouse(x, y) {
+                Ok(()) => serde_json::json!({ "success": true }),
+                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+            }
+        }
+        "click" => {
+            let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let count = args.get("click_count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            match aura_input::mouse::click(x, y, button, count) {
+                Ok(()) => serde_json::json!({ "success": true }),
+                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+            }
+        }
+        "type_text" => {
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            match aura_input::keyboard::type_text(text) {
+                Ok(()) => serde_json::json!({ "success": true }),
+                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+            }
+        }
+        "press_key" => {
+            let key_name = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let modifiers: Vec<&str> = args.get("modifiers")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            match aura_input::keyboard::keycode_from_name(key_name) {
+                Some(keycode) => match aura_input::keyboard::press_key(keycode, &modifiers) {
+                    Ok(()) => serde_json::json!({ "success": true }),
+                    Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+                },
+                None => serde_json::json!({ "success": false, "error": format!("Unknown key: {key_name}") }),
+            }
+        }
+        "scroll" => {
+            let dx = args.get("dx").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let dy = args.get("dy").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            match aura_input::mouse::scroll(dx, dy) {
+                Ok(()) => serde_json::json!({ "success": true }),
+                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+            }
+        }
+        "drag" => {
+            let fx = args.get("from_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let fy = args.get("from_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tx = args.get("to_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let ty = args.get("to_y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            match aura_input::mouse::drag(fx, fy, tx, ty) {
+                Ok(()) => serde_json::json!({ "success": true }),
+                Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
+            }
+        }
+        other => serde_json::json!({
+            "success": false,
+            "error": format!("Unknown tool: {other}"),
+        }),
+    }
 }
 
 /// Compute root-mean-square energy of an audio buffer.

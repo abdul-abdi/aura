@@ -10,6 +10,7 @@ aura-screen = { path = "../aura-screen" }
 aura-bridge = { path = "../aura-bridge" }
 aura-gemini = { path = "../aura-gemini" }
 aura-memory = { path = "../aura-memory" }
+aura-input = { path = "../aura-input" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

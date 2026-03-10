@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::context::ScreenContext;
 
+#[derive(Clone)]
 pub struct MacOSScreenReader;
 
 impl MacOSScreenReader {
