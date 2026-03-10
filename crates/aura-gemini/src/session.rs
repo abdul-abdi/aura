@@ -347,57 +347,9 @@ async fn connect_and_stream_inner(
 
     loop {
         tokio::select! {
+            biased;
+
             _ = cancel.cancelled() => return Ok(()),
-
-            _ = ping_interval.tick() => {
-                ws_sink.lock().await.send(Message::Ping(vec![])).await?;
-            }
-
-            Some(pcm) = audio_rx.recv() => {
-                let msg = encode_audio_message(&pcm);
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
-            }
-
-            Some(jpeg_b64) = video_rx.recv() => {
-                let msg = RealtimeVideoMessage {
-                    realtime_input: RealtimeVideoInput {
-                        video: Blob {
-                            mime_type: "image/jpeg".into(),
-                            data: jpeg_b64,
-                        },
-                    },
-                };
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
-            }
-
-            Some((id, name, response)) = tool_response_rx.recv() => {
-                let msg = ToolResponseMessage {
-                    tool_response: ToolResponse {
-                        function_responses: vec![FunctionResponse { id, name, response }],
-                    },
-                };
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
-            }
-
-            Some(text) = text_rx.recv() => {
-                let msg = ClientContentMessage {
-                    client_content: ClientContent {
-                        turns: vec![Content {
-                            role: Some("user".into()),
-                            parts: vec![Part {
-                                text: Some(text),
-                                inline_data: None,
-                            }],
-                        }],
-                        turn_complete: true,
-                    },
-                };
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.lock().await.send(Message::Text(json)).await?;
-            }
 
             msg = ws_source.next() => {
                 let Some(msg) = msg else {
@@ -432,6 +384,56 @@ async fn connect_and_stream_inner(
                         }
                     }
                 }
+            }
+
+            Some((id, name, response)) = tool_response_rx.recv() => {
+                let msg = ToolResponseMessage {
+                    tool_response: ToolResponse {
+                        function_responses: vec![FunctionResponse { id, name, response }],
+                    },
+                };
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
+            }
+
+            Some(text) = text_rx.recv() => {
+                let msg = ClientContentMessage {
+                    client_content: ClientContent {
+                        turns: vec![Content {
+                            role: Some("user".into()),
+                            parts: vec![Part {
+                                text: Some(text),
+                                inline_data: None,
+                            }],
+                        }],
+                        turn_complete: true,
+                    },
+                };
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
+            }
+
+            _ = ping_interval.tick() => {
+                ws_sink.lock().await.send(Message::Ping(vec![])).await?;
+            }
+
+            Some(jpeg_b64) = video_rx.recv() => {
+                let msg = RealtimeVideoMessage {
+                    realtime_input: RealtimeVideoInput {
+                        video: Blob {
+                            mime_type: "image/jpeg".into(),
+                            data: jpeg_b64,
+                        },
+                    },
+                };
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
+            }
+
+            Some(pcm) = audio_rx.recv() => {
+                let msg = encode_audio_message(&pcm);
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.lock().await.send(Message::Text(json)).await?;
             }
         }
     }
