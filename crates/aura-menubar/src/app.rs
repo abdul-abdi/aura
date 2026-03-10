@@ -228,13 +228,16 @@ extern "C" fn menu_quit(_this: &Object, _cmd: Sel, _sender: id) {
 
 #[allow(deprecated)]
 extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
-    let Ok(mut state_guard) = GLOBAL_STATE.lock() else {
-        return;
-    };
-    if let Some(ref mut state) = *state_guard {
-        // Drain all pending messages (non-blocking)
-        while let Ok(msg) = state.rx.try_recv() {
-            unsafe {
+    unsafe {
+        let pool: id = msg_send![class!(NSAutoreleasePool), new];
+
+        let Ok(mut state_guard) = GLOBAL_STATE.lock() else {
+            let _: () = msg_send![pool, drain];
+            return;
+        };
+        if let Some(ref mut state) = *state_guard {
+            // Drain all pending messages (non-blocking)
+            while let Ok(msg) = state.rx.try_recv() {
                 match msg {
                     MenuBarMessage::SetColor(color) => {
                         state.status_item.set_color(color);
@@ -263,24 +266,24 @@ extern "C" fn poll_messages(_this: &Object, _cmd: Sel, _timer: id) {
                     }
                 }
             }
-        }
 
-        // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
-        if state.pulsing {
-            // Use a simple counter approach: toggle every 10th poll (50ms * 10 = 500ms)
-            static PULSE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let count = PULSE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count % 10 == 0 {
-                state.pulse_bright = !state.pulse_bright;
-                let color = if state.pulse_bright {
-                    DotColor::Green
-                } else {
-                    DotColor::GreenDim
-                };
-                unsafe {
+            // Handle pulsing animation (timer fires every 50ms, toggle every ~500ms = 10 ticks)
+            if state.pulsing {
+                // Use a simple counter approach: toggle every 10th poll (50ms * 10 = 500ms)
+                static PULSE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let count = PULSE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count % 10 == 0 {
+                    state.pulse_bright = !state.pulse_bright;
+                    let color = if state.pulse_bright {
+                        DotColor::Green
+                    } else {
+                        DotColor::GreenDim
+                    };
                     state.status_item.set_color(color);
                 }
             }
         }
+
+        let _: () = msg_send![pool, drain];
     }
 }

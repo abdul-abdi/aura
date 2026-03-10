@@ -58,6 +58,14 @@ impl AuraStatusItem {
 
     unsafe fn update_icon(&self, color: DotColor) {
         unsafe {
+            let button: id = msg_send![self.status_item, button];
+
+            // Release the old image to prevent leaks
+            let old_image: id = msg_send![button, image];
+            if old_image != cocoa::base::nil {
+                let _: () = msg_send![old_image, release];
+            }
+
             let size = NSSize::new(18.0, 18.0);
             let image: id = msg_send![class!(NSImage), alloc];
             let image: id = msg_send![image, initWithSize: size];
@@ -102,7 +110,6 @@ impl AuraStatusItem {
             let _: () = msg_send![image, unlockFocus];
             let _: () = msg_send![image, setTemplate: NO];
 
-            let button: id = msg_send![self.status_item, button];
             let _: () = msg_send![button, setImage: image];
         }
     }
