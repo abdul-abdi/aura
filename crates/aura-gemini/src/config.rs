@@ -53,6 +53,7 @@ pub struct GeminiConfig {
     pub system_prompt: String,
     pub temperature: f64,
     pub proxy_url: Option<String>,
+    pub proxy_auth_token: Option<String>,
 }
 
 impl GeminiConfig {
@@ -70,6 +71,9 @@ impl GeminiConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(read_config_file_proxy_url);
+        config.proxy_auth_token = std::env::var("AURA_PROXY_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
         Ok(config)
     }
 
@@ -81,13 +85,19 @@ impl GeminiConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             temperature: 0.7,
             proxy_url: None,
+            proxy_auth_token: None,
         }
     }
 
     pub fn ws_url(&self) -> String {
         if let Some(ref proxy) = self.proxy_url {
             let sep = if proxy.contains('?') { '&' } else { '?' };
-            format!("{proxy}{sep}api_key={}", self.api_key)
+            let mut url = format!("{proxy}{sep}api_key={}", self.api_key);
+            if let Some(ref token) = self.proxy_auth_token {
+                url.push_str("&auth_token=");
+                url.push_str(token);
+            }
+            url
         } else {
             format!("{WS_BASE}?key={}", self.api_key)
         }
@@ -96,7 +106,11 @@ impl GeminiConfig {
     pub fn ws_url_redacted(&self) -> String {
         if let Some(ref proxy) = self.proxy_url {
             let sep = if proxy.contains('?') { '&' } else { '?' };
-            format!("{proxy}{sep}api_key=REDACTED")
+            let mut url = format!("{proxy}{sep}api_key=REDACTED");
+            if self.proxy_auth_token.is_some() {
+                url.push_str("&auth_token=REDACTED");
+            }
+            url
         } else {
             format!("{WS_BASE}?key=REDACTED")
         }
