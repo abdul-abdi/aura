@@ -1065,8 +1065,8 @@ fn prompt_api_key() -> Option<String> {
     if !validate_api_key(&key) {
         tracing::warn!("Invalid API key format entered");
         show_error_dialog(
-            "Invalid API key format.\n\nA valid Gemini API key starts with \"AI\", \
-             is at least 20 characters long, and contains no whitespace.\n\n\
+            "Invalid API key format.\n\nA valid Gemini API key is at least 20 characters long, \
+             ASCII-only, and contains no whitespace.\n\n\
              Get a key at aistudio.google.com/apikey",
         );
         return None;
@@ -1093,9 +1093,9 @@ fn prompt_api_key() -> Option<String> {
 }
 
 /// Validate that an API key has a plausible format.
-/// Gemini API keys start with "AI", are at least 20 characters, and have no whitespace.
+/// Checks length, ASCII-only, and no whitespace.
 fn validate_api_key(key: &str) -> bool {
-    key.len() >= 20 && key.starts_with("AI") && !key.chars().any(|c| c.is_whitespace())
+    key.len() >= 20 && key.is_ascii() && !key.chars().any(|c| c.is_whitespace())
 }
 
 /// Show a native macOS error dialog via osascript.
