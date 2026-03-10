@@ -433,12 +433,28 @@ async fn run_processor(
             }
             last_hash = frame.hash;
 
+            // Send coordinate metadata alongside the frame so Gemini knows the
+            // image resolution and can map its pixel coordinates to logical screen points.
+            let coord_meta = format!(
+                "Image resolution: {}x{}. Coordinates in this image map directly to screen coordinates.",
+                frame.width, frame.height
+            );
+            if let Err(e) = cap_session.send_text(&coord_meta).await {
+                tracing::warn!("Failed to send frame metadata: {e}");
+            }
+
             // Send to Gemini
             if let Err(e) = cap_session.send_video(&frame.jpeg_base64).await {
                 tracing::warn!("Failed to send screen frame: {e}");
                 break;
             }
-            tracing::debug!("Sent screen frame ({} KB)", frame.jpeg_base64.len() / 1024);
+            tracing::debug!(
+                width = frame.width,
+                height = frame.height,
+                scale_factor = frame.scale_factor,
+                size_kb = frame.jpeg_base64.len() / 1024,
+                "Sent screen frame"
+            );
         }
     });
 

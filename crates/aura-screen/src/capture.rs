@@ -21,6 +21,9 @@ pub struct CapturedFrame {
     pub width: u32,
     /// Height of the JPEG image (after downscale).
     pub height: u32,
+    /// Retina scale factor (e.g. 2.0 on Retina displays).
+    /// Ratio of raw pixel width to logical display width.
+    pub scale_factor: f64,
 }
 
 unsafe extern "C" {
@@ -61,6 +64,13 @@ pub fn capture_screen() -> Result<CapturedFrame> {
 
     let width = cg_image.width();
     let height = cg_image.height();
+
+    // Compute retina scale factor: raw pixel width / logical display width.
+    // CGDisplay::image() returns retina (physical) pixels; bounds() returns logical points.
+    let raw_width = width as f64;
+    let display_bounds = display.bounds();
+    let logical_width = display_bounds.size.width;
+    let scale_factor = if logical_width > 0.0 { raw_width / logical_width } else { 1.0 };
     let bytes_per_row = cg_image.bytes_per_row();
     let data = cg_image.data();
     let raw_bytes = data.bytes();
@@ -108,7 +118,7 @@ pub fn capture_screen() -> Result<CapturedFrame> {
 
     let jpeg_base64 = BASE64.encode(&jpeg_buf);
 
-    Ok(CapturedFrame { jpeg_base64, hash, width: final_w, height: final_h })
+    Ok(CapturedFrame { jpeg_base64, hash, width: final_w, height: final_h, scale_factor })
 }
 
 /// Compute an FNV-1a hash by sampling 2048 pixels across the frame.
