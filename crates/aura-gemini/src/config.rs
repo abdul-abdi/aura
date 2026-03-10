@@ -92,6 +92,15 @@ impl GeminiConfig {
             format!("{WS_BASE}?key={}", self.api_key)
         }
     }
+
+    pub fn ws_url_redacted(&self) -> String {
+        if let Some(ref proxy) = self.proxy_url {
+            let sep = if proxy.contains('?') { '&' } else { '?' };
+            format!("{proxy}{sep}api_key=REDACTED")
+        } else {
+            format!("{WS_BASE}?key=REDACTED")
+        }
+    }
 }
 
 fn read_config_file_key() -> Option<String> {
@@ -202,6 +211,24 @@ mod tests {
             }
         }
         assert_eq!(found, Some("my-secret-key-123".to_string()));
+    }
+
+    #[test]
+    fn ws_url_redacted_hides_key() {
+        let config = GeminiConfig::from_env_inner("secret-key-123");
+        let redacted = config.ws_url_redacted();
+        assert!(!redacted.contains("secret-key-123"));
+        assert!(redacted.contains("REDACTED"));
+    }
+
+    #[test]
+    fn ws_url_redacted_hides_key_with_proxy() {
+        let mut config = GeminiConfig::from_env_inner("secret-key-123");
+        config.proxy_url = Some("wss://proxy.example.com/ws".into());
+        let redacted = config.ws_url_redacted();
+        assert!(!redacted.contains("secret-key-123"));
+        assert!(redacted.contains("REDACTED"));
+        assert!(redacted.contains("proxy.example.com"));
     }
 
     #[test]

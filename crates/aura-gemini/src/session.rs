@@ -283,6 +283,7 @@ async fn connect_and_stream_inner(
     was_connected: &mut bool,
 ) -> Result<()> {
     let url = state.config.ws_url();
+    tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(10),
         tokio_tungstenite::connect_async(&url),
