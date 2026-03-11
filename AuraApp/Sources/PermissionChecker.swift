@@ -2,12 +2,12 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 
-/// Checks and opens System Settings for the three permissions Aura requires:
+/// Checks and requests the three permissions Aura requires:
 /// Microphone, Screen Recording, and Accessibility.
 ///
-/// All checks are **silent** (read-only) — they never trigger macOS TCC popup
-/// dialogs. When a permission is missing, the UI directs the user to System
-/// Settings via a URL scheme.
+/// Silent checks (polling) never trigger popups. The `request*` methods
+/// are called when the user taps "Grant" — these trigger the native macOS
+/// prompt, which is expected since the user explicitly initiated it.
 @Observable
 @MainActor
 final class PermissionChecker {
@@ -23,49 +23,54 @@ final class PermissionChecker {
         accessibilityGranted = AXIsProcessTrusted()
     }
 
-    // MARK: - Silent permission checks
+    // MARK: - Silent permission checks (polling — never trigger popups)
 
-    /// Check microphone authorization status. Never triggers a popup.
-    /// Uses AVCaptureDevice.authorizationStatus which is always read-only.
     private func checkMicrophone() -> Bool {
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        return status == .authorized
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
-    /// Check screen recording permission. Always silent — never triggers a popup.
     private func checkScreenRecording() -> Bool {
-        // Already granted — skip re-checking to avoid unnecessary work
-        if screenGranted { return true }
-
         if #available(macOS 15, *) {
-            // CGPreflightScreenCaptureAccess is a silent preflight check.
             return CGPreflightScreenCaptureAccess()
         } else {
-            // macOS 14 has no silent preflight API. CGWindowListCreateImage
-            // may trigger a TCC popup, so we avoid it entirely. Users on
-            // macOS <15 can use "Skip for now" — the daemon handles gracefully.
             return false
         }
     }
 
-    // MARK: - Open System Settings (user-initiated only)
+    // MARK: - User-initiated permission requests (called from "Grant" buttons)
 
-    /// Open System Settings to Microphone privacy pane.
-    /// Never triggers a macOS TCC popup — always directs to System Settings.
-    func openMicSettings() {
-        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+    /// Triggers the native macOS microphone prompt.
+    func requestMicAccess() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            DispatchQueue.main.async {
+                self?.micGranted = granted
+            }
+        }
     }
 
-    /// Open System Settings to Screen Recording privacy pane.
-    /// Never triggers a macOS TCC popup — always directs to System Settings.
-    func openScreenSettings() {
-        open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+    /// Triggers the native macOS Screen Recording prompt (macOS 15+)
+    /// or opens System Settings on older versions.
+    func requestScreenAccess() {
+        if #available(macOS 15, *) {
+            // CGRequestScreenCaptureAccess shows the native system prompt
+            // and returns the current state. The 2s poll picks up changes.
+            CGRequestScreenCaptureAccess()
+            screenGranted = CGPreflightScreenCaptureAccess()
+        } else {
+            open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        }
     }
 
-    /// Open System Settings to Accessibility privacy pane.
-    func openAccessibilitySettings() {
-        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    /// Triggers the native macOS Accessibility prompt.
+    /// AXIsProcessTrustedWithOptions with the prompt key shows the system
+    /// dialog asking to grant Accessibility access.
+    func requestAccessibilityAccess() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        accessibilityGranted = trusted
     }
+
+    // MARK: - Helpers
 
     private func open(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }

@@ -72,7 +72,7 @@ struct PermissionsView: View {
                 title: "Microphone",
                 reason: "To hear your voice and respond naturally.",
                 granted: checker.micGranted,
-                onGrant: { checker.openMicSettings() }
+                onGrant: { checker.requestMicAccess() }
             )
 
             PermissionRow(
@@ -80,7 +80,7 @@ struct PermissionsView: View {
                 title: "Screen Recording",
                 reason: "To understand what's on your screen when asked.",
                 granted: checker.screenGranted,
-                onGrant: { checker.openScreenSettings() }
+                onGrant: { checker.requestScreenAccess() }
             )
 
             PermissionRow(
@@ -88,7 +88,7 @@ struct PermissionsView: View {
                 title: "Accessibility",
                 reason: "To type, click, and control apps on your behalf.",
                 granted: checker.accessibilityGranted,
-                onGrant: { checker.openAccessibilitySettings() }
+                onGrant: { checker.requestAccessibilityAccess() }
             )
         }
         .padding(.horizontal, 20)
