@@ -53,20 +53,9 @@ pub fn build_consolidation_prompt(messages: &[&Message]) -> String {
          - \"entity\": Important files, apps, or things the user works with\n\
          - \"task\": What the user was trying to accomplish\n\
          - \"context\": Other useful context for future sessions\n\n\
-         Respond ONLY with valid JSON in this exact format:\n\
-         ```json\n\
-         {\n\
-           \"summary\": \"One sentence describing what happened in this session\",\n\
-           \"facts\": [\n\
-             {\n\
-               \"category\": \"preference\",\n\
-               \"content\": \"Human-readable fact\",\n\
-               \"entities\": [\"entity1\", \"entity2\"],\n\
-               \"importance\": 0.8\n\
-             }\n\
-           ]\n\
-         }\n\
-         ```\n\n\
+         Respond ONLY with valid JSON matching this schema:\n\
+         {\"summary\": \"string\", \"facts\": [{\"category\": \"string\", \"content\": \"string\", \"entities\": [\"string\"], \"importance\": number}]}\n\n\
+         Categories: preference, habit, entity, task, context.\n\n\
          If the session was trivial (just a greeting or test), return an empty facts array.\n\n\
          --- CONVERSATION ---\n";
 

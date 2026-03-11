@@ -995,7 +995,7 @@ async fn run_processor(
                                 }
                             };
 
-                            let tool_success = !response.get("error").is_some();
+                            let tool_success = response.get("error").is_none();
                             bus.send(AuraEvent::ToolExecuted {
                                 name: name.clone(),
                                 success: tool_success,
