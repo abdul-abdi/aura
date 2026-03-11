@@ -160,7 +160,10 @@ pub struct ContextWindowCompression {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SlidingWindow {}
+pub struct SlidingWindow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_tokens: Option<u32>,
+}
 
 /// Real-time video input using the new separate video field.
 #[derive(Debug, Serialize)]

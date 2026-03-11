@@ -739,7 +739,9 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
                 handle: resumption_handle,
             }),
             context_window_compression: Some(ContextWindowCompression {
-                sliding_window: SlidingWindow {},
+                sliding_window: SlidingWindow {
+                    target_tokens: Some(500_000),
+                },
             }),
         },
     }
