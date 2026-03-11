@@ -19,7 +19,9 @@ To build from source, you also need:
 
 ### Option 1: Download the DMG (recommended)
 
-Download the latest release from the [Releases page](https://github.com/abdul-abdi/aura/releases/latest). Open the DMG, drag Aura to Applications, and launch it.
+Download the latest release from the [Releases page](https://github.com/abdul-abdi/aura/releases/latest). Open the DMG, drag Aura to Applications.
+
+> **macOS Gatekeeper:** Since Aura is not notarized with Apple, macOS will block the first launch. Right-click `Aura.app` → **Open** → click **Open** in the dialog. Or run: `xattr -dr com.apple.quarantine /Applications/Aura.app`
 
 ### Option 2: From source
 

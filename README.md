@@ -11,7 +11,7 @@
 [![Gemini](https://img.shields.io/badge/Gemini-Live_API-4285F4?style=flat-square&logo=google&logoColor=white)](https://ai.google.dev/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)](LICENSE)
 
-[![Download Latest](https://img.shields.io/badge/Download-Aura_v1.1.0-4DE680?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/abdul-abdi/aura/releases/latest/download/Aura-1.1.0.dmg)
+[![Download Latest](https://img.shields.io/badge/Download-Aura_v1.1.1-4DE680?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/abdul-abdi/aura/releases/latest/download/Aura-1.1.1.dmg)
 
 </div>
 
@@ -85,9 +85,18 @@ The entire pipeline — voice capture, screen analysis, tool execution — runs 
 
 **1. Download and install**
 
-> [![Download Aura](https://img.shields.io/badge/Download_DMG-4DE680?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/abdul-abdi/aura/releases/latest/download/Aura-1.1.0.dmg)
+> [![Download Aura](https://img.shields.io/badge/Download_DMG-4DE680?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/abdul-abdi/aura/releases/latest/download/Aura-1.1.1.dmg)
 >
-> Open the DMG, drag Aura to Applications, launch it.
+> Open the DMG, drag Aura to Applications.
+>
+> **macOS Gatekeeper notice:** Since Aura is not notarized with Apple, macOS will show a warning on first launch. To open it:
+> - Right-click `Aura.app` → **Open** → click **Open** in the dialog
+>
+> Or run in Terminal:
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/Aura.app
+> ```
+> You only need to do this once.
 
 **2. Get a Gemini API key**
 
@@ -162,7 +171,7 @@ Full details: [Security Model](docs/SECURITY.md)
 
 <div align="center">
 
-[![Download Aura](https://img.shields.io/badge/Download_Aura_v1.1.0-4DE680?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/abdul-abdi/aura/releases/latest/download/Aura-1.1.0.dmg)
+[![Download Aura](https://img.shields.io/badge/Download_Aura_v1.1.1-4DE680?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/abdul-abdi/aura/releases/latest/download/Aura-1.1.1.dmg)
 
 Requires macOS 14+ and a free [Gemini API key](https://aistudio.google.com/apikey).
 
