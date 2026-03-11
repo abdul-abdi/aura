@@ -9,6 +9,9 @@ const CONSOLIDATION_MODEL: &str = "gemini-2.0-flash-lite";
 const GEMINI_REST_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models";
 
+/// Maximum characters in the consolidation prompt (≈12K tokens).
+const MAX_PROMPT_CHARS: usize = 50_000;
+
 /// Extracted fact from a session.
 #[derive(Debug, Deserialize)]
 pub struct ExtractedFact {
@@ -42,8 +45,7 @@ pub fn filter_messages_for_consolidation(messages: &[Message]) -> Vec<&Message> 
 
 /// Build the consolidation prompt from filtered messages.
 pub fn build_consolidation_prompt(messages: &[&Message]) -> String {
-    let mut prompt = String::from(
-        "You are a memory extraction agent. Analyze this conversation history and extract key facts.\n\n\
+    let preamble = "You are a memory extraction agent. Analyze this conversation history and extract key facts.\n\n\
          The conversation contains user messages and tool calls from an AI desktop assistant.\n\n\
          Extract facts in these categories:\n\
          - \"preference\": User preferences (apps, settings, workflows they like)\n\
@@ -66,16 +68,35 @@ pub fn build_consolidation_prompt(messages: &[&Message]) -> String {
          }\n\
          ```\n\n\
          If the session was trivial (just a greeting or test), return an empty facts array.\n\n\
-         --- CONVERSATION ---\n",
-    );
+         --- CONVERSATION ---\n";
 
+    let mut lines: Vec<String> = Vec::with_capacity(messages.len());
     for msg in messages {
         let role_label = match msg.role {
             MessageRole::User => "USER",
             MessageRole::ToolCall => "TOOL_CALL",
             _ => "OTHER",
         };
-        prompt.push_str(&format!("[{role_label}] {}\n", msg.content));
+        lines.push(format!("[{role_label}] {}", msg.content));
+    }
+
+    let budget = MAX_PROMPT_CHARS.saturating_sub(preamble.len());
+    let mut total: usize = lines.iter().map(|l| l.len() + 1).sum();
+
+    let mut start = 0;
+    while total > budget && start < lines.len() {
+        total -= lines[start].len() + 1;
+        start += 1;
+    }
+
+    let mut prompt = String::with_capacity(preamble.len() + total);
+    prompt.push_str(preamble);
+    if start > 0 {
+        prompt.push_str(&format!("[...truncated {start} older messages...]\n"));
+    }
+    for line in &lines[start..] {
+        prompt.push_str(line);
+        prompt.push('\n');
     }
 
     prompt
@@ -208,5 +229,16 @@ mod tests {
         let json = r#"{"summary":"Just a greeting","facts":[]}"#;
         let resp: ConsolidationResponse = serde_json::from_str(json).unwrap();
         assert!(resp.facts.is_empty());
+    }
+
+    #[test]
+    fn prompt_truncates_long_conversations() {
+        let messages: Vec<Message> = (0..1000)
+            .map(|i| make_message(MessageRole::User, &format!("Message number {i} with some padding text to make it longer than a short msg")))
+            .collect();
+        let refs: Vec<&Message> = messages.iter().collect();
+        let prompt = build_consolidation_prompt(&refs);
+        assert!(prompt.len() < 60_000, "Prompt was {} chars, expected < 60K", prompt.len());
+        assert!(prompt.contains("Message number 999"));
     }
 }

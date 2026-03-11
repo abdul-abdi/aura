@@ -63,7 +63,7 @@ pub struct Fact {
 }
 
 pub struct SessionMemory {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl SessionMemory {
@@ -205,11 +205,18 @@ impl SessionMemory {
         }
     }
 
-    /// Delete sessions (and their messages) older than `max_age_days` days.
+    /// Delete sessions (and their messages and facts) older than `max_age_days` days.
     /// Returns the number of sessions deleted.
     pub fn prune_old_sessions(&self, max_age_days: u32) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let cutoff = format!("-{max_age_days} days");
+        tx.execute(
+            "DELETE FROM facts WHERE session_id IN (
+                SELECT id FROM sessions
+                WHERE datetime(started_at) < datetime('now', ?1)
+            )",
+            params![cutoff],
+        )?;
         tx.execute(
             "DELETE FROM messages WHERE session_id IN (
                 SELECT id FROM sessions
@@ -548,5 +555,27 @@ mod tests {
 
         let sessions = mem.list_sessions(1).unwrap();
         assert_eq!(sessions[0].summary.as_deref(), Some("Important summary"));
+    }
+
+    #[test]
+    fn prune_deletes_facts_for_old_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+
+        let sid = mem.start_session().unwrap();
+        mem.add_fact(&sid, "preference", "likes dark mode", None, 0.8).unwrap();
+        mem.end_session(&sid, Some("test session")).unwrap();
+
+        // Backdate session to 100 days ago
+        mem.conn.execute(
+            "UPDATE sessions SET started_at = datetime('now', '-100 days') WHERE id = ?1",
+            rusqlite::params![sid],
+        ).unwrap();
+
+        let deleted = mem.prune_old_sessions(30).unwrap();
+        assert_eq!(deleted, 1);
+
+        let facts = mem.get_facts_for_session(&sid).unwrap();
+        assert!(facts.is_empty());
     }
 }
