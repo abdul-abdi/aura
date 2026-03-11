@@ -124,26 +124,30 @@ if [[ ! -f "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns" ]]; then
     echo "WARNING: Icon generation failed. App will use default icon."
 fi
 
-# ── Step 6: Ad-hoc code sign (local execution without Gatekeeper warnings) ─
-# Sign each binary with a stable --identifier so macOS TCC can persist
-# permission grants (mic, screen recording) across rebuilds. Without this,
-# every ad-hoc re-sign produces a new CDHash and TCC re-prompts on launch.
+# ── Step 6: Ad-hoc code sign with stable designated requirements ──────────
+# Override the default designated requirement (DR) so TCC grants persist
+# across rebuilds. Without -r, ad-hoc signing pins the DR to the CDHash
+# which changes every build, causing macOS to re-prompt for permissions.
 
-echo "==> Code signing (ad-hoc)..."
+echo "==> Code signing (ad-hoc, stable DR)..."
 # Sign the daemon first with its own stable identifier
 codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.daemon \
+    -r='designated => identifier "com.aura.daemon"' \
     "${BUNDLE_DIR}/Contents/MacOS/aura-daemon" 2>/dev/null || {
     echo "WARNING: Code signing failed for aura-daemon."
 }
 # Sign the main app executable
 if [[ "$LEGACY" == false ]]; then
     codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.desktop \
+        -r='designated => identifier "com.aura.desktop"' \
         "${BUNDLE_DIR}/Contents/MacOS/AuraApp" 2>/dev/null || {
         echo "WARNING: Code signing failed for AuraApp."
     }
 fi
 # Sign the bundle as a whole (--deep skipped: inner binaries already signed)
-codesign --force --sign "$SIGN_IDENTITY" "${BUNDLE_DIR}" 2>/dev/null || {
+codesign --force --sign "$SIGN_IDENTITY" \
+    -r='designated => identifier "com.aura.desktop"' \
+    "${BUNDLE_DIR}" 2>/dev/null || {
     echo "WARNING: Code signing failed for bundle. App may trigger Gatekeeper warnings."
 }
 

@@ -33,23 +33,13 @@ pkill -x "AuraApp"     2>/dev/null || true
 # Give the OS a moment to release file locks on the bundle
 sleep 0.5
 
-# ── Step 3: Reset TCC permissions + onboarding state ─────────────────────
-# Ad-hoc signing generates a new CDHash on every rebuild, which invalidates
-# macOS TCC grants. Reset them so the app re-prompts cleanly.
-
-echo "==> Resetting TCC permissions and onboarding state..."
-tccutil reset All com.aura.desktop 2>/dev/null || true
-tccutil reset All com.aura.daemon  2>/dev/null || true
-defaults delete com.aura.desktop   2>/dev/null || true
-echo "    Done (permissions will be re-requested on launch)."
-
-# ── Step 4: Install to /Applications ──────────────────────────────────────
+# ── Step 3: Install to /Applications ──────────────────────────────────────
 
 echo "==> Installing ${APP_NAME}.app to /Applications/..."
 rm -rf "$INSTALL_DEST"
 cp -R "$BUNDLE_SRC" "$INSTALL_DEST"
 
-# ── Step 5: Relaunch ───────────────────────────────────────────────────────
+# ── Step 4: Relaunch ───────────────────────────────────────────────────────
 
 echo "==> Launching ${APP_NAME}.app..."
 open "$INSTALL_DEST"
@@ -62,5 +52,5 @@ echo "  ${APP_NAME} deployed and running"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  Installed: ${INSTALL_DEST}"
-echo "  Signing:   Ad-hoc (TCC reset — permissions re-prompted)"
+echo "  Signing:   Ad-hoc (stable DR — TCC permissions persist)"
 echo ""
