@@ -1698,10 +1698,145 @@ async fn execute_tool(
             let ty = dims.to_logical_y(raw_ty);
             run_input_blocking(move || aura_input::mouse::drag(fx, fy, tx, ty)).await
         }
+        "activate_app" => {
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if name.is_empty() {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "name parameter is required"
+                });
+            }
+            // Sanitize app name to prevent AppleScript injection
+            let safe_name = name.replace('\\', "").replace('"', "");
+            let script = format!(r#"tell application "{safe_name}" to activate"#);
+
+            // Pre-check automation permission if we know the bundle ID
+            if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&safe_name) {
+                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                if perm == aura_bridge::automation::AutomationPermission::Denied {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Automation permission for {safe_name} is denied. \
+                             Grant in System Settings > Privacy & Security > Automation."
+                        ),
+                        "error_kind": "automation_denied",
+                    });
+                }
+            }
+
+            let result = executor.run(&script, ScriptLanguage::AppleScript, 10).await;
+            serde_json::json!({
+                "success": result.success,
+                "app": safe_name,
+                "stderr": result.stderr,
+            })
+        }
+        "click_menu_item" => {
+            let menu_path: Vec<String> = args
+                .get("menu_path")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if menu_path.len() < 2 {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "menu_path requires at least 2 items: [\"MenuBarItem\", \"MenuItem\", ...\"SubmenuItem\"]"
+                });
+            }
+
+            // Determine target app
+            let target_app = if let Some(app) = args.get("app").and_then(|v| v.as_str()) {
+                app.to_string()
+            } else {
+                match screen_reader.capture_context() {
+                    Ok(ctx) => ctx.frontmost_app().to_string(),
+                    Err(_) => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": "Could not determine frontmost app. Specify 'app' parameter."
+                        });
+                    }
+                }
+            };
+
+            // Pre-check automation permission for System Events
+            if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id("System Events")
+            {
+                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                if perm == aura_bridge::automation::AutomationPermission::Denied {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": "Automation permission for System Events is denied. \
+                                 Grant in System Settings > Privacy & Security > Automation.",
+                        "error_kind": "automation_denied",
+                    });
+                }
+            }
+
+            let script = build_menu_click_script(&target_app, &menu_path);
+            let result = executor.run(&script, ScriptLanguage::AppleScript, 10).await;
+            if result.success {
+                serde_json::json!({
+                    "success": true,
+                    "clicked": menu_path.join(" > "),
+                })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "error": format!("Menu item not found or click failed: {}", result.stderr),
+                    "stderr": result.stderr,
+                })
+            }
+        }
         other => serde_json::json!({
             "success": false,
             "error": format!("Unknown tool: {other}"),
         }),
+    }
+}
+
+/// Build an AppleScript to click a menu item via System Events.
+/// Supports 2-level (menu bar > item) and 3+ level (menu bar > submenu > item) paths.
+fn build_menu_click_script(app: &str, path: &[String]) -> String {
+    let process = app.replace('\\', "").replace('"', "");
+    let escaped: Vec<String> = path
+        .iter()
+        .map(|s| s.replace('\\', "").replace('"', ""))
+        .collect();
+
+    match escaped.len() {
+        2 => format!(
+            "tell application \"System Events\" to tell process \"{process}\"\n\
+             \tclick menu item \"{}\" of menu 1 of menu bar item \"{}\" of menu bar 1\n\
+             end tell",
+            escaped[1], escaped[0]
+        ),
+        3 => format!(
+            "tell application \"System Events\" to tell process \"{process}\"\n\
+             \tclick menu item \"{}\" of menu 1 of menu item \"{}\" of menu 1 of menu bar item \"{}\" of menu bar 1\n\
+             end tell",
+            escaped[2], escaped[1], escaped[0]
+        ),
+        _ => {
+            // Build nested chain for 4+ levels
+            let leaf = escaped.last().unwrap();
+            let mut chain = format!("menu item \"{leaf}\"");
+            for item in escaped[1..escaped.len() - 1].iter().rev() {
+                chain = format!("{chain} of menu 1 of menu item \"{item}\"");
+            }
+            chain = format!("{chain} of menu 1 of menu bar item \"{}\"", escaped[0]);
+            format!(
+                "tell application \"System Events\" to tell process \"{process}\"\n\
+                 \tclick {chain} of menu bar 1\n\
+                 end tell"
+            )
+        }
     }
 }
 
