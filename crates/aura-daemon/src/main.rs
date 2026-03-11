@@ -747,6 +747,12 @@ async fn run_processor(
                 if let Some(tx) = cap_trigger.take_waiter() {
                     let _ = tx.send(());
                 }
+                idle_skip_count += 1;
+                if idle_skip_count == IDLE_THRESHOLD {
+                    interval = tokio::time::interval(Duration::from_millis(2000));
+                    interval.tick().await;
+                    tracing::debug!("Screen idle for 5s — switching to 2s capture interval");
+                }
                 continue;
             }
             cap_last_hash.store(frame.hash, Ordering::Release);
@@ -2241,46 +2247,42 @@ const MAX_TOOL_RESPONSE_CHARS: usize = 8000;
 
 fn truncate_tool_response(response: &mut serde_json::Value) {
     // For get_screen_context: trim the elements list
-    if let Some(ctx) = response.get_mut("context") {
-        if let Some(obj) = ctx.as_object_mut() {
-            if let Some(elements) = obj.get_mut("elements") {
-                if let Some(arr) = elements.as_array_mut() {
-                    if arr.len() > 30 {
-                        let original_count = arr.len();
-                        arr.truncate(30);
-                        arr.push(serde_json::json!({"truncated": true, "original_count": original_count}));
-                    }
-                    // Strip verbose bounds from non-first elements
-                    for (i, el) in arr.iter_mut().enumerate() {
-                        if i > 0 {
-                            if let Some(obj) = el.as_object_mut() {
-                                obj.remove("bounds");
-                            }
-                        }
-                    }
-                }
+    if let Some(arr) = response
+        .get_mut("context")
+        .and_then(|c| c.get_mut("elements"))
+        .and_then(|e| e.as_array_mut())
+    {
+        if arr.len() > 30 {
+            let original_count = arr.len();
+            arr.truncate(30);
+            arr.push(serde_json::json!({"truncated": true, "original_count": original_count}));
+        }
+        // Strip verbose bounds from non-first elements
+        for el in arr.iter_mut().skip(1) {
+            if let Some(obj) = el.as_object_mut() {
+                obj.remove("bounds");
             }
         }
     }
 
-    // General size cap: if still too large, truncate the serialized form
-    let serialized = response.to_string();
-    if serialized.len() > MAX_TOOL_RESPONSE_CHARS {
-        if let Some(obj) = response.as_object_mut() {
-            let success = obj.get("success").cloned();
-            let verified = obj.get("verified").cloned();
-            obj.clear();
-            if let Some(s) = success {
-                obj.insert("success".to_string(), s);
-            }
-            if let Some(v) = verified {
-                obj.insert("verified".to_string(), v);
-            }
-            obj.insert(
-                "truncated".to_string(),
-                serde_json::json!(format!("Response truncated from {} chars to save context", serialized.len())),
-            );
+    // General size cap: if still too large, keep only essential fields
+    let serialized_len = response.to_string().len();
+    if serialized_len > MAX_TOOL_RESPONSE_CHARS
+        && let Some(obj) = response.as_object_mut()
+    {
+        let success = obj.get("success").cloned();
+        let verified = obj.get("verified").cloned();
+        obj.clear();
+        if let Some(s) = success {
+            obj.insert("success".to_string(), s);
         }
+        if let Some(v) = verified {
+            obj.insert("verified".to_string(), v);
+        }
+        obj.insert(
+            "truncated".to_string(),
+            serde_json::json!(format!("Response truncated from {serialized_len} chars to save context")),
+        );
     }
 }
 
