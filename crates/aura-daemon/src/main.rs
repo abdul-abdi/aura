@@ -1049,6 +1049,7 @@ async fn run_processor(
                         let tool_inflight = Arc::clone(&tools_in_flight);
                         let tool_permission_error = Arc::clone(&has_permission_error);
                         let tool_ipc_tx = ipc_tx.clone();
+                        let tool_last_hash = Arc::clone(&last_frame_hash);
                         let tool_dims = FrameDims {
                             img_w: frame_img_w.load(Ordering::Acquire),
                             img_h: frame_img_h.load(Ordering::Acquire),
@@ -1087,6 +1088,12 @@ async fn run_processor(
                                 }
                             }
 
+                            let pre_hash = if is_state_changing_tool(&name) {
+                                Some(tool_last_hash.load(Ordering::Acquire))
+                            } else {
+                                None
+                            };
+
                             let mut response = tokio::select! {
                                 result = execute_tool(&name, &args, &tool_executor, &tool_screen_reader, tool_dims) => result,
                                 _ = tool_cancel.cancelled() => {
@@ -1105,21 +1112,33 @@ async fn run_processor(
                                 tracing::error!("active_tool_tokens lock poisoned on remove");
                             }
 
-                            // For input tools: settle, capture screenshot, capture post_state
-                            let input_tool = is_state_changing_tool(&name);
-                            if input_tool {
+                            // For state-changing tools: verify screen actually changed before reporting success
+                            let verified;
+                            let mut verification_reason: Option<&str> = None;
+
+                            if let Some(pre) = pre_hash {
                                 // Brief delay to let UI settle after the input action
                                 tokio::time::sleep(Duration::from_millis(150)).await;
 
-                                // Trigger screenshot and await delivery (500ms timeout)
-                                let rx = tool_capture_trigger.trigger_and_wait();
-                                tool_cap_notify.notify_one();
-                                let screenshot_delivered = tokio::time::timeout(
-                                    Duration::from_millis(500),
-                                    rx,
-                                )
-                                .await
-                                .is_ok_and(|r| r.is_ok());
+                                // Poll for screen hash change: 200ms intervals, 2s timeout, 10 checks max
+                                let mut screen_changed = false;
+                                for _ in 0..10 {
+                                    let rx = tool_capture_trigger.trigger_and_wait();
+                                    tool_cap_notify.notify_one();
+                                    let _ = tokio::time::timeout(Duration::from_millis(200), rx).await;
+
+                                    let current_hash = tool_last_hash.load(Ordering::Acquire);
+                                    if current_hash != pre {
+                                        screen_changed = true;
+                                        break;
+                                    }
+                                }
+
+                                verified = screen_changed;
+                                if !screen_changed {
+                                    verification_reason = Some("screen_unchanged_after_2s");
+                                    tracing::warn!(tool = %name, "Screen unchanged after action — verification failed");
+                                }
 
                                 // Capture post-action state on a blocking thread (AX FFI)
                                 let post_state = tokio::time::timeout(
@@ -1130,17 +1149,43 @@ async fn run_processor(
                                 .unwrap_or(Ok(serde_json::json!({})))
                                 .unwrap_or_else(|_| serde_json::json!({}));
 
+                                // Check for post_state mismatch warning
+                                let warning: Option<&str> = if !verified {
+                                    let has_focus = post_state
+                                        .get("focused_element")
+                                        .map(|e| !e.is_null())
+                                        .unwrap_or(false);
+                                    if has_focus {
+                                        Some("screen_unchanged_but_element_focused — check post_state")
+                                    } else {
+                                        Some("screen_unchanged_and_no_focused_element")
+                                    }
+                                } else {
+                                    None
+                                };
+
                                 if let Some(obj) = response.as_object_mut() {
-                                    // Override the hardcoded field with actual result
+                                    obj.insert("verified".to_string(), serde_json::Value::Bool(verified));
+                                    if let Some(reason) = verification_reason {
+                                        obj.insert("verification_reason".to_string(), reason.into());
+                                    }
+                                    if let Some(warn) = warning {
+                                        obj.insert("warning".to_string(), warn.into());
+                                    }
                                     let mut ps = post_state;
                                     if let Some(ps_obj) = ps.as_object_mut() {
+                                        // screenshot_delivered == verified: if the hash changed,
+                                        // a fresh frame was captured during the poll loop and
+                                        // will be delivered with the next Gemini message.
                                         ps_obj.insert(
                                             "screenshot_delivered".to_string(),
-                                            serde_json::Value::Bool(screenshot_delivered),
+                                            serde_json::Value::Bool(verified),
                                         );
                                     }
                                     obj.insert("post_state".to_string(), ps);
                                 }
+                            } else {
+                                verified = true; // non-state-changing tools are inherently "verified"
                             }
 
                             let tool_success = response
@@ -1150,8 +1195,10 @@ async fn run_processor(
 
                             // Notify the popover that the tool completed
                             if let Some(ref tx) = tool_menubar_tx {
-                                let status_msg = if tool_success {
+                                let status_msg = if tool_success && verified {
                                     format!("\u{2705} Done: {name}")
+                                } else if tool_success && !verified {
+                                    format!("\u{26a0}\u{fe0f} Unverified: {name}")
                                 } else {
                                     format!("\u{274c} Failed: {name}")
                                 };
@@ -1210,9 +1257,9 @@ async fn run_processor(
                                 }).await;
                             }
 
-                            // For non-input tools, fire-and-forget screen capture
-                            // (input tools already triggered + awaited above)
-                            if !input_tool {
+                            // For non-state-changing tools, fire-and-forget screen capture
+                            // (state-changing tools already triggered + awaited above)
+                            if pre_hash.is_none() {
                                 tool_capture_trigger.trigger();
                                 tool_cap_notify.notify_one();
                             }
