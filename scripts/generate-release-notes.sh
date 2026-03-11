@@ -10,10 +10,15 @@
 set -euo pipefail
 
 VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+CURRENT_TAG="v${VERSION}"
 BASE_TAG="${1:-}"
 
 if [[ -z "$BASE_TAG" ]]; then
-  BASE_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+  # Get all version tags sorted by semver, find the one right before the current version.
+  # This avoids the bug where git-describe finds the current version's own tag.
+  BASE_TAG=$(git tag -l 'v*' --sort=-version:refname \
+    | grep -v "^${CURRENT_TAG}$" \
+    | head -1 || echo "")
 fi
 
 if [[ -z "$BASE_TAG" ]]; then
