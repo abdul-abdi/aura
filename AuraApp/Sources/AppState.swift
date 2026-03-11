@@ -55,7 +55,14 @@ final class AppState {
     init() {
         let onboardingDone = UserDefaults.standard.bool(forKey: "aura.onboardingComplete")
         if onboardingDone && Self.configFileHasKey() {
-            onboardingStep = .done
+            // Always verify permissions — TCC grants are invalidated when
+            // a rebuild changes the binary's CDHash (ad-hoc signing).
+            permissionChecker.checkAll()
+            if permissionChecker.allGranted {
+                onboardingStep = .done
+            } else {
+                onboardingStep = .permissions
+            }
         } else if onboardingDone && !Self.configFileHasKey() {
             // Config was deleted (e.g. uninstall/reinstall) — restart onboarding
             UserDefaults.standard.removeObject(forKey: "aura.onboardingComplete")

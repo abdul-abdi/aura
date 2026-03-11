@@ -16,12 +16,29 @@ DMG_PATH="${PROJECT_DIR}/target/release/${APP_NAME}-${VERSION}.dmg"
 
 BUILD_DMG=false
 LEGACY=false
+DEV_CERT=false
 for arg in "$@"; do
     case "$arg" in
         --dmg) BUILD_DMG=true ;;
         --legacy) LEGACY=true ;;
+        --dev-cert) DEV_CERT=true ;;
     esac
 done
+
+# Determine signing identity.
+# --dev-cert uses the "Aura Dev" self-signed certificate (created by
+# scripts/setup-dev-cert.sh). Same key = same CDHash = TCC persists.
+# Without it, ad-hoc signing (--sign -) is used — new CDHash every build.
+SIGN_IDENTITY="-"
+if [[ "$DEV_CERT" == true ]]; then
+    if security find-identity -v -p codesigning 2>/dev/null | grep -q "Aura Dev"; then
+        SIGN_IDENTITY="Aura Dev"
+        echo "==> Using stable dev certificate for signing (TCC will persist)."
+    else
+        echo "WARNING: 'Aura Dev' certificate not found. Run scripts/setup-dev-cert.sh first."
+        echo "         Falling back to ad-hoc signing."
+    fi
+fi
 
 # ── Step 1: Build Rust daemon ──────────────────────────────────────────────
 
@@ -127,21 +144,25 @@ fi
 # permission grants (mic, screen recording) across rebuilds. Without this,
 # every ad-hoc re-sign produces a new CDHash and TCC re-prompts on launch.
 
-echo "==> Code signing (ad-hoc, stable identifiers)..."
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    echo "==> Code signing (ad-hoc)..."
+else
+    echo "==> Code signing (certificate: ${SIGN_IDENTITY})..."
+fi
 # Sign the daemon first with its own stable identifier
-codesign --force --sign - --identifier com.aura.daemon \
+codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.daemon \
     "${BUNDLE_DIR}/Contents/MacOS/aura-daemon" 2>/dev/null || {
     echo "WARNING: Code signing failed for aura-daemon."
 }
 # Sign the main app executable
 if [[ "$LEGACY" == false ]]; then
-    codesign --force --sign - --identifier com.aura.desktop \
+    codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.desktop \
         "${BUNDLE_DIR}/Contents/MacOS/AuraApp" 2>/dev/null || {
         echo "WARNING: Code signing failed for AuraApp."
     }
 fi
 # Sign the bundle as a whole (--deep skipped: inner binaries already signed)
-codesign --force --sign - "${BUNDLE_DIR}" 2>/dev/null || {
+codesign --force --sign "$SIGN_IDENTITY" "${BUNDLE_DIR}" 2>/dev/null || {
     echo "WARNING: Code signing failed for bundle. App may trigger Gatekeeper warnings."
 }
 
