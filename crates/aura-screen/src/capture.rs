@@ -341,6 +341,11 @@ impl CaptureTrigger {
     pub fn trigger_and_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Ok(mut guard) = self.waiter.lock() {
+            if guard.is_some() {
+                tracing::warn!(
+                    "trigger_and_wait: overwriting pending waiter (previous caller will get RecvError)"
+                );
+            }
             *guard = Some(tx);
         }
         self.flag.store(true, Ordering::Release);

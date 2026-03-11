@@ -97,6 +97,17 @@ pub fn get_frontmost_app() -> Option<String> {
     Some(name)
 }
 
+/// Invalidate the frontmost PID and app caches.
+/// Call after actions that change the frontmost app (e.g. activate_app).
+pub fn clear_frontmost_cache() {
+    if let Ok(mut guard) = FRONTMOST_PID_CACHE.lock() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = FRONTMOST_APP_CACHE.lock() {
+        *guard = None;
+    }
+}
+
 /// Get frontmost window title via CGWindowListCopyWindowInfo.
 /// Needs Screen Recording permission (already requested) but NOT Automation permission.
 fn get_frontmost_title() -> Option<String> {

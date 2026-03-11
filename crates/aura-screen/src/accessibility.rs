@@ -615,12 +615,23 @@ pub(crate) fn find_ax_raw_nth(
 
 /// Perform an AX action (e.g. "AXPress") on the element matching `label`/`role`.
 pub fn ax_perform_action(label: Option<&str>, role: Option<&str>, action: &str) -> AXActionResult {
-    let Some((raw_ref, element)) = find_ax_raw(label, role) else {
+    ax_perform_action_nth(label, role, action, 0)
+}
+
+/// Perform an AX action on the Nth matching element (0-indexed).
+/// Single-pass walk: finds the exact element by index, then performs the action on it.
+pub fn ax_perform_action_nth(
+    label: Option<&str>,
+    role: Option<&str>,
+    action: &str,
+    index: usize,
+) -> AXActionResult {
+    let Some((raw_ref, element)) = find_ax_raw_nth(label, role, index) else {
         return AXActionResult {
             success: false,
             element: None,
             error: Some(format!(
-                "no element found for label={label:?} role={role:?}"
+                "no element found for label={label:?} role={role:?} index={index}"
             )),
         };
     };

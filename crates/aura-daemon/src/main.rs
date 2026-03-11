@@ -1117,7 +1117,7 @@ async fn run_processor(
                                     rx,
                                 )
                                 .await
-                                .is_ok();
+                                .is_ok_and(|r| r.is_ok());
 
                                 // Capture post-action state on a blocking thread (AX FFI)
                                 let post_state = tokio::time::timeout(
@@ -1756,8 +1756,8 @@ async fn execute_tool(
                     }
                 })
                 .await;
-                // Brief pause for focus to settle
-                tokio::time::sleep(Duration::from_millis(30)).await;
+                // Pause for focus to settle (60ms covers Electron/browser apps)
+                tokio::time::sleep(Duration::from_millis(60)).await;
             }
 
             // Type via keyboard synthesis (triggers onChange/validation in target apps)
@@ -1874,6 +1874,8 @@ async fn execute_tool(
             }
 
             let result = executor.run(&script, ScriptLanguage::AppleScript, 10).await;
+            // Invalidate PID/app cache since frontmost app changed
+            aura_screen::macos::clear_frontmost_cache();
             if result.success {
                 serde_json::json!({
                     "success": true,
@@ -1965,55 +1967,86 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
         });
     }
 
-    let all_elements = aura_screen::accessibility::get_focused_app_elements();
-    if all_elements.is_empty() {
+    // Try 1: AX press action via single-pass walk (finds the exact Nth match and presses it)
+    let ax_result =
+        aura_screen::accessibility::ax_perform_action_nth(label, role, "AXPress", index);
+    if ax_result.success {
+        let el = ax_result.element.as_ref();
         return serde_json::json!({
-            "success": false,
-            "error": "No interactive UI elements found. The app may not expose accessibility data, \
-                      or Accessibility permission may not be fully granted.",
+            "success": true,
+            "method": "ax_press",
+            "element": {
+                "role": el.map(|e| &e.role),
+                "label": el.and_then(|e| e.label.as_ref()),
+            },
         });
     }
 
-    let matches = aura_screen::accessibility::find_elements(&all_elements, label, role);
-
-    if matches.is_empty() {
-        // Include alternatives to help Gemini self-correct
-        let alternatives: Vec<String> = all_elements
-            .iter()
-            .map(|el| {
-                let label_str = el.label.as_deref().unwrap_or("(unlabeled)");
-                let role_short = el
-                    .role
-                    .strip_prefix("AX")
-                    .unwrap_or(&el.role)
-                    .to_lowercase();
-                format!("{role_short} \"{label_str}\"")
-            })
-            .take(15)
-            .collect();
-
-        return serde_json::json!({
-            "success": false,
-            "error": format!(
-                "No element matching label={:?} role={:?}. Available elements: {}",
-                label, role, alternatives.join(", ")
-            ),
-        });
-    }
-
-    let target = match matches.get(index) {
+    // AXPress failed — need bounds for coordinate fallback.
+    // Check if ax_perform_action_nth found the element but couldn't press it (has element),
+    // or if the element wasn't found at all (no element).
+    let target = match ax_result.element {
         Some(el) => el,
         None => {
-            return serde_json::json!({
-                "success": false,
-                "error": format!(
-                    "Index {} out of range. Found {} matching elements.",
-                    index,
-                    matches.len()
-                ),
-            });
+            // Element not found — do a full walk for diagnostic alternatives
+            let all_elements = aura_screen::accessibility::get_focused_app_elements();
+            if all_elements.is_empty() {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "No interactive UI elements found. The app may not expose accessibility data, \
+                              or Accessibility permission may not be fully granted.",
+                });
+            }
+
+            let matches = aura_screen::accessibility::find_elements(&all_elements, label, role);
+            if matches.is_empty() {
+                let alternatives: Vec<String> = all_elements
+                    .iter()
+                    .map(|el| {
+                        let label_str = el.label.as_deref().unwrap_or("(unlabeled)");
+                        let role_short = el
+                            .role
+                            .strip_prefix("AX")
+                            .unwrap_or(&el.role)
+                            .to_lowercase();
+                        format!("{role_short} \"{label_str}\"")
+                    })
+                    .take(15)
+                    .collect();
+
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "No element matching label={:?} role={:?}. Available elements: {}",
+                        label, role, alternatives.join(", ")
+                    ),
+                });
+            }
+
+            return match matches.get(index) {
+                Some(_target) => serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "AXPress failed on element ({}). {}",
+                        ax_result.error.unwrap_or_default(),
+                        "Element has no bounds for coordinate fallback.",
+                    ),
+                }),
+                None => serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Index {} out of range. Found {} matching elements.",
+                        index, matches.len()
+                    ),
+                }),
+            };
         }
     };
+
+    tracing::debug!(
+        error = ?ax_result.error,
+        "AXPress failed, trying PID-targeted click"
+    );
 
     let bounds = match &target.bounds {
         Some(b) => b,
@@ -2028,29 +2061,6 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
             });
         }
     };
-
-    // Try 1: AX press action (most reliable — no coordinate mapping needed)
-    // Use the resolved target's label/role, not the raw filter params,
-    // so we press the exact element (especially when index > 0).
-    let ax_result = aura_screen::accessibility::ax_perform_action(
-        target.label.as_deref(),
-        Some(&target.role),
-        "AXPress",
-    );
-    if ax_result.success {
-        return serde_json::json!({
-            "success": true,
-            "method": "ax_press",
-            "element": {
-                "role": target.role,
-                "label": target.label,
-            },
-        });
-    }
-    tracing::debug!(
-        error = ?ax_result.error,
-        "AXPress failed, trying PID-targeted click"
-    );
 
     // AX bounds are already in logical screen coordinates — no FrameDims conversion needed
     let (center_x, center_y) = bounds.center();
