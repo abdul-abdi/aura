@@ -61,8 +61,11 @@ pub fn click(x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
         click_count as i64,
     );
 
-    // Post both only after both are created
+    // Post both only after both are created.
+    // 15ms delay between down/up — macOS window server can drop events posted
+    // back-to-back with zero gap, especially on Sonoma 14+.
     down.post(CGEventTapLocation::HID);
+    std::thread::sleep(std::time::Duration::from_millis(15));
     up.post(CGEventTapLocation::HID);
 
     Ok(())
@@ -173,6 +176,7 @@ pub fn click_pid(x: f64, y: f64, button: &str, click_count: u32, pid: i32) -> Re
     );
 
     down.post_to_pid(pid);
+    std::thread::sleep(std::time::Duration::from_millis(15));
     up.post_to_pid(pid);
 
     Ok(())

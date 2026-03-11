@@ -1759,6 +1759,15 @@ async fn execute_tool(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as u32;
             let count = count.clamp(1, CLICK_COUNT_MAX);
+            // Pre-move cursor to click target so apps register hover state
+            // before receiving the click event.
+            let pre_x = x;
+            let pre_y = y;
+            run_input_blocking(
+                move || aura_input::mouse::move_mouse(pre_x, pre_y),
+                "pre_click_move",
+            )
+            .await;
             let btn = button.clone();
             run_with_pid_fallback(
                 move |pid| aura_input::mouse::click_pid(x, y, &btn, count, pid),
@@ -2113,6 +2122,12 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
 
     // AX bounds are already in logical screen coordinates — no FrameDims conversion needed
     let (center_x, center_y) = bounds.center();
+
+    // Pre-move cursor and attempt focus before coordinate-based click fallback.
+    // Some apps need hover state and/or focus to register clicks.
+    let _ = aura_input::mouse::move_mouse(center_x, center_y);
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    let _ = aura_screen::accessibility::ax_set_focused(label, role);
 
     // Try 2: PID-targeted click
     if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
