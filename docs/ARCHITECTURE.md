@@ -11,7 +11,7 @@ Aura is a voice-first AI desktop companion for macOS. It captures microphone aud
 
 The system is split into 9 Rust crates (the daemon and its libraries) and 1 SwiftUI app (the frontend). The daemon runs headless when launched by the SwiftUI app, or standalone with its own Cocoa menu bar. Communication between the SwiftUI app and the daemon uses a Unix domain socket with JSONL framing.
 
-See the full architecture diagram in [architecture.mmd](architecture.mmd).
+For a high-level overview, see the [README](../README.md).
 
 ---
 
@@ -379,7 +379,7 @@ proxy_auth_token = "your-secret-token"           # optional
 ### Requirements
 - Rust 1.85+ (edition 2024)
 - Xcode (for SwiftUI app and macOS SDK headers)
-- macOS 13+ (Ventura)
+- macOS 14+ (Sonoma)
 
 ### Commands
 ```bash

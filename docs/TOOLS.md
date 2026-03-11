@@ -1,6 +1,6 @@
 # Aura Tool Reference
 
-Aura declares 9 function tools to the Gemini Live API, plus two server-side capabilities (Google Search grounding and Code Execution). When Gemini decides to act, it calls one of these tools; the result is sent back so it can observe the outcome.
+Aura declares 12 function tools to the Gemini Live API, plus two server-side capabilities (Google Search grounding and Code Execution). When Gemini decides to act, it calls one of these tools; the result is sent back so it can observe the outcome.
 
 All tool declarations live in [`crates/aura-gemini/src/tools.rs`](../crates/aura-gemini/src/tools.rs). Handler dispatch is in [`crates/aura-daemon/src/main.rs`](../crates/aura-daemon/src/main.rs).
 
@@ -19,6 +19,9 @@ All tool declarations live in [`crates/aura-gemini/src/tools.rs`](../crates/aura
 | 7 | [press_key](#7-press_key) | Input |
 | 8 | [scroll](#8-scroll) | Input |
 | 9 | [drag](#9-drag) | Input |
+| 10 | [click_element](#10-click_element) | Smart Input |
+| 11 | [activate_app](#11-activate_app) | Smart Automation |
+| 12 | [click_menu_item](#12-click_menu_item) | Smart Automation |
 | -- | [Google Search](#google-search-grounding) | Server-side |
 | -- | [Code Execution](#code-execution) | Server-side |
 
@@ -323,6 +326,105 @@ Click and drag from one point to another. Used for moving windows, selecting tex
 
 ---
 
+## 10. `click_element`
+
+Click a UI element by its accessibility label and/or role. More reliable than clicking by coordinates — finds the element in the app's accessibility tree and clicks its exact center.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `label` | string | no | -- | Text label to match (case-insensitive substring). Matches against the element's title, description, or value. |
+| `role` | string | no | -- | Element type: `button`, `textfield`, `checkbox`, `link`, `tab`, `menuitem`, `popupbutton`, `slider`, `combobox` |
+| `index` | integer | no | `0` | If multiple elements match, click the Nth one (0-indexed). |
+
+### Example Call
+
+```json
+{
+  "name": "click_element",
+  "args": { "label": "Submit", "role": "button" }
+}
+```
+
+```json
+{
+  "name": "click_element",
+  "args": { "label": "Downloads", "index": 1 }
+}
+```
+
+### Notes
+
+- Requires **Accessibility** permission.
+- Walks the AX tree of the frontmost application to find matching elements.
+- More reliable than coordinate-based clicking, especially for standard UI controls.
+- At least one of `label` or `role` should be provided.
+
+---
+
+## 11. `activate_app`
+
+Launch an application or bring it to the front. More reliable than clicking the Dock or using Spotlight.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | yes | -- | Application name (e.g. `"Safari"`, `"Terminal"`, `"Slack"`) |
+
+### Example Call
+
+```json
+{
+  "name": "activate_app",
+  "args": { "name": "Safari" }
+}
+```
+
+### Notes
+
+- Uses `NSWorkspace` to launch or activate the application.
+- If the app is already running, it is brought to the front.
+- If the app is not running, it is launched.
+
+---
+
+## 12. `click_menu_item`
+
+Click a menu bar item by path. More reliable than clicking menus by coordinates (menus dismiss on mis-click). Supports nested submenus up to 3 levels.
+
+### Parameters
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `menu_path` | array of strings | yes | -- | Menu item path from the menu bar (e.g. `["File", "Save As..."]`) |
+| `app` | string | no | frontmost app | Target application name |
+
+### Example Call
+
+```json
+{
+  "name": "click_menu_item",
+  "args": { "menu_path": ["File", "New Window"] }
+}
+```
+
+```json
+{
+  "name": "click_menu_item",
+  "args": { "menu_path": ["View", "Developer", "JavaScript Console"], "app": "Safari" }
+}
+```
+
+### Notes
+
+- Requires **Accessibility** permission.
+- Uses AppleScript `System Events` to navigate the menu hierarchy.
+- First element in `menu_path` is the top-level menu bar item (e.g. "File"), subsequent elements are nested items.
+
+---
+
 ## Server-Side Tools
 
 These are not function calls dispatched by Aura. They are capabilities enabled in the Gemini session setup that Gemini executes on Google's servers.
@@ -343,10 +445,10 @@ All tools pass through validation before execution:
 
 | Gate | Applies To | Behavior |
 |------|-----------|----------|
-| Accessibility permission check | `move_mouse`, `click`, `type_text`, `press_key`, `scroll`, `drag` | Returns `accessibility_denied` error if not granted. Checked via `AXIsProcessTrustedWithOptions`. |
+| Accessibility permission check | `move_mouse`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `click_element`, `click_menu_item` | Returns `accessibility_denied` error if not granted. Checked via `AXIsProcessTrustedWithOptions`. |
 | Dangerous pattern blocklist | `run_applescript` | Blocks scripts containing dangerous shell commands (`rm -rf`, `sudo`, `mkfs`, etc.) or JXA escape hatches (`$.system`, `ObjC.import`, `.doScript(`). |
 | Obfuscation detection | `run_applescript` | Catches dangerous commands split across string concatenation or variable assignments. |
-| Automation permission preflight | `run_applescript` | Checks if Aura has Automation access to the target app before running the script. |
+| Automation permission preflight | `run_applescript`, `click_menu_item` | Checks if Aura has Automation access to the target app before running the script. |
 | Input clamping | `click` (`click_count`), `scroll` (`dx`, `dy`), `type_text` (`text` length) | Values are clamped to safe ranges to prevent abuse. |
 | Output truncation | `run_applescript` | stdout/stderr capped at 10,240 bytes. |
 | Timeout enforcement | `run_applescript` | Process killed via `Child::kill()` after timeout (max 60s). |

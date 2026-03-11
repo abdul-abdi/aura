@@ -6,33 +6,20 @@ Aura is a voice-first AI desktop companion for macOS. Built with Rust, Swift, an
 
 ## Prerequisites
 
-Before installing Aura, make sure you have:
-
-- **macOS 13+** (Ventura or later)
-- **Rust 1.85+** (edition 2024) -- install via [rustup](https://rustup.rs/)
-- **Xcode Command Line Tools** -- for the Swift compiler and system frameworks
-  ```bash
-  xcode-select --install
-  ```
+- **macOS 14+** (Sonoma or later)
 - **A Gemini API key** -- get one free at [Google AI Studio](https://aistudio.google.com/apikey)
 
-Verify your Rust version:
-
-```bash
-rustc --version   # must be 1.85.0 or later
-```
+To build from source, you also need:
+- **Rust 1.85+** (edition 2024) -- install via [rustup](https://rustup.rs/)
+- **Xcode Command Line Tools** -- `xcode-select --install`
 
 ---
 
 ## Installation
 
-### Option 1: One-liner
+### Option 1: Download the DMG (recommended)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/abdul-abdi/aura/main/scripts/install.sh | bash
-```
-
-This downloads, builds, and installs Aura.app into `/Applications/`.
+Download the latest release from the [Releases page](https://github.com/abdul-abdi/aura/releases/latest). Open the DMG, drag Aura to Applications, and launch it.
 
 ### Option 2: From source
 
@@ -204,6 +191,6 @@ This removes the app bundle, configuration, and application data.
 
 ## Next Steps
 
-- Read the [architecture diagram](architecture.mmd) for a visual overview of how the crates connect
-- See the project [CLAUDE.md](../CLAUDE.md) for a detailed guide to the codebase, threading model, and key files
-- Check individual crate READMEs under `crates/` for crate-specific documentation
+- Read the [Architecture](ARCHITECTURE.md) doc for a deep dive into crates, threading, and data flow
+- See the [Tools Reference](TOOLS.md) for details on all 9 tools
+- See the [Security Model](SECURITY.md) for threat model and safety mechanisms
