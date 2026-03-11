@@ -18,7 +18,9 @@
 <br/>
 
 <div align="center">
-<video src="assets/promo.mp4" width="100%" autoplay muted loop></video>
+<img src="assets/promo.gif" alt="Aura demo — voice-controlled macOS" width="100%" />
+
+[Watch full 60s video →](assets/promo.mp4)
 </div>
 
 <br/>
