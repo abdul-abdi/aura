@@ -1295,6 +1295,7 @@ async fn run_processor(
                             }
 
                             // Send tool response back to Gemini
+                            truncate_tool_response(&mut response);
                             if let Err(e) = tool_session.send_tool_response(id, name, response).await {
                                 tracing::error!("Failed to send tool response: {e}");
                             }
@@ -2231,6 +2232,54 @@ fn build_menu_click_script(app: &str, path: &[String]) -> String {
                  \tclick {chain} of menu bar 1\n\
                  end tell"
             )
+        }
+    }
+}
+
+/// Truncate a tool response to stay within context budget.
+const MAX_TOOL_RESPONSE_CHARS: usize = 8000;
+
+fn truncate_tool_response(response: &mut serde_json::Value) {
+    // For get_screen_context: trim the elements list
+    if let Some(ctx) = response.get_mut("context") {
+        if let Some(obj) = ctx.as_object_mut() {
+            if let Some(elements) = obj.get_mut("elements") {
+                if let Some(arr) = elements.as_array_mut() {
+                    if arr.len() > 30 {
+                        let original_count = arr.len();
+                        arr.truncate(30);
+                        arr.push(serde_json::json!({"truncated": true, "original_count": original_count}));
+                    }
+                    // Strip verbose bounds from non-first elements
+                    for (i, el) in arr.iter_mut().enumerate() {
+                        if i > 0 {
+                            if let Some(obj) = el.as_object_mut() {
+                                obj.remove("bounds");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // General size cap: if still too large, truncate the serialized form
+    let serialized = response.to_string();
+    if serialized.len() > MAX_TOOL_RESPONSE_CHARS {
+        if let Some(obj) = response.as_object_mut() {
+            let success = obj.get("success").cloned();
+            let verified = obj.get("verified").cloned();
+            obj.clear();
+            if let Some(s) = success {
+                obj.insert("success".to_string(), s);
+            }
+            if let Some(v) = verified {
+                obj.insert("verified".to_string(), v);
+            }
+            obj.insert(
+                "truncated".to_string(),
+                serde_json::json!(format!("Response truncated from {} chars to save context", serialized.len())),
+            );
         }
     }
 }
