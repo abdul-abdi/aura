@@ -783,9 +783,8 @@ async fn run_processor(
                 if let Ok(jpeg_bytes) = base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &frame.jpeg_base64,
-                )
-                    && let Ok(img) =
-                        image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+                ) && let Ok(img) =
+                    image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
                 {
                     let rgb = img.to_rgb8();
                     if aura_screen::capture::frame_looks_censored(
