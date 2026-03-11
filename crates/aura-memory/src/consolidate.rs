@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::store::{Message, MessageRole, SessionMemory};
+use crate::store::{Message, MessageRole};
 
 const CONSOLIDATION_MODEL: &str = "gemini-2.0-flash-lite";
 const GEMINI_REST_URL: &str =
@@ -142,48 +142,6 @@ pub async fn consolidate_session(
         .context("Failed to parse consolidation JSON from model response")?;
 
     Ok(consolidation)
-}
-
-/// Run end-of-session consolidation: fetch messages, call Gemini, store results.
-pub async fn run_end_of_session_consolidation(
-    memory: &SessionMemory,
-    session_id: &str,
-    api_key: &str,
-) -> Result<()> {
-    let messages = memory.get_messages(session_id)?;
-    let response = consolidate_session(api_key, &messages).await?;
-
-    if response.summary.is_empty() && response.facts.is_empty() {
-        tracing::debug!("No facts extracted from session {session_id}");
-        return Ok(());
-    }
-
-    // Store the session summary
-    if !response.summary.is_empty() {
-        memory.end_session(session_id, Some(&response.summary))?;
-    }
-
-    // Store extracted facts
-    for fact in &response.facts {
-        let entities_json = if fact.entities.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&fact.entities)?)
-        };
-        memory.add_fact(
-            session_id,
-            &fact.category,
-            &fact.content,
-            entities_json.as_deref(),
-            fact.importance,
-        )?;
-    }
-
-    tracing::info!(
-        "Consolidated session {session_id}: {} facts extracted",
-        response.facts.len()
-    );
-    Ok(())
 }
 
 #[cfg(test)]

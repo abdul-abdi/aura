@@ -99,13 +99,6 @@ impl SessionMemory {
                 entities TEXT,
                 importance REAL NOT NULL DEFAULT 0.5,
                 created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS consolidations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_session_ids TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                insight TEXT,
-                created_at TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn })
@@ -124,7 +117,7 @@ impl SessionMemory {
     pub fn end_session(&self, session_id: &str, summary: Option<&str>) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
-            "UPDATE sessions SET ended_at = ?1, summary = ?2 WHERE id = ?3",
+            "UPDATE sessions SET ended_at = COALESCE(ended_at, ?1), summary = COALESCE(?2, summary) WHERE id = ?3",
             params![now, summary, session_id],
         )?;
         Ok(())
@@ -542,5 +535,18 @@ mod tests {
         let results = mem.search_memory("dark mode").unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].content.contains("dark mode"));
+    }
+
+    #[test]
+    fn end_session_preserves_existing_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        let sid = mem.start_session().unwrap();
+
+        mem.end_session(&sid, Some("Important summary")).unwrap();
+        mem.end_session(&sid, None).unwrap();
+
+        let sessions = mem.list_sessions(1).unwrap();
+        assert_eq!(sessions[0].summary.as_deref(), Some("Important summary"));
     }
 }
