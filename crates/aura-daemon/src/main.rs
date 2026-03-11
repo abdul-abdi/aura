@@ -689,6 +689,7 @@ async fn run_processor(
     // Screen capture loop: 1 FPS JPEG screenshots with change detection
     let capture_trigger = CaptureTrigger::new();
     let cap_notify = Arc::new(tokio::sync::Notify::new());
+    let last_frame_hash = Arc::new(AtomicU64::new(0));
     let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
@@ -705,8 +706,8 @@ async fn run_processor(
     let cap_img_h = Arc::clone(&frame_img_h);
     let cap_logical_w = Arc::clone(&frame_logical_w);
     let cap_logical_h = Arc::clone(&frame_logical_h);
+    let cap_last_hash = Arc::clone(&last_frame_hash);
     tokio::spawn(async move {
-        let mut last_hash: u64 = 0;
         let mut last_res: (u32, u32) = (0, 0);
         let mut censored_warned = false;
         let mut interval = tokio::time::interval(Duration::from_millis(500));
@@ -737,13 +738,14 @@ async fn run_processor(
                 };
 
             // Skip if screen hasn't changed — but still resolve waiter
-            if frame.hash == last_hash {
+            let prev_hash = cap_last_hash.load(Ordering::Acquire);
+            if frame.hash == prev_hash {
                 if let Some(tx) = cap_trigger.take_waiter() {
                     let _ = tx.send(());
                 }
                 continue;
             }
-            last_hash = frame.hash;
+            cap_last_hash.store(frame.hash, Ordering::Release);
 
             // On first non-duplicate frame, log at INFO so it's visible without --verbose.
             // Also check if the frame looks censored (Screen Recording not granted).
