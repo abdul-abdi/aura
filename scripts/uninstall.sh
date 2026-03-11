@@ -18,6 +18,7 @@ echo "    • $DATA_DIR"
 echo "      (SQLite database, logs, wake word models)"
 echo "    • $CONFIG_DIR"
 echo "      (config.toml, API key)"
+echo "    • All macOS TCC permissions (Mic, Screen, Accessibility, Automation)"
 echo ""
 
 # Confirm
@@ -39,6 +40,14 @@ if pgrep -x "aura-daemon" > /dev/null 2>&1 || pgrep -f "Aura.app" > /dev/null 2>
     sleep 1
     echo "      Done."
 fi
+
+# Reset macOS TCC permissions so a reinstall requires fresh grants.
+# Both bundle IDs must be reset — the SwiftUI shell (com.aura.desktop) and
+# the Rust daemon (com.aura.daemon) each have independent TCC entries.
+echo "  ==> Resetting macOS permissions..."
+tccutil reset All com.aura.desktop 2>/dev/null || true
+tccutil reset All com.aura.daemon  2>/dev/null || true
+echo "      Done."
 
 # Remove app bundle
 if [[ -d "$APP_PATH" ]]; then
