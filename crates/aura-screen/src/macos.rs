@@ -30,7 +30,7 @@ impl MacOSScreenReader {
 /// Run a JXA (JavaScript for Automation) script via osascript.
 /// Uses the ObjC bridge for direct API access — no inter-app communication,
 /// so no Automation consent popup (unlike `tell application "System Events"`).
-fn run_jxa(script: &str) -> Option<String> {
+pub fn run_jxa(script: &str) -> Option<String> {
     let output = Command::new("osascript")
         .arg("-l")
         .arg("JavaScript")
@@ -44,6 +44,16 @@ fn run_jxa(script: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Get the process ID of the frontmost application.
+pub fn get_frontmost_pid() -> Option<i32> {
+    run_jxa(
+        "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier",
+    )?
+    .trim()
+    .parse()
+    .ok()
 }
 
 /// Get frontmost app name via NSWorkspace (no Automation permission needed).
