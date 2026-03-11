@@ -14,14 +14,10 @@ APP_NAME="Aura"
 BUNDLE_SRC="${PROJECT_DIR}/target/release/${APP_NAME}.app"
 INSTALL_DEST="/Applications/${APP_NAME}.app"
 
-# ── Step 1: Build Rust daemon ──────────────────────────────────────────────
+# ── Step 1: Build & Bundle Aura.app ──────────────────────────────────────────
+# bundle.sh handles both the Rust daemon build and SwiftUI app build internally.
 
-echo "==> Building release binary (aura-daemon)..."
-cargo build --release -p aura-daemon --manifest-path "${PROJECT_DIR}/Cargo.toml"
-
-# ── Step 2: Bundle Aura.app ────────────────────────────────────────────────
-
-echo "==> Bundling ${APP_NAME}.app..."
+echo "==> Building and bundling ${APP_NAME}.app..."
 bash "${SCRIPT_DIR}/bundle.sh"
 
 if [[ ! -d "$BUNDLE_SRC" ]]; then
