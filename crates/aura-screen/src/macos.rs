@@ -27,8 +27,13 @@ impl MacOSScreenReader {
     }
 }
 
-fn run_osascript(script: &str) -> Option<String> {
+/// Run a JXA (JavaScript for Automation) script via osascript.
+/// Uses the ObjC bridge for direct API access — no inter-app communication,
+/// so no Automation consent popup (unlike `tell application "System Events"`).
+fn run_jxa(script: &str) -> Option<String> {
     let output = Command::new("osascript")
+        .arg("-l")
+        .arg("JavaScript")
         .arg("-e")
         .arg(script)
         .output()
@@ -41,40 +46,54 @@ fn run_osascript(script: &str) -> Option<String> {
     }
 }
 
+/// Get frontmost app name via NSWorkspace (no Automation permission needed).
 fn get_frontmost_app() -> Option<String> {
-    run_osascript(
-        r#"tell application "System Events" to get name of first application process whose frontmost is true"#,
+    run_jxa(
+        "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.js",
     )
 }
 
+/// Get frontmost window title via CGWindowListCopyWindowInfo.
+/// Needs Screen Recording permission (already requested) but NOT Automation permission.
 fn get_frontmost_title() -> Option<String> {
-    run_osascript(
-        r#"tell application "System Events"
-            set frontApp to first application process whose frontmost is true
-            tell frontApp
-                if (count of windows) > 0 then
-                    return name of window 1
-                else
-                    return ""
-                end if
-            end tell
-        end tell"#,
+    run_jxa(
+        r#"ObjC.import('CoreGraphics');
+ObjC.import('Cocoa');
+var pid = $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+var list = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0));
+var title = '';
+for (var i = 0; i < list.length; i++) {
+    var w = list[i];
+    if (w.kCGWindowOwnerPID === pid && w.kCGWindowName && w.kCGWindowLayer === 0) {
+        title = w.kCGWindowName;
+        break;
+    }
+}
+title;"#,
     )
 }
 
+/// Get all visible windows via CGWindowListCopyWindowInfo.
+/// Needs Screen Recording permission (already requested) but NOT Automation permission.
 fn get_open_windows() -> Option<Vec<String>> {
-    let text = run_osascript(
-        r#"tell application "System Events"
-            set windowList to {}
-            repeat with proc in (every application process whose visible is true)
-                repeat with win in (every window of proc)
-                    set end of windowList to (name of proc) & " - " & (name of win)
-                end repeat
-            end repeat
-            set text item delimiters to linefeed
-            return windowList as text
-        end tell"#,
+    let text = run_jxa(
+        r#"ObjC.import('CoreGraphics');
+ObjC.import('Cocoa');
+var opts = $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements;
+var list = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo(opts, 0));
+var results = [];
+for (var i = 0; i < list.length; i++) {
+    var w = list[i];
+    if (w.kCGWindowLayer === 0 && w.kCGWindowOwnerName) {
+        var name = w.kCGWindowName || '';
+        if (name) results.push(w.kCGWindowOwnerName + ' - ' + name);
+    }
+}
+results.join('\n');"#,
     )?;
+    if text.is_empty() {
+        return None;
+    }
     Some(text.lines().map(String::from).collect())
 }
 

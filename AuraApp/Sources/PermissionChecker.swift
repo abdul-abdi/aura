@@ -41,17 +41,10 @@ final class PermissionChecker {
             // CGPreflightScreenCaptureAccess is a silent preflight check.
             return CGPreflightScreenCaptureAccess()
         } else {
-            // On macOS 14, CGWindowListCreateImage can implicitly trigger a TCC
-            // popup on first call. Guard: only call once per app launch, and
-            // cache the result. Subsequent checks return the cached value.
-            // The user must restart or re-check after granting in System Settings.
-            let image = CGWindowListCreateImage(
-                CGRect(x: 0, y: 0, width: 1, height: 1),
-                .optionOnScreenOnly,
-                kCGNullWindowID,
-                .bestResolution
-            )
-            return image != nil
+            // macOS 14 has no silent preflight API. CGWindowListCreateImage
+            // may trigger a TCC popup, so we avoid it entirely. Users on
+            // macOS <15 can use "Skip for now" — the daemon handles gracefully.
+            return false
         }
     }
 

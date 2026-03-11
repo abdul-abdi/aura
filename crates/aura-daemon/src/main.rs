@@ -416,8 +416,9 @@ async fn run_daemon(
 
     // Pre-check microphone permission before opening the audio device.
     // cpal/CoreAudio will implicitly trigger a TCC popup if we open the
-    // device without authorization — we want to avoid surprise popups.
-    if !check_microphone_permission() {
+    // device without authorization — skip audio capture entirely if denied.
+    let mic_granted = check_microphone_permission();
+    if !mic_granted {
         tracing::warn!("Microphone permission not granted — voice input will be unavailable");
         has_permission_error.store(true, Ordering::Release);
         if let Some(ref tx) = menubar_tx {
@@ -438,47 +439,53 @@ async fn run_daemon(
         });
     }
 
-    let _mic_available = match AudioCapture::new(None) {
-        Ok(capture) => {
-            let mic_shutdown_flag = Arc::clone(&mic_shutdown);
-            std::thread::Builder::new()
-                .name("aura-mic-capture".into())
-                .spawn(move || {
-                    let _stream = match capture.start(std_tx) {
-                        Ok(stream) => stream,
-                        Err(e) => {
-                            tracing::error!("Failed to start audio capture: {e}");
-                            return;
+    // Only attempt audio capture if mic permission is granted — opening
+    // a cpal input stream without authorization triggers a macOS TCC popup.
+    let _mic_available = if mic_granted {
+        match AudioCapture::new(None) {
+            Ok(capture) => {
+                let mic_shutdown_flag = Arc::clone(&mic_shutdown);
+                std::thread::Builder::new()
+                    .name("aura-mic-capture".into())
+                    .spawn(move || {
+                        let _stream = match capture.start(std_tx) {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                tracing::error!("Failed to start audio capture: {e}");
+                                return;
+                            }
+                        };
+                        tracing::info!("Mic capture started");
+                        while !mic_shutdown_flag.load(Ordering::Acquire) {
+                            std::thread::park_timeout(Duration::from_millis(500));
                         }
-                    };
-                    tracing::info!("Mic capture started");
-                    while !mic_shutdown_flag.load(Ordering::Acquire) {
-                        std::thread::park_timeout(Duration::from_millis(500));
-                    }
-                    tracing::info!("Mic capture stopped");
-                })?;
-            true
-        }
-        Err(e) => {
-            tracing::warn!("Mic unavailable: {e}");
-            has_permission_error.store(true, Ordering::Release);
-            if let Some(ref tx) = menubar_tx {
-                let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
-                let _ = tx
-                    .send(MenuBarMessage::SetStatus {
-                        text: "Mic access needed — check System Settings > Privacy".into(),
-                    })
-                    .await;
+                        tracing::info!("Mic capture stopped");
+                    })?;
+                true
             }
-            let _ = ipc_tx.send(DaemonEvent::DotColor {
-                color: DotColorName::Red,
-                pulsing: false,
-            });
-            let _ = ipc_tx.send(DaemonEvent::Status {
-                message: "Mic access needed — check System Settings > Privacy".into(),
-            });
-            false
+            Err(e) => {
+                tracing::warn!("Mic unavailable: {e}");
+                has_permission_error.store(true, Ordering::Release);
+                if let Some(ref tx) = menubar_tx {
+                    let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
+                    let _ = tx
+                        .send(MenuBarMessage::SetStatus {
+                            text: "Mic access needed — check System Settings > Privacy".into(),
+                        })
+                        .await;
+                }
+                let _ = ipc_tx.send(DaemonEvent::DotColor {
+                    color: DotColorName::Red,
+                    pulsing: false,
+                });
+                let _ = ipc_tx.send(DaemonEvent::Status {
+                    message: "Mic access needed — check System Settings > Privacy".into(),
+                });
+                false
+            }
         }
+    } else {
+        false
     };
 
     // Check accessibility permission (needed for input control tools)
@@ -777,7 +784,9 @@ async fn run_processor(
                     &base64::engine::general_purpose::STANDARD,
                     &frame.jpeg_base64,
                 ) {
-                    if let Ok(img) = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg) {
+                    if let Ok(img) =
+                        image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+                    {
                         let rgb = img.to_rgb8();
                         if aura_screen::capture::frame_looks_censored(
                             rgb.as_raw(),
@@ -1420,8 +1429,8 @@ fn check_microphone_permission() -> bool {
         }
         Err(e) => {
             tracing::warn!("Failed to check microphone permission: {e}");
-            // Assume granted and let cpal handle the error if not
-            true
+            // Don't assume granted — skip audio capture to avoid TCC popup
+            false
         }
     }
 }
