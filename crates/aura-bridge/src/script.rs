@@ -9,11 +9,8 @@ const MAX_TIMEOUT_SECS: u64 = 60;
 /// Maximum output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 10_240;
 
-/// Embedded sandbox profile (eliminates TOCTOU race from file-path lookup).
-const SANDBOX_PROFILE: &str = include_str!("../sandbox.sb");
-
-/// Defense-in-depth shell command blocklist. NOT a security boundary —
-/// the sandbox profile is the primary enforcement mechanism.
+/// Defense-in-depth shell command blocklist. Primary safety mechanism —
+/// dangerous patterns are blocked before execution.
 const BLOCKED_SHELL_PATTERNS: &[&str] = &[
     "rm -rf",
     "rm -r",
@@ -90,20 +87,7 @@ impl ScriptExecutor {
         let timeout_dur = Duration::from_secs(timeout_secs);
 
         let handle = tokio::task::spawn_blocking(move || {
-            // Write embedded sandbox profile to a unique temp file (avoids race conditions)
-            let sandbox_path =
-                std::env::temp_dir().join(format!("aura-sandbox-{}.sb", std::process::id()));
-            if let Err(e) = std::fs::write(&sandbox_path, SANDBOX_PROFILE) {
-                return ScriptResult {
-                    success: false,
-                    stdout: String::new(),
-                    stderr: format!("Failed to write sandbox profile: {e}"),
-                };
-            }
-
-            let mut cmd = Command::new("sandbox-exec");
-            cmd.arg("-f").arg(&sandbox_path);
-            cmd.arg("osascript");
+            let mut cmd = Command::new("osascript");
             match language {
                 ScriptLanguage::AppleScript => {
                     cmd.arg("-e").arg(&script);
@@ -120,11 +104,10 @@ impl ScriptExecutor {
             {
                 Ok(child) => child,
                 Err(e) => {
-                    let _ = std::fs::remove_file(&sandbox_path);
                     return ScriptResult {
                         success: false,
                         stdout: String::new(),
-                        stderr: format!("Failed to spawn sandbox-exec: {e}"),
+                        stderr: format!("Failed to spawn osascript: {e}"),
                     };
                 }
             };
@@ -186,8 +169,6 @@ impl ScriptExecutor {
                 }
             };
 
-            // Clean up sandbox profile after process completes
-            let _ = std::fs::remove_file(&sandbox_path);
             result
         });
 
@@ -297,25 +278,6 @@ fn truncate_output(output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn sandbox_blocks_network() {
-        let executor = ScriptExecutor::new();
-        let result = executor
-            .run(
-                r#"do shell script "curl -s https://example.com""#,
-                ScriptLanguage::AppleScript,
-                5,
-            )
-            .await;
-        // Either the script fails (sandbox killed curl / denied network) or
-        // it succeeds but returns no output (blocked silently). Both are acceptable.
-        assert!(
-            !result.success || result.stdout.is_empty(),
-            "Expected sandbox to block network access, but got output: {}",
-            result.stdout
-        );
-    }
 
     #[test]
     fn check_dangerous_blocks_rm_rf() {

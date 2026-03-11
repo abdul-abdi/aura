@@ -863,10 +863,9 @@ async fn run_processor(
                         }
                     }
                     Ok(GeminiEvent::AudioResponse { samples }) => {
-                        // Ignore audio that arrived after barge-in
-                        if is_interrupted.load(Ordering::Acquire) {
-                            continue;
-                        }
+                        // New audio from Gemini means the model is speaking again —
+                        // clear any stale interruption flag so the audio actually plays.
+                        is_interrupted.store(false, Ordering::Release);
                         is_speaking.store(true, Ordering::Release);
                         if let Some(ref p) = player
                             && let Err(e) = p.append(samples)

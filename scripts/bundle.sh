@@ -123,10 +123,26 @@ if [[ ! -f "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns" ]]; then
 fi
 
 # ── Step 6: Ad-hoc code sign (local execution without Gatekeeper warnings) ─
+# Sign each binary with a stable --identifier so macOS TCC can persist
+# permission grants (mic, screen recording) across rebuilds. Without this,
+# every ad-hoc re-sign produces a new CDHash and TCC re-prompts on launch.
 
-echo "==> Code signing (ad-hoc)..."
-codesign --force --deep --sign - "${BUNDLE_DIR}" 2>/dev/null || {
-    echo "WARNING: Code signing failed. App may trigger Gatekeeper warnings."
+echo "==> Code signing (ad-hoc, stable identifiers)..."
+# Sign the daemon first with its own stable identifier
+codesign --force --sign - --identifier com.aura.daemon \
+    "${BUNDLE_DIR}/Contents/MacOS/aura-daemon" 2>/dev/null || {
+    echo "WARNING: Code signing failed for aura-daemon."
+}
+# Sign the main app executable
+if [[ "$LEGACY" == false ]]; then
+    codesign --force --sign - --identifier com.aura.desktop \
+        "${BUNDLE_DIR}/Contents/MacOS/AuraApp" 2>/dev/null || {
+        echo "WARNING: Code signing failed for AuraApp."
+    }
+fi
+# Sign the bundle as a whole (--deep skipped: inner binaries already signed)
+codesign --force --sign - "${BUNDLE_DIR}" 2>/dev/null || {
+    echo "WARNING: Code signing failed for bundle. App may trigger Gatekeeper warnings."
 }
 
 # ── Step 7: Create .dmg installer (optional) ──────────────────────────────

@@ -177,7 +177,7 @@ impl GeminiLiveSession {
     /// After the first connection, this returns false.
     pub fn is_first_connect(&self) -> bool {
         self.is_first_connect
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -422,7 +422,7 @@ async fn connect_and_stream_inner(
     // Set after sending so the receiver sees true on first connect
     state
         .is_first_connect
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+        .store(false, std::sync::atomic::Ordering::Release);
     tracing::info!("Gemini Live session connected");
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
