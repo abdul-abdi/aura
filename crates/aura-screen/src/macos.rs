@@ -18,12 +18,17 @@ impl MacOSScreenReader {
         let open_windows = get_open_windows().unwrap_or_default();
         let clipboard = get_clipboard();
 
+        // Walk the accessibility tree for interactive UI elements.
+        // Returns empty Vec if Accessibility permission not granted or on timeout.
+        let ui_elements = crate::accessibility::get_focused_app_elements();
+
         Ok(ScreenContext::new_with_details(
             &frontmost_app,
             frontmost_title.as_deref(),
             open_windows,
             clipboard,
-        ))
+        )
+        .with_ui_elements(ui_elements))
     }
 }
 
@@ -114,5 +119,18 @@ fn get_clipboard() -> Option<String> {
         if text.is_empty() { None } else { Some(text) }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_context_returns_screen_context_with_elements_field() {
+        let reader = MacOSScreenReader::new().unwrap();
+        let ctx = reader.capture_context().unwrap();
+        // ui_elements() should exist and be callable (may be empty without permissions)
+        let _elements = ctx.ui_elements();
     }
 }
