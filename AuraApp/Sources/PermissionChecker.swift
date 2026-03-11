@@ -22,10 +22,18 @@ final class PermissionChecker {
 
     func checkAll() {
         micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        accessibilityGranted = AXIsProcessTrusted()
+        accessibilityGranted = Self.checkAccessibility()
         if #available(macOS 15, *) {
             screenGranted = CGPreflightScreenCaptureAccess()
         }
+    }
+
+    /// Check accessibility using AXIsProcessTrustedWithOptions (prompt: false).
+    /// This is less aggressively cached than the bare AXIsProcessTrusted() on
+    /// macOS Ventura+ and re-evaluates TCC state on each call.
+    private static func checkAccessibility() -> Bool {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): false] as CFDictionary
+        return AXIsProcessTrustedWithOptions(options)
     }
 
     // MARK: - Grant actions (called from "Grant" buttons)
