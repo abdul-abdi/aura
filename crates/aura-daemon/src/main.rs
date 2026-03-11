@@ -690,6 +690,7 @@ async fn run_processor(
     let capture_trigger = CaptureTrigger::new();
     let cap_notify = Arc::new(tokio::sync::Notify::new());
     let last_frame_hash = Arc::new(AtomicU64::new(0));
+    let last_sent_hash = Arc::new(AtomicU64::new(0));
     let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
@@ -707,6 +708,7 @@ async fn run_processor(
     let cap_logical_w = Arc::clone(&frame_logical_w);
     let cap_logical_h = Arc::clone(&frame_logical_h);
     let cap_last_hash = Arc::clone(&last_frame_hash);
+    let cap_last_sent = Arc::clone(&last_sent_hash);
     tokio::spawn(async move {
         let mut last_res: (u32, u32) = (0, 0);
         let mut censored_warned = false;
