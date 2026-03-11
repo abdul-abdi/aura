@@ -96,7 +96,7 @@ pub async fn consolidate_session(
 
     let prompt = build_consolidation_prompt(&filtered);
     let url = format!(
-        "{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent?key={api_key}"
+        "{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent"
     );
 
     let body = serde_json::json!({
@@ -109,9 +109,13 @@ pub async fn consolidate_session(
         }
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to build HTTP client")?;
     let resp = client
         .post(&url)
+        .header("x-goog-api-key", api_key)
         .json(&body)
         .send()
         .await
