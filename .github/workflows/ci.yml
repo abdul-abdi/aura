@@ -1,0 +1,254 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, prod]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ── Fast checks (seconds) ──────────────────────────────────────────────
+  format:
+    name: Formatting
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  lint:
+    name: Clippy
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-
+      # objc/cocoa crates emit ~30 `unexpected_cfg` warnings — upstream noise.
+      - run: cargo clippy --workspace -- -D warnings -A unexpected_cfgs
+
+  # ── Commit message lint ────────────────────────────────────────────────
+  commits:
+    name: Commit Messages
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate conventional commits
+        run: |
+          ERRORS=0
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          while IFS= read -r line; do
+            hash="${line%% *}"
+            msg="${line#* }"
+
+            # Must match: type: description  or  type(scope): description
+            if ! echo "$msg" | grep -qE '^(feat|fix|refactor|perf|test|docs|chore|ci|style|build|revert)(\(.+\))?!?: .+'; then
+              echo "::error::Bad commit message: $msg ($hash)"
+              echo "  Expected format: <type>: <description>"
+              echo "  Types: feat, fix, refactor, perf, test, docs, chore, ci, style, build, revert"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < <(git log --oneline --no-merges "${BASE}..${HEAD}")
+
+          if [[ $ERRORS -gt 0 ]]; then
+            echo ""
+            echo "::error::$ERRORS commit(s) do not follow conventional commit format"
+            exit 1
+          fi
+          echo "All commits follow conventional commit format"
+
+  # ── Tests (parallel with lint) ─────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-
+      - name: Run tests
+        run: cargo test --workspace 2>&1 | tee /tmp/test-output.txt
+      - name: Summarize results
+        if: always()
+        run: |
+          echo "## Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep '^test result:' /tmp/test-output.txt >> "$GITHUB_STEP_SUMMARY" || echo "No results found" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          PASSED=$(grep -oP '\d+ passed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
+          FAILED=$(grep -oP '\d+ failed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Total: ${PASSED} passed, ${FAILED} failed**" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Build verification ─────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: macos-15
+    needs: [format, lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-build-
+      - name: Build release binary
+        run: cargo build --release -p aura-daemon
+      - name: Bundle Aura.app
+        run: bash scripts/bundle.sh
+      - name: Verify binary
+        run: |
+          # Ensure the binary exists and is a valid Mach-O executable
+          file target/release/aura-daemon | grep -q "Mach-O"
+          echo "Binary: $(du -h target/release/aura-daemon | cut -f1)"
+
+          # Ensure the app bundle is valid
+          test -d target/release/Aura.app/Contents/MacOS/aura-daemon || \
+          test -f target/release/Aura.app/Contents/MacOS/aura-daemon
+          echo "App bundle: $(du -sh target/release/Aura.app | cut -f1)"
+      - name: Summarize build
+        run: |
+          echo "## Build Artifacts" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | Size |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| aura-daemon | $(du -h target/release/aura-daemon | cut -f1) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Aura.app | $(du -sh target/release/Aura.app | cut -f1) |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Security audit ─────────────────────────────────────────────────────
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: |
+          cargo audit 2>&1 | tee /tmp/audit-output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          echo "## Security Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/audit-output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          exit $EXIT_CODE
+
+  # ── Lockfile integrity ─────────────────────────────────────────────────
+  lockfile:
+    name: Lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify Cargo.lock is up to date
+        run: cargo check --locked 2>/dev/null || (echo "::error::Cargo.lock is out of date. Run 'cargo check' and commit the lockfile." && exit 1)
+
+  # ── PR size warning ────────────────────────────────────────────────────
+  pr-size:
+    name: PR Size
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check PR size
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$1} END {print s+0}')
+          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$1} END {print s+0}')
+          TOTAL=$((ADDITIONS + DELETIONS))
+          FILES=$(git diff --name-only "${BASE}..${HEAD}" | wc -l | tr -d ' ')
+
+          if [[ $TOTAL -gt 1000 ]]; then
+            SIZE="XL"
+            LABEL="Consider splitting this PR into smaller, focused changes."
+          elif [[ $TOTAL -gt 500 ]]; then
+            SIZE="L"
+            LABEL="Large PR — review may take longer."
+          elif [[ $TOTAL -gt 200 ]]; then
+            SIZE="M"
+            LABEL=""
+          else
+            SIZE="S"
+            LABEL=""
+          fi
+
+          echo "## PR Size: **${SIZE}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Files changed | ${FILES} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Lines changed | +${ADDITIONS} / -${DELETIONS} |" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$LABEL" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ${LABEL}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ── Gate — all required checks must pass ───────────────────────────────
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [format, lint, test, build, audit, lockfile]
+    steps:
+      - name: Check required jobs
+        run: |
+          echo "format:   ${{ needs.format.result }}"
+          echo "lint:     ${{ needs.lint.result }}"
+          echo "test:     ${{ needs.test.result }}"
+          echo "build:    ${{ needs.build.result }}"
+          echo "audit:    ${{ needs.audit.result }}"
+          echo "lockfile: ${{ needs.lockfile.result }}"
+
+          if [[ "${{ needs.format.result }}" != "success" ]] || \
+             [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.build.result }}" != "success" ]] || \
+             [[ "${{ needs.audit.result }}" != "success" ]] || \
+             [[ "${{ needs.lockfile.result }}" != "success" ]]; then
+            echo "::error::One or more required checks failed"
+            exit 1
+          fi
+          echo "All checks passed"
