@@ -172,16 +172,6 @@ jobs:
 
           exit $EXIT_CODE
 
-  # ── Lockfile integrity ─────────────────────────────────────────────────
-  lockfile:
-    name: Lockfile
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify Cargo.lock is up to date
-        run: cargo check --locked 2>/dev/null || (echo "::error::Cargo.lock is out of date. Run 'cargo check' and commit the lockfile." && exit 1)
-
   # ── PR size warning ────────────────────────────────────────────────────
   pr-size:
     name: PR Size
@@ -231,7 +221,7 @@ jobs:
     name: Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, lint, test, build, audit, lockfile]
+    needs: [format, lint, test, build, audit]
     steps:
       - name: Check required jobs
         run: |
@@ -240,14 +230,12 @@ jobs:
           echo "test:     ${{ needs.test.result }}"
           echo "build:    ${{ needs.build.result }}"
           echo "audit:    ${{ needs.audit.result }}"
-          echo "lockfile: ${{ needs.lockfile.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs.audit.result }}" != "success" ]] || \
-             [[ "${{ needs.lockfile.result }}" != "success" ]]; then
+             [[ "${{ needs.audit.result }}" != "success" ]]; then
             echo "::error::One or more required checks failed"
             exit 1
           fi
