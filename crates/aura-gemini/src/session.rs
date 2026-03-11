@@ -456,8 +456,17 @@ async fn connect_and_stream_inner(
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
     // Send setup message
-    let resumption_handle = state.resumption_handle.lock().await.clone();
-    let setup = build_setup_message(&state.config, resumption_handle);
+    // Always start fresh — don't restore previous context.
+    // Session resumption preserves all accumulated screenshots/tool responses,
+    // causing context to snowball and sessions to die faster on each reconnect.
+    {
+        let mut handle = state.resumption_handle.lock().await;
+        if handle.is_some() {
+            tracing::info!("Clearing resumption handle for fresh session (context overload prevention)");
+            *handle = None;
+        }
+    }
+    let setup = build_setup_message(&state.config, None);
     let setup_json = serde_json::to_string(&setup)?;
     tracing::debug!("Sending setup message (system prompt and tool declarations redacted)");
     ws_sink.send(Message::Text(setup_json)).await?;
@@ -730,7 +739,9 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
                 handle: resumption_handle,
             }),
             context_window_compression: Some(ContextWindowCompression {
-                sliding_window: SlidingWindow {},
+                sliding_window: SlidingWindow {
+                    target_tokens: Some(500_000),
+                },
             }),
         },
     }

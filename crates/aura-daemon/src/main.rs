@@ -690,6 +690,7 @@ async fn run_processor(
     let capture_trigger = CaptureTrigger::new();
     let cap_notify = Arc::new(tokio::sync::Notify::new());
     let last_frame_hash = Arc::new(AtomicU64::new(0));
+    let last_sent_hash = Arc::new(AtomicU64::new(0));
     let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
@@ -707,9 +708,12 @@ async fn run_processor(
     let cap_logical_w = Arc::clone(&frame_logical_w);
     let cap_logical_h = Arc::clone(&frame_logical_h);
     let cap_last_hash = Arc::clone(&last_frame_hash);
+    let cap_last_sent = Arc::clone(&last_sent_hash);
     tokio::spawn(async move {
         let mut last_res: (u32, u32) = (0, 0);
         let mut censored_warned = false;
+        let mut idle_skip_count: u32 = 0;
+        const IDLE_THRESHOLD: u32 = 10; // 10 × 500ms = 5s of no change → slow down
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.tick().await; // skip first immediate tick
 
@@ -742,6 +746,12 @@ async fn run_processor(
             if frame.hash == prev_hash {
                 if let Some(tx) = cap_trigger.take_waiter() {
                     let _ = tx.send(());
+                }
+                idle_skip_count += 1;
+                if idle_skip_count == IDLE_THRESHOLD {
+                    interval = tokio::time::interval(Duration::from_millis(2000));
+                    interval.tick().await;
+                    tracing::debug!("Screen idle for 5s — switching to 2s capture interval");
                 }
                 continue;
             }
@@ -802,17 +812,43 @@ async fn run_processor(
                 }
             }
 
-            // Send to Gemini — never break on failure; a full channel just means
-            // the WebSocket isn't ready yet (pre-setupComplete) or is momentarily
-            // saturated. Drop the frame and continue capturing.
+            // Only send to Gemini if the screen actually changed since last send.
+            // This is the #1 context savings: static screens produce zero token cost.
+            let already_sent = cap_last_sent.load(Ordering::Acquire);
+            if frame.hash == already_sent {
+                // Frame captured (hash differs from last_frame_hash) but already sent
+                // to Gemini — skip. Still resolve waiter so tool spawns don't hang.
+                if let Some(tx) = cap_trigger.take_waiter() {
+                    let _ = tx.send(());
+                }
+                idle_skip_count += 1;
+                if idle_skip_count == IDLE_THRESHOLD {
+                    // Screen static for 5s — switch to slow polling (2s)
+                    interval = tokio::time::interval(Duration::from_millis(2000));
+                    interval.tick().await;
+                    tracing::debug!("Screen idle for 5s — switching to 2s capture interval");
+                }
+                tracing::trace!("Skipped duplicate send (hash unchanged since last send)");
+                continue;
+            }
+
             if let Err(e) = cap_session.send_video(&frame.jpeg_base64) {
                 tracing::debug!("Dropped screen frame (channel not ready): {e}");
-                // Still resolve waiter so tool spawn doesn't hang on timeout
                 if let Some(tx) = cap_trigger.take_waiter() {
                     let _ = tx.send(());
                 }
                 continue;
             }
+            cap_last_sent.store(frame.hash, Ordering::Release);
+
+            // Screen changed — reset idle counter and restore fast polling
+            if idle_skip_count >= IDLE_THRESHOLD {
+                interval = tokio::time::interval(Duration::from_millis(500));
+                interval.tick().await;
+                tracing::debug!("Screen changed — restoring 500ms capture interval");
+            }
+            idle_skip_count = 0;
+
             // Signal any awaiting tool spawn that the screenshot was delivered
             if let Some(tx) = cap_trigger.take_waiter() {
                 let _ = tx.send(());
@@ -1265,6 +1301,7 @@ async fn run_processor(
                             }
 
                             // Send tool response back to Gemini
+                            truncate_tool_response(&mut response);
                             if let Err(e) = tool_session.send_tool_response(id, name, response).await {
                                 tracing::error!("Failed to send tool response: {e}");
                             }
@@ -2202,6 +2239,50 @@ fn build_menu_click_script(app: &str, path: &[String]) -> String {
                  end tell"
             )
         }
+    }
+}
+
+/// Truncate a tool response to stay within context budget.
+const MAX_TOOL_RESPONSE_CHARS: usize = 8000;
+
+fn truncate_tool_response(response: &mut serde_json::Value) {
+    // For get_screen_context: trim the elements list
+    if let Some(arr) = response
+        .get_mut("context")
+        .and_then(|c| c.get_mut("elements"))
+        .and_then(|e| e.as_array_mut())
+    {
+        if arr.len() > 30 {
+            let original_count = arr.len();
+            arr.truncate(30);
+            arr.push(serde_json::json!({"truncated": true, "original_count": original_count}));
+        }
+        // Strip verbose bounds from non-first elements
+        for el in arr.iter_mut().skip(1) {
+            if let Some(obj) = el.as_object_mut() {
+                obj.remove("bounds");
+            }
+        }
+    }
+
+    // General size cap: if still too large, keep only essential fields
+    let serialized_len = response.to_string().len();
+    if serialized_len > MAX_TOOL_RESPONSE_CHARS
+        && let Some(obj) = response.as_object_mut()
+    {
+        let success = obj.get("success").cloned();
+        let verified = obj.get("verified").cloned();
+        obj.clear();
+        if let Some(s) = success {
+            obj.insert("success".to_string(), s);
+        }
+        if let Some(v) = verified {
+            obj.insert("verified".to_string(), v);
+        }
+        obj.insert(
+            "truncated".to_string(),
+            serde_json::json!(format!("Response truncated from {serialized_len} chars to save context")),
+        );
     }
 }
 
