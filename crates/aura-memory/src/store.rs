@@ -51,6 +51,17 @@ pub struct Message {
     pub metadata: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct Fact {
+    pub id: i64,
+    pub session_id: String,
+    pub category: String,
+    pub content: String,
+    pub entities: Option<String>,
+    pub importance: f64,
+    pub created_at: String,
+}
+
 pub struct SessionMemory {
     conn: Connection,
 }
@@ -79,6 +90,22 @@ impl SessionMemory {
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                entities TEXT,
+                importance REAL NOT NULL DEFAULT 0.5,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS consolidations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_session_ids TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                insight TEXT,
+                created_at TEXT NOT NULL
             );",
         )?;
         Ok(Self { conn })
@@ -288,6 +315,93 @@ impl SessionMemory {
         Ok(())
     }
 
+    pub fn add_fact(
+        &self,
+        session_id: &str,
+        category: &str,
+        content: &str,
+        entities: Option<&str>,
+        importance: f64,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO facts (session_id, category, content, entities, importance, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session_id, category, content, entities, importance, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<Fact>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, category, content, entities, importance, created_at
+             FROM facts WHERE session_id = ?1 ORDER BY id ASC",
+        )?;
+        let facts = stmt
+            .query_map(params![session_id], |row| {
+                Ok(Fact {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    category: row.get(2)?,
+                    content: row.get(3)?,
+                    entities: row.get(4)?,
+                    importance: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(facts)
+    }
+
+    pub fn search_memory(&self, query: &str) -> Result<Vec<Fact>> {
+        let pattern = format!("%{query}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, category, content, entities, importance, created_at
+             FROM facts
+             WHERE content LIKE ?1 OR entities LIKE ?1
+             ORDER BY importance DESC, created_at DESC
+             LIMIT 10",
+        )?;
+        let facts = stmt
+            .query_map(params![pattern], |row| {
+                Ok(Fact {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    category: row.get(2)?,
+                    content: row.get(3)?,
+                    entities: row.get(4)?,
+                    importance: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(facts)
+    }
+
+    pub fn search_memory_with_sessions(&self, query: &str) -> Result<serde_json::Value> {
+        let facts = self.search_memory(query)?;
+        let pattern = format!("%{query}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, ended_at, summary FROM sessions
+             WHERE summary LIKE ?1
+             ORDER BY started_at DESC LIMIT 5",
+        )?;
+        let sessions = stmt
+            .query_map(params![pattern], |row| {
+                Ok(Session {
+                    id: row.get(0)?,
+                    started_at: row.get(1)?,
+                    ended_at: row.get(2)?,
+                    summary: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(serde_json::json!({
+            "facts": facts,
+            "sessions": sessions,
+        }))
+    }
+
     /// Query a PRAGMA value. Useful for inspecting database configuration.
     #[cfg(test)]
     pub(crate) fn pragma_query_value<T: rusqlite::types::FromSql>(
@@ -380,5 +494,53 @@ mod tests {
 
         let summary = mem.get_recent_summary(3).unwrap();
         assert!(summary.is_empty());
+    }
+
+    #[test]
+    fn facts_table_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        let sid = mem.start_session().unwrap();
+        mem.add_fact(
+            &sid,
+            "preference",
+            "User prefers dark mode",
+            Some(r#"["dark mode"]"#),
+            0.8,
+        )
+        .unwrap();
+        let facts = mem.get_facts_for_session(&sid).unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].category, "preference");
+        assert_eq!(facts[0].content, "User prefers dark mode");
+        assert!((facts[0].importance - 0.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn search_facts_by_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
+        let sid = mem.start_session().unwrap();
+        mem.add_fact(
+            &sid,
+            "preference",
+            "User prefers dark mode in VS Code",
+            Some(r#"["VS Code","dark mode"]"#),
+            0.8,
+        )
+        .unwrap();
+        mem.add_fact(
+            &sid,
+            "entity",
+            "User edited report.pdf in Pages",
+            Some(r#"["report.pdf","Pages"]"#),
+            0.6,
+        )
+        .unwrap();
+        mem.end_session(&sid, Some("Edited documents")).unwrap();
+
+        let results = mem.search_memory("dark mode").unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("dark mode"));
     }
 }

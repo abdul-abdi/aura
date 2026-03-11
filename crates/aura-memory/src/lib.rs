@@ -1,3 +1,3 @@
 pub mod store;
 
-pub use store::{Message, MessageRole, Session, SessionMemory};
+pub use store::{Fact, Message, MessageRole, Session, SessionMemory};
