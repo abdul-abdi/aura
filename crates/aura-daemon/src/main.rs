@@ -354,7 +354,8 @@ async fn run_daemon(
     let resumption_handle: Option<String> =
         memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
             .await
-            .flatten();
+            .flatten()
+            .filter(|h| !h.is_empty());
     if resumption_handle.is_some() {
         tracing::info!("Loaded persisted resumption handle for session continuity");
     }
@@ -391,6 +392,30 @@ async fn run_daemon(
         .as_ref()
         .map(|p| p.playing_arc())
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+    // Pre-check microphone permission before opening the audio device.
+    // cpal/CoreAudio will implicitly trigger a TCC popup if we open the
+    // device without authorization — we want to avoid surprise popups.
+    if !check_microphone_permission() {
+        tracing::warn!("Microphone permission not granted — voice input will be unavailable");
+        has_permission_error.store(true, Ordering::Release);
+        if let Some(ref tx) = menubar_tx {
+            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
+            let _ = tx
+                .send(MenuBarMessage::SetStatus {
+                    text: "Mic access needed — grant in System Settings > Privacy > Microphone"
+                        .into(),
+                })
+                .await;
+        }
+        let _ = ipc_tx.send(DaemonEvent::DotColor {
+            color: DotColorName::Red,
+            pulsing: false,
+        });
+        let _ = ipc_tx.send(DaemonEvent::Status {
+            message: "Mic access needed — grant in System Settings > Privacy > Microphone".into(),
+        });
+    }
 
     let _mic_available = match AudioCapture::new(None) {
         Ok(capture) => {
@@ -611,7 +636,7 @@ async fn run_daemon(
                     }
                     UICommand::SendText { text } => {
                         tracing::info!(len = text.len(), "Text input via IPC");
-                        if let Err(e) = ipc_session.send_text(&text).await {
+                        if let Err(e) = ipc_session.send_text(&text) {
                             tracing::warn!("Failed to send IPC text to Gemini: {e}");
                         }
                     }
@@ -732,15 +757,17 @@ async fn run_processor(
                      Do NOT mention this message to the user.]",
                     frame.width, frame.height, frame.width, frame.height
                 );
-                if let Err(e) = cap_session.send_text(&coord_meta).await {
-                    tracing::warn!("Failed to send frame metadata: {e}");
+                if let Err(e) = cap_session.send_text(&coord_meta) {
+                    tracing::debug!("Skipped frame metadata (channel not ready): {e}");
                 }
             }
 
-            // Send to Gemini
-            if let Err(e) = cap_session.send_video(&frame.jpeg_base64).await {
-                tracing::warn!("Failed to send screen frame: {e}");
-                break;
+            // Send to Gemini — never break on failure; a full channel just means
+            // the WebSocket isn't ready yet (pre-setupComplete) or is momentarily
+            // saturated. Drop the frame and continue capturing.
+            if let Err(e) = cap_session.send_video(&frame.jpeg_base64) {
+                tracing::debug!("Dropped screen frame (channel not ready): {e}");
+                continue;
             }
             tracing::debug!(
                 width = frame.width,
@@ -836,7 +863,7 @@ async fn run_processor(
                             })
                             .await;
 
-                            if let Err(e) = session.send_text(&context_msg).await {
+                            if let Err(e) = session.send_text(&context_msg) {
                                 tracing::warn!("Failed to send greeting context to Gemini: {e}");
                             }
                         } else {
@@ -848,7 +875,7 @@ async fn run_processor(
                             );
                             tracing::info!("Reconnection — sending context restoration");
 
-                            if let Err(e) = session.send_text(&context_msg).await {
+                            if let Err(e) = session.send_text(&context_msg) {
                                 tracing::warn!("Failed to send reconnection context: {e}");
                             }
                         }
@@ -1195,11 +1222,18 @@ async fn run_processor(
                         break;
                     }
                     Ok(GeminiEvent::SessionHandle { handle }) => {
-                        let prefix_len = handle.len().min(12);
-                        tracing::debug!(handle_prefix = &handle[..prefix_len], "Received session resumption handle, persisting");
-                        memory_op(&memory, move |mem| {
-                            mem.set_setting("resumption_handle", &handle)
-                        }).await;
+                        if handle.is_empty() {
+                            tracing::info!("Clearing stale resumption handle from storage");
+                            memory_op(&memory, move |mem| {
+                                mem.delete_setting("resumption_handle")
+                            }).await;
+                        } else {
+                            let prefix_len = handle.len().min(12);
+                            tracing::debug!(handle_prefix = &handle[..prefix_len], "Received session resumption handle, persisting");
+                            memory_op(&memory, move |mem| {
+                                mem.set_setting("resumption_handle", &handle)
+                            }).await;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "Event bus receiver lagged — events were dropped");
@@ -1292,9 +1326,9 @@ fn show_error_dialog(message: &str) {
 }
 
 /// Check Screen Recording permission at startup and warn if not granted.
+/// Uses CGPreflightScreenCaptureAccess — a silent read-only check that never
+/// triggers a macOS popup dialog.
 fn check_screen_recording_permission() {
-    // CGPreflightScreenCaptureAccess returns true if permission is granted.
-    // It does NOT prompt the user — we only check and warn, never request.
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
@@ -1305,6 +1339,33 @@ fn check_screen_recording_permission() {
         tracing::warn!(
             "Screen Recording permission denied. Screen capture will return blank frames."
         );
+    }
+}
+
+/// Check Microphone permission at startup. Returns true if authorized.
+/// Uses AVFoundation's authorization status query — a silent read-only check
+/// that never triggers a macOS popup dialog. The actual system prompt (if
+/// needed) is triggered by the SwiftUI PermissionsView before the daemon starts.
+fn check_microphone_permission() -> bool {
+    // Run `osascript` to query AVCaptureDevice authorization status via a tiny
+    // JXA snippet. This avoids linking AVFoundation from the Rust binary.
+    // Returns "authorized" if mic is granted.
+    let output = std::process::Command::new("osascript")
+        .arg("-l")
+        .arg("JavaScript")
+        .arg("-e")
+        .arg("ObjC.import('AVFoundation'); $.AVCaptureDevice.authorizationStatusForMediaType($.AVMediaTypeAudio) === 3 ? 'authorized' : 'denied'")
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.trim() == "authorized"
+        }
+        Err(e) => {
+            tracing::warn!("Failed to check microphone permission: {e}");
+            // Assume granted and let cpal handle the error if not
+            true
+        }
     }
 }
 

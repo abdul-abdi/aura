@@ -14,7 +14,6 @@ const MAX_OUTPUT_BYTES: usize = 10_240;
 const BLOCKED_SHELL_PATTERNS: &[&str] = &[
     "rm -rf",
     "rm -r",
-    "rmdir",
     "sudo",
     "mkfs",
     "dd if=",
@@ -23,17 +22,10 @@ const BLOCKED_SHELL_PATTERNS: &[&str] = &[
     "> /dev/sd",
     "unlink ",
     "diskutil erase",
-    "launchctl unload",
-    "defaults delete",
 ];
 
 /// Blocked JXA-specific patterns (checked case-insensitively).
-const BLOCKED_JXA_PATTERNS: &[&str] = &[
-    "$.system",
-    "objc.import",
-    "application(\"terminal\")",
-    ".doscript(",
-];
+const BLOCKED_JXA_PATTERNS: &[&str] = &["$.system", "objc.import", ".doscript("];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -306,8 +298,29 @@ mod tests {
     }
 
     #[test]
-    fn check_dangerous_blocks_jxa_terminal() {
+    fn check_dangerous_blocks_jxa_doscript() {
+        // The dangerous method .doScript( is blocked regardless of app reference
         assert!(check_dangerous("Application(\"Terminal\").doScript(\"ls\")").is_some());
+        assert!(check_dangerous("Application(\"Finder\").doScript(\"rm -rf /\")").is_some());
+    }
+
+    #[test]
+    fn check_dangerous_allows_terminal_reference_without_doscript() {
+        // Referencing Terminal app without invoking doScript is legitimate
+        assert!(check_dangerous("Application(\"Terminal\").activate()").is_none());
+        assert!(check_dangerous("tell application \"Terminal\" to activate").is_none());
+    }
+
+    #[test]
+    fn check_dangerous_allows_defaults_and_launchctl() {
+        // defaults delete and launchctl unload are legitimate automation tasks
+        assert!(check_dangerous("do shell script \"defaults delete com.apple.dock\"").is_none());
+        assert!(
+            check_dangerous(
+                "do shell script \"launchctl unload ~/Library/LaunchAgents/com.example.plist\""
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -320,16 +333,6 @@ mod tests {
     #[test]
     fn check_dangerous_blocks_diskutil_erase() {
         assert!(check_dangerous("diskutil erase disk0").is_some());
-    }
-
-    #[test]
-    fn check_dangerous_blocks_launchctl_unload() {
-        assert!(check_dangerous("launchctl unload /Library/LaunchDaemons/foo.plist").is_some());
-    }
-
-    #[test]
-    fn check_dangerous_blocks_defaults_delete() {
-        assert!(check_dangerous("defaults delete com.apple.dock").is_some());
     }
 
     #[test]

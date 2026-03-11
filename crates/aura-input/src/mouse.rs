@@ -73,10 +73,10 @@ pub fn scroll(dx: i32, dy: i32) -> Result<()> {
     let event = CGEvent::new_scroll_event(
         source,
         ScrollEventUnit::PIXEL,
-        2,  // wheel_count
-        dy, // wheel1 (vertical)
-        dx, // wheel2 (horizontal)
-        0,  // wheel3
+        2,   // wheel_count
+        -dy, // wheel1 (vertical) — negate: Gemini sends +dy=down, CG expects +wheel1=up
+        dx,  // wheel2 (horizontal)
+        0,   // wheel3
     )
     .map_err(|_| anyhow::anyhow!("Failed to create scroll event"))?;
     event.post(CGEventTapLocation::HID);

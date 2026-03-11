@@ -135,15 +135,36 @@ if [[ -n "$AUTH_TOKEN" ]]; then
     )
 fi
 
-# ── Build and deploy via Cloud Build ─────────────────────────────────────────
-# `--source .` uploads the repo root as the build context.
-# Cloud Build locates the Dockerfile via --dockerfile (relative to context).
+# ── Build image via Cloud Build ──────────────────────────────────────────────
+# gcloud run deploy --source no longer supports --dockerfile, so we build
+# the image separately and deploy it by tag.
+IMAGE="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+
+echo "==> Building image via Cloud Build..."
+
+# Create a temporary cloudbuild.yaml that references the Dockerfile at its
+# non-root path. gcloud builds submit --tag only supports root Dockerfiles.
+BUILD_CONFIG=$(mktemp)
+cat > "$BUILD_CONFIG" <<YAML
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '$IMAGE', '-f', '$DOCKERFILE', '.']
+images: ['$IMAGE']
+YAML
+
+gcloud builds submit . \
+    --config "$BUILD_CONFIG" \
+    --project "$PROJECT_ID" \
+    --quiet
+
+rm -f "$BUILD_CONFIG"
+
+# ── Deploy to Cloud Run ─────────────────────────────────────────────────────
 # `--timeout 3600` sets the Cloud Run *request* timeout to 1 h — required for
 # long-lived WebSocket connections (Gemini sessions can run many minutes).
-echo "==> Building image via Cloud Build and deploying to Cloud Run..."
+echo "==> Deploying to Cloud Run..."
 gcloud run deploy "$SERVICE_NAME" \
-    --source . \
-    --dockerfile "$DOCKERFILE" \
+    --image "$IMAGE" \
     --project "$PROJECT_ID" \
     --region "$REGION" \
     --platform managed \
@@ -170,7 +191,7 @@ if [[ -z "$PROXY_URL" ]]; then
 fi
 
 # Cloud Run returns an https:// URL; the Aura client expects wss://.
-WS_URL="${PROXY_URL/https:\/\//wss:\/\/}/ws"
+WS_URL="wss://${PROXY_URL#https://}/ws"
 
 echo ""
 echo "==> Deployment complete!"

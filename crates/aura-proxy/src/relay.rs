@@ -20,26 +20,29 @@ fn redact_url(url: &str) -> String {
 }
 
 /// Relay WebSocket frames between client and Gemini.
-pub async fn relay_websocket(client_ws: WebSocket, gemini_url: String) {
+pub async fn relay_websocket(mut client_ws: WebSocket, gemini_url: String) {
     let ws_config = WebSocketConfig {
         max_message_size: Some(WS_MAX_SIZE),
         max_frame_size: Some(WS_MAX_SIZE),
         ..Default::default()
     };
 
+    // disable_nagle=true for lower latency on real-time audio relay
     let gemini_conn = match tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        tokio_tungstenite::connect_async_with_config(&gemini_url, Some(ws_config), false),
+        tokio_tungstenite::connect_async_with_config(&gemini_url, Some(ws_config), true),
     )
     .await
     {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => {
             tracing::error!(url = %redact_url(&gemini_url), "Failed to connect to Gemini: {e}");
+            let _ = client_ws.close().await;
             return;
         }
         Err(_) => {
             tracing::error!(url = %redact_url(&gemini_url), "Timed out connecting to Gemini");
+            let _ = client_ws.close().await;
             return;
         }
     };

@@ -8,6 +8,8 @@
     <string>aura-daemon</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Aura uses the microphone to hear your voice and respond naturally.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Aura uses screen capture to understand what's on your screen when asked for help.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Aura uses AppleScript to automate macOS tasks on your behalf.</string>
 </dict>

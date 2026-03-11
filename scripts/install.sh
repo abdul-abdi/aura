@@ -97,6 +97,8 @@ cat > "${BUNDLE}/Contents/Info.plist" << 'PLIST'
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Aura needs microphone access for voice interaction with your AI assistant.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Aura uses screen capture to understand what's on your screen when asked for help.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Aura uses AppleScript to automate macOS tasks on your behalf.</string>
     <key>LSMinimumSystemVersion</key>

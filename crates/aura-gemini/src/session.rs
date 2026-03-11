@@ -132,19 +132,37 @@ impl GeminiLiveSession {
     }
 
     /// Send a JPEG screenshot frame to Gemini.
-    pub async fn send_video(&self, jpeg_base64: &str) -> Result<()> {
-        self.video_tx
-            .send(jpeg_base64.to_string())
-            .await
-            .map_err(|_| anyhow::anyhow!("Session closed"))
+    ///
+    /// Uses `try_send` so this never blocks. Returns `Err` only when the session
+    /// is closed (receiver dropped); a full channel is treated as a dropped frame
+    /// (non-fatal) and the caller should `continue` rather than `break`.
+    pub fn send_video(&self, jpeg_base64: &str) -> Result<()> {
+        match self.video_tx.try_send(jpeg_base64.to_string()) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err(anyhow::anyhow!("Video channel full — frame dropped"))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("Session closed"))
+            }
+        }
     }
 
     /// Send a text message to Gemini.
-    pub async fn send_text(&self, text: &str) -> Result<()> {
-        self.text_tx
-            .send(text.to_string())
-            .await
-            .map_err(|_| anyhow::anyhow!("Session closed"))
+    ///
+    /// Uses `try_send` so this never blocks. Returns `Err` only when the session
+    /// is closed (receiver dropped); a full channel is treated as a skipped send
+    /// (non-fatal) and the caller should `continue` rather than `break`.
+    pub fn send_text(&self, text: &str) -> Result<()> {
+        match self.text_tx.try_send(text.to_string()) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Err(anyhow::anyhow!("Text channel full — message dropped"))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("Session closed"))
+            }
+        }
     }
 
     /// Send a tool/function response back to Gemini.
@@ -404,6 +422,22 @@ async fn connect_and_stream_inner(
             Message::Text(text) => Some(text),
             Message::Binary(bytes) => String::from_utf8(bytes).ok(),
             Message::Close(frame) => {
+                // Check if server rejected a stale resumption handle
+                let reason = frame
+                    .as_ref()
+                    .map(|f| f.reason.as_ref())
+                    .unwrap_or_default();
+                if reason.contains("session not found")
+                    || reason.contains("Session not found")
+                    || reason.contains("SESSION_NOT_FOUND")
+                {
+                    tracing::warn!("Stale resumption handle rejected, clearing for fresh session");
+                    *state.resumption_handle.lock().await = None;
+                    // Emit event so daemon can clear it from SQLite too
+                    let _ = event_tx.send(GeminiEvent::SessionHandle {
+                        handle: String::new(),
+                    });
+                }
                 anyhow::bail!("Server closed connection during setup: {frame:?}");
             }
             _ => None,

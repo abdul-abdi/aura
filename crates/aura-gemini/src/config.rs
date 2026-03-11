@@ -127,8 +127,20 @@ fn read_config_file_proxy_url() -> Option<String> {
 }
 
 fn read_config_value(key: &str) -> Option<String> {
-    let path = dirs::config_dir()?.join("aura/config.toml");
-    read_config_value_from_path(&path, key)
+    // Check platform config dir first (~/Library/Application Support/aura/ on macOS)
+    if let Some(path) = dirs::config_dir().map(|d| d.join("aura/config.toml")) {
+        if let Some(val) = read_config_value_from_path(&path, key) {
+            return Some(val);
+        }
+    }
+    // Fallback to ~/.config/aura/ (where WelcomeView.swift saves on macOS)
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".config/aura/config.toml");
+        if let Some(val) = read_config_value_from_path(&path, key) {
+            return Some(val);
+        }
+    }
+    None
 }
 
 fn read_config_value_from_path(path: &std::path::Path, key: &str) -> Option<String> {

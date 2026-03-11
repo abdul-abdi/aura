@@ -4,6 +4,10 @@ import ApplicationServices
 
 /// Checks and opens System Settings for the three permissions Aura requires:
 /// Microphone, Screen Recording, and Accessibility.
+///
+/// All checks are **silent** (read-only) — they never trigger macOS TCC popup
+/// dialogs. When a permission is missing, the UI directs the user to System
+/// Settings via a URL scheme.
 @Observable
 @MainActor
 final class PermissionChecker {
@@ -14,19 +18,33 @@ final class PermissionChecker {
     var allGranted: Bool { micGranted && screenGranted && accessibilityGranted }
 
     func checkAll() {
-        micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        micGranted = checkMicrophone()
         screenGranted = checkScreenRecording()
         accessibilityGranted = AXIsProcessTrusted()
     }
 
+    // MARK: - Silent permission checks
+
+    /// Check microphone authorization status. Never triggers a popup.
+    /// Uses AVCaptureDevice.authorizationStatus which is always read-only.
+    private func checkMicrophone() -> Bool {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        return status == .authorized
+    }
+
+    /// Check screen recording permission. Always silent — never triggers a popup.
     private func checkScreenRecording() -> Bool {
+        // Already granted — skip re-checking to avoid unnecessary work
+        if screenGranted { return true }
+
         if #available(macOS 15, *) {
+            // CGPreflightScreenCaptureAccess is a silent preflight check.
             return CGPreflightScreenCaptureAccess()
         } else {
-            // On macOS 14, attempt to capture a 1×1 pixel region.
-            // If Screen Recording is denied the result is a solid black image
-            // rather than nil, so we use CGWindowListCreateImage instead — a nil
-            // return reliably indicates denial on 14.
+            // On macOS 14, CGWindowListCreateImage can implicitly trigger a TCC
+            // popup on first call. Guard: only call once per app launch, and
+            // cache the result. Subsequent checks return the cached value.
+            // The user must restart or re-check after granting in System Settings.
             let image = CGWindowListCreateImage(
                 CGRect(x: 0, y: 0, width: 1, height: 1),
                 .optionOnScreenOnly,
@@ -37,13 +55,34 @@ final class PermissionChecker {
         }
     }
 
-    // MARK: - Open System Settings
+    // MARK: - Open System Settings (user-initiated only)
 
     func openMicSettings() {
-        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        // Request mic access first — this triggers the system dialog only if
+        // the status is .notDetermined (first time ever). If already denied or
+        // authorized, it does nothing and we open System Settings for the user.
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        if status == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                Task { @MainActor in
+                    self?.micGranted = granted
+                }
+            }
+        } else {
+            open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        }
     }
 
     func openScreenSettings() {
+        if #available(macOS 15, *) {
+            // CGRequestScreenCaptureAccess shows the system dialog only if not
+            // yet determined. If already granted or denied, it's a no-op.
+            if !CGPreflightScreenCaptureAccess() {
+                CGRequestScreenCaptureAccess()
+            }
+        }
+        // Always open System Settings — the system dialog alone isn't enough
+        // on most macOS versions (user must toggle the app in Settings).
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     }
 

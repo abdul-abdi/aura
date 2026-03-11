@@ -11,8 +11,7 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-const GEMINI_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/\
-    google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const GEMINI_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 /// Max WebSocket message/frame size: 1 MiB.
 const WS_MAX_SIZE: usize = 1_048_576;

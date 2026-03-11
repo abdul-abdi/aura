@@ -128,6 +128,25 @@ pub fn keycode_from_name(name: &str) -> Option<CGKeyCode> {
         "7" => Some(26),
         "8" => Some(28),
         "9" => Some(25),
+        // Navigation keys
+        "home" => Some(115),
+        "end" => Some(119),
+        "pageup" | "page_up" => Some(116),
+        "pagedown" | "page_down" => Some(121),
+        "forwarddelete" | "forward_delete" => Some(117),
+        "capslock" | "caps_lock" => Some(57),
+        // Punctuation (US keyboard layout)
+        "-" | "minus" => Some(27),
+        "=" | "equals" => Some(24),
+        "[" | "leftbracket" => Some(33),
+        "]" | "rightbracket" => Some(30),
+        "\\" | "backslash" => Some(42),
+        ";" | "semicolon" => Some(41),
+        "'" | "quote" => Some(39),
+        "," | "comma" => Some(43),
+        "." | "period" => Some(47),
+        "/" | "slash" => Some(44),
+        "`" | "grave" => Some(50),
         _ => None,
     }
 }
@@ -271,6 +290,65 @@ mod tests {
             ("7", 26),
             ("8", 28),
             ("9", 25),
+        ];
+        for &(name, code) in expected {
+            assert_eq!(
+                keycode_from_name(name),
+                Some(code),
+                "keycode for '{name}' should be {code}"
+            );
+        }
+    }
+
+    // --- Navigation keys ---
+
+    #[test]
+    fn keycode_navigation_keys() {
+        assert_eq!(keycode_from_name("home"), Some(115));
+        assert_eq!(keycode_from_name("Home"), Some(115));
+        assert_eq!(keycode_from_name("end"), Some(119));
+        assert_eq!(keycode_from_name("End"), Some(119));
+        assert_eq!(keycode_from_name("pageup"), Some(116));
+        assert_eq!(keycode_from_name("page_up"), Some(116));
+        assert_eq!(keycode_from_name("PageUp"), Some(116));
+        assert_eq!(keycode_from_name("pagedown"), Some(121));
+        assert_eq!(keycode_from_name("page_down"), Some(121));
+        assert_eq!(keycode_from_name("PageDown"), Some(121));
+        assert_eq!(keycode_from_name("forwarddelete"), Some(117));
+        assert_eq!(keycode_from_name("forward_delete"), Some(117));
+        assert_eq!(keycode_from_name("ForwardDelete"), Some(117));
+        assert_eq!(keycode_from_name("capslock"), Some(57));
+        assert_eq!(keycode_from_name("caps_lock"), Some(57));
+        assert_eq!(keycode_from_name("CapsLock"), Some(57));
+    }
+
+    // --- Punctuation keys ---
+
+    #[test]
+    fn keycode_punctuation_keys() {
+        let expected: &[(&str, CGKeyCode)] = &[
+            ("-", 27),
+            ("minus", 27),
+            ("=", 24),
+            ("equals", 24),
+            ("[", 33),
+            ("leftbracket", 33),
+            ("]", 30),
+            ("rightbracket", 30),
+            ("\\", 42),
+            ("backslash", 42),
+            (";", 41),
+            ("semicolon", 41),
+            ("'", 39),
+            ("quote", 39),
+            (",", 43),
+            ("comma", 43),
+            (".", 47),
+            ("period", 47),
+            ("/", 44),
+            ("slash", 44),
+            ("`", 50),
+            ("grave", 50),
         ];
         for &(name, code) in expected {
             assert_eq!(
