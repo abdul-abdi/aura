@@ -82,6 +82,43 @@ while IFS= read -r line; do
   esac
 done < <(git log --oneline --no-merges "$RANGE" 2>/dev/null)
 
+# --- Contributors -------------------------------------------------------------
+
+# Collect unique contributors, resolve GitHub usernames from noreply emails.
+# Deduplicates via a simple seen-list (compatible with bash 3.x on macOS).
+CONTRIB_TMP=$(mktemp)
+git log --format='%aN|%aE' --no-merges "$RANGE" 2>/dev/null | sort -u > "$CONTRIB_TMP"
+
+CONTRIBUTORS=()
+SEEN_KEYS=""
+
+while IFS='|' read -r name email; do
+  [[ -z "$name" ]] && continue
+
+  # Extract GitHub username from noreply email (e.g. 122108041+user@users.noreply.github.com)
+  gh_user=""
+  if [[ "$email" == *"noreply.github.com"* ]]; then
+    gh_user=$(echo "$email" | sed -E 's/^[0-9]+\+//' | sed 's/@.*//')
+  fi
+
+  # Deduplicate (same person, different git configs)
+  dedup_key="${gh_user:-$name}"
+  if echo "$SEEN_KEYS" | grep -qF "|${dedup_key}|"; then
+    continue
+  fi
+  SEEN_KEYS="${SEEN_KEYS}|${dedup_key}|"
+
+  if [[ -n "$gh_user" ]]; then
+    CONTRIBUTORS+=("[@${gh_user}](https://github.com/${gh_user})")
+  elif [[ "$name" != *" "* ]]; then
+    # No spaces = likely a GitHub username
+    CONTRIBUTORS+=("[@${name}](https://github.com/${name})")
+  else
+    CONTRIBUTORS+=("$name")
+  fi
+done < "$CONTRIB_TMP"
+rm -f "$CONTRIB_TMP"
+
 # --- Stats --------------------------------------------------------------------
 
 COMMIT_COUNT=$(git rev-list --count --no-merges "$RANGE" 2>/dev/null || echo "0")
@@ -160,6 +197,16 @@ if [[ ${#OTHER[@]} -gt 0 ]]; then
   echo "## Other Changes"
   echo ""
   printf '%s\n' "${OTHER[@]}"
+  echo ""
+fi
+
+# Contributors
+if [[ ${#CONTRIBUTORS[@]} -gt 0 ]]; then
+  echo "## Contributors"
+  echo ""
+  printf '%s\n' "${CONTRIBUTORS[@]}" | sort -f | while read -r c; do
+    echo "- $c"
+  done
   echo ""
 fi
 
