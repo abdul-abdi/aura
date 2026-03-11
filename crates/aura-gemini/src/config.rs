@@ -33,32 +33,33 @@ Computer Control Tools:
 
 Strategy — Choosing the Right Tool:
 
-1. App automation (menus, launching, windows, text fields with labels):
-   Use AppleScript or the dedicated tools (activate_app, click_menu_item, click_element).
-   AppleScript is faster, more reliable, and atomic — one call instead of five.
-   Examples:
-   - Open a URL: run_applescript('open location "https://..."')
-   - Click a menu: click_menu_item(["File", "Save As..."])
-   - Activate an app: activate_app("Safari")
-   - Get Safari tabs: run_applescript('tell application "Safari" to get name of every tab of front window')
-   - Click a labeled button: click_element(label: "Save", role: "button")
-   - Window management: run_applescript('tell application "Finder" to set bounds of front window to {0,0,800,600}')
-
-2. Visual/coordinate-based interaction (web pages, canvas, games, custom UI without labels):
-   Use click(x, y), type_text, press_key, drag.
-   Look at the screenshot, identify coordinates, click. Wait for next screenshot to verify.
-   Call get_screen_context() first — the UI elements list shows interactive elements with precise bounds.
-   When an element has bounds, use those coordinates instead of guessing from the screenshot.
-
-3. Keyboard shortcuts — always prefer press_key for known shortcuts:
+1. Keyboard shortcuts — always prefer press_key for known shortcuts:
    Cmd+C/V for copy/paste, Cmd+Tab for app switching, Cmd+W to close, etc.
    Faster and more reliable than clicking menus.
 
+2. Clicking and navigating UI — use visible mouse interaction:
+   Use click_element(label, role) for labeled buttons, links, tabs, checkboxes.
+   Use click(x, y) for web pages, canvas, and unlabeled UI.
+   Call get_screen_context() first — the UI elements list shows interactive elements with precise bounds.
+   When an element has bounds, use those coordinates instead of guessing from the screenshot.
+   The user can SEE the cursor move — this is intentional. Visible interaction > invisible automation.
+
+3. App-specific scripting (no visual equivalent):
+   Use AppleScript for operations that have no on-screen button or element:
+   - Get Safari tab list: run_applescript('tell application "Safari" to get name of every tab of front window')
+   - Window management: run_applescript('tell application "Finder" to set bounds of front window to {0,0,800,600}')
+   - Text field manipulation with accessibility labels
+   - App launching: activate_app("Safari")
+
+4. Menu items — use click_menu_item for menu bar actions:
+   click_menu_item(["File", "Save As..."]) — reliable, no coordinates needed.
+
 Decision flow:
 - Can it be done with a keyboard shortcut? Use press_key.
-- Is there a dedicated tool? (activate_app, click_menu_item, click_element) Use it.
-- Is it app automation with scriptable elements? Use run_applescript.
-- Is it visual interaction on a web page or unlabeled UI? Use click/type_text with coordinates from screenshot or UI element bounds.
+- Is it clicking a button, link, or UI control? Use click_element or click(x, y).
+- Is it a menu bar action? Use click_menu_item.
+- Does it need app scripting with no visual equivalent? Use run_applescript.
+- Fallback: get_screen_context() + retry with different approach.
 
 Post-Action Verification:
 Every input tool (click, click_element, type_text, press_key, move_mouse, scroll, drag)
