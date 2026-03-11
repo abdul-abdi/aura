@@ -411,6 +411,8 @@ fn find_raw_element(
             .filter(|s| !s.is_empty())
             .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
         if role == target.role && label == target.label {
+            // Retain so caller can safely wrap in CfRef (which will CFRelease on drop)
+            unsafe { CFRetain(element) };
             return Some(element);
         }
         return None; // Interactive element but doesn't match — don't recurse into it
@@ -418,8 +420,8 @@ fn find_raw_element(
     let children = get_ax_children(element);
     for child in &children {
         if let Some(found) = find_raw_element(*child, target, depth + 1, start_time) {
-            // Retain the found element before releasing all children
-            unsafe { CFRetain(found) };
+            // found is already retained by the recursive call — release all children
+            // (if found == child, the retain from the recursive match keeps it alive)
             for c in &children {
                 unsafe { CFRelease(*c) };
             }

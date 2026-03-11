@@ -736,8 +736,11 @@ async fn run_processor(
                     }
                 };
 
-            // Skip if screen hasn't changed
+            // Skip if screen hasn't changed — but still resolve waiter
             if frame.hash == last_hash {
+                if let Some(tx) = cap_trigger.take_waiter() {
+                    let _ = tx.send(());
+                }
                 continue;
             }
             last_hash = frame.hash;
@@ -802,7 +805,15 @@ async fn run_processor(
             // saturated. Drop the frame and continue capturing.
             if let Err(e) = cap_session.send_video(&frame.jpeg_base64) {
                 tracing::debug!("Dropped screen frame (channel not ready): {e}");
+                // Still resolve waiter so tool spawn doesn't hang on timeout
+                if let Some(tx) = cap_trigger.take_waiter() {
+                    let _ = tx.send(());
+                }
                 continue;
+            }
+            // Signal any awaiting tool spawn that the screenshot was delivered
+            if let Some(tx) = cap_trigger.take_waiter() {
+                let _ = tx.send(());
             }
             tracing::debug!(
                 width = frame.width,
@@ -1092,19 +1103,41 @@ async fn run_processor(
                                 tracing::error!("active_tool_tokens lock poisoned on remove");
                             }
 
-                            // For input tools: enrich response with post_state
+                            // For input tools: settle, capture screenshot, capture post_state
                             let input_tool = is_input_tool(&name);
                             if input_tool {
                                 // Brief delay to let UI settle after the input action
                                 tokio::time::sleep(Duration::from_millis(100)).await;
 
+                                // Trigger screenshot and await delivery (500ms timeout)
+                                let rx = tool_capture_trigger.trigger_and_wait();
+                                tool_cap_notify.notify_one();
+                                let screenshot_delivered = tokio::time::timeout(
+                                    Duration::from_millis(500),
+                                    rx,
+                                )
+                                .await
+                                .is_ok();
+
                                 // Capture post-action state on a blocking thread (AX FFI)
-                                let post_state = tokio::task::spawn_blocking(capture_post_state)
-                                    .await
-                                    .unwrap_or_else(|_| serde_json::json!({}));
+                                let post_state = tokio::time::timeout(
+                                    Duration::from_millis(600),
+                                    tokio::task::spawn_blocking(capture_post_state),
+                                )
+                                .await
+                                .unwrap_or(Ok(serde_json::json!({})))
+                                .unwrap_or_else(|_| serde_json::json!({}));
 
                                 if let Some(obj) = response.as_object_mut() {
-                                    obj.insert("post_state".to_string(), post_state);
+                                    // Override the hardcoded field with actual result
+                                    let mut ps = post_state;
+                                    if let Some(ps_obj) = ps.as_object_mut() {
+                                        ps_obj.insert(
+                                            "screenshot_delivered".to_string(),
+                                            serde_json::Value::Bool(screenshot_delivered),
+                                        );
+                                    }
+                                    obj.insert("post_state".to_string(), ps);
                                 }
                             }
 
@@ -1175,16 +1208,9 @@ async fn run_processor(
                                 }).await;
                             }
 
-                            // Trigger screen capture and await delivery for input tools
-                            if input_tool {
-                                let rx = tool_capture_trigger.trigger_and_wait();
-                                tool_cap_notify.notify_one();
-                                // Wait for capture with 500ms timeout
-                                let _ = tokio::time::timeout(
-                                    Duration::from_millis(500),
-                                    rx,
-                                ).await;
-                            } else {
+                            // For non-input tools, fire-and-forget screen capture
+                            // (input tools already triggered + awaited above)
+                            if !input_tool {
                                 tool_capture_trigger.trigger();
                                 tool_cap_notify.notify_one();
                             }
@@ -1733,53 +1759,31 @@ async fn execute_tool(
                 text
             };
 
-            // AX-first: try setting value via accessibility API
+            // If label/role provided, focus the target element first via AX
             let label = args.get("label").and_then(|v| v.as_str()).map(String::from);
             let role = args.get("role").and_then(|v| v.as_str()).map(String::from);
-            let ax_text = text.clone();
-            let ax_label = label.clone();
-            let ax_role = role.clone();
-            let ax_result = tokio::task::spawn_blocking(move || {
-                if ax_label.is_some() || ax_role.is_some() {
-                    // Explicit target element provided
-                    let result = aura_screen::accessibility::ax_set_value(
-                        ax_label.as_deref(),
-                        ax_role.as_deref(),
-                        &ax_text,
+            if label.is_some() || role.is_some() {
+                let focus_label = label.clone();
+                let focus_role = role.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = aura_screen::accessibility::ax_set_focused(
+                        focus_label.as_deref(),
+                        focus_role.as_deref(),
                     );
-                    if result.success {
-                        return Some("ax_set_value");
+                    if !result.success {
+                        tracing::debug!(
+                            error = ?result.error,
+                            "ax_set_focused failed, will type at current focus"
+                        );
                     }
-                    tracing::debug!(
-                        error = ?result.error,
-                        "ax_set_value with label/role failed, trying focused element"
-                    );
-                }
-                // Try focused element
-                if let Some(focused) = aura_screen::accessibility::get_focused_element() {
-                    let result = aura_screen::accessibility::ax_set_value(
-                        focused.label.as_deref(),
-                        Some(&focused.role),
-                        &ax_text,
-                    );
-                    if result.success {
-                        return Some("ax_set_value");
-                    }
-                    tracing::debug!(
-                        error = ?result.error,
-                        "ax_set_value on focused element failed"
-                    );
-                }
-                None
-            })
-            .await
-            .unwrap_or(None);
-
-            if let Some(method) = ax_result {
-                return serde_json::json!({ "success": true, "method": method });
+                })
+                .await;
+                // Brief pause for focus to settle
+                tokio::time::sleep(Duration::from_millis(30)).await;
             }
 
-            // PID-targeted fallback
+            // Type via keyboard synthesis (triggers onChange/validation in target apps)
+            // PID-targeted first, then HID fallback
             if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
                 let pid_text = text.clone();
                 let result = run_input_blocking(
@@ -2090,7 +2094,13 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
     };
 
     // Try 1: AX press action (most reliable — no coordinate mapping needed)
-    let ax_result = aura_screen::accessibility::ax_perform_action(label, role, "AXPress");
+    // Use the resolved target's label/role, not the raw filter params,
+    // so we press the exact element (especially when index > 0).
+    let ax_result = aura_screen::accessibility::ax_perform_action(
+        target.label.as_deref(),
+        Some(&target.role),
+        "AXPress",
+    );
     if ax_result.success {
         return serde_json::json!({
             "success": true,
@@ -2218,7 +2228,6 @@ fn capture_post_state() -> serde_json::Value {
     serde_json::json!({
         "frontmost_app": frontmost_app,
         "focused_element": focused_json,
-        "screenshot_delivered": true,
     })
 }
 
