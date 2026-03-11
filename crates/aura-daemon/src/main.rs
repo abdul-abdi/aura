@@ -1389,6 +1389,18 @@ fn show_error_dialog(message: &str) {
         .output();
 }
 
+/// Detect Automation/AppleEvents denial from osascript stderr.
+/// macOS returns error -1743 (errAEEventNotPermitted) when the user has denied
+/// Automation access, and -1744 when consent would be required.
+fn is_automation_denied(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("-1743")
+        || lower.contains("-1744")
+        || lower.contains("not authorized to send apple events")
+        || lower.contains("is not allowed to send keystrokes")
+        || lower.contains("erraeventnotpermitted")
+}
+
 /// Check Screen Recording permission at startup and warn if not granted.
 /// Uses CGPreflightScreenCaptureAccess — a silent read-only check that never
 /// triggers a macOS popup dialog.
@@ -1476,11 +1488,57 @@ async fn execute_tool(
                 Some("javascript") => ScriptLanguage::JavaScript,
                 _ => ScriptLanguage::AppleScript,
             };
+
+            // Pre-check Automation permission for the target app (if identifiable).
+            // This avoids running scripts that will definitely fail because the user
+            // previously denied Automation access. Scripts targeting apps where
+            // permission hasn't been decided yet proceed normally (macOS shows the
+            // one-time consent popup).
+            if let Some(target_app) = aura_bridge::automation::extract_target_app(script) {
+                if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&target_app)
+                {
+                    let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                    if perm == aura_bridge::automation::AutomationPermission::Denied {
+                        tracing::warn!(
+                            target_app = %target_app,
+                            "Automation permission denied for {target_app} — skipping script"
+                        );
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!(
+                                "Automation permission for {target_app} is denied. \
+                                 The user must grant it in System Settings > Privacy & Security > Automation, \
+                                 then toggle Aura's access to {target_app} on."
+                            ),
+                            "error_kind": "automation_denied",
+                        });
+                    }
+                }
+            }
+
             let timeout = args
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30);
             let result = executor.run(script, language, timeout).await;
+
+            // Detect Automation denial from osascript stderr (covers cases where
+            // the preflight couldn't identify the target app or bundle ID).
+            if !result.success && is_automation_denied(&result.stderr) {
+                let target = aura_bridge::automation::extract_target_app(script)
+                    .unwrap_or_else(|| "the target app".to_string());
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Automation permission for {target} was denied by the user. \
+                         Tell the user to grant it in System Settings > Privacy & Security > Automation, \
+                         then toggle Aura's access to {target} on. Do not retry this script."
+                    ),
+                    "error_kind": "automation_denied",
+                    "stderr": result.stderr,
+                });
+            }
+
             serde_json::json!({
                 "success": result.success,
                 "stdout": result.stdout,
