@@ -16,29 +16,14 @@ DMG_PATH="${PROJECT_DIR}/target/release/${APP_NAME}-${VERSION}.dmg"
 
 BUILD_DMG=false
 LEGACY=false
-DEV_CERT=false
 for arg in "$@"; do
     case "$arg" in
         --dmg) BUILD_DMG=true ;;
         --legacy) LEGACY=true ;;
-        --dev-cert) DEV_CERT=true ;;
     esac
 done
 
-# Determine signing identity.
-# --dev-cert uses the "Aura Dev" self-signed certificate (created by
-# scripts/setup-dev-cert.sh). Same key = same CDHash = TCC persists.
-# Without it, ad-hoc signing (--sign -) is used — new CDHash every build.
 SIGN_IDENTITY="-"
-if [[ "$DEV_CERT" == true ]]; then
-    if security find-identity -v -p codesigning 2>/dev/null | grep -q "Aura Dev"; then
-        SIGN_IDENTITY="Aura Dev"
-        echo "==> Using stable dev certificate for signing (TCC will persist)."
-    else
-        echo "WARNING: 'Aura Dev' certificate not found. Run scripts/setup-dev-cert.sh first."
-        echo "         Falling back to ad-hoc signing."
-    fi
-fi
 
 # ── Step 1: Build Rust daemon ──────────────────────────────────────────────
 
@@ -144,11 +129,7 @@ fi
 # permission grants (mic, screen recording) across rebuilds. Without this,
 # every ad-hoc re-sign produces a new CDHash and TCC re-prompts on launch.
 
-if [[ "$SIGN_IDENTITY" == "-" ]]; then
-    echo "==> Code signing (ad-hoc)..."
-else
-    echo "==> Code signing (certificate: ${SIGN_IDENTITY})..."
-fi
+echo "==> Code signing (ad-hoc)..."
 # Sign the daemon first with its own stable identifier
 codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.daemon \
     "${BUNDLE_DIR}/Contents/MacOS/aura-daemon" 2>/dev/null || {

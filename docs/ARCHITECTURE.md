@@ -11,6 +11,8 @@ Aura is a voice-first AI desktop companion for macOS. It captures microphone aud
 
 The system is split into 9 Rust crates (the daemon and its libraries) and 1 SwiftUI app (the frontend). The daemon runs headless when launched by the SwiftUI app, or standalone with its own Cocoa menu bar. Communication between the SwiftUI app and the daemon uses a Unix domain socket with JSONL framing.
 
+<img src="../assets/architecture.png" alt="Aura Architecture Diagram" width="100%" />
+
 For a high-level overview, see the [README](../README.md).
 
 ---
