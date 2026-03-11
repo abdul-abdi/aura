@@ -110,15 +110,22 @@ fn main() -> Result<()> {
         return deploy::run_deploy(yes);
     }
 
-    // Validate GEMINI_API_KEY — prompt user if missing
+    // Validate GEMINI_API_KEY — prompt user if missing.
+    // In headless mode (launched by SwiftUI app), never show an AppleScript dialog —
+    // the SwiftUI WelcomeView handles API key entry before launching the daemon.
     let gemini_config = match GeminiConfig::from_env() {
         Ok(config) => config,
+        Err(_) if cli.headless => {
+            anyhow::bail!(
+                "No API key found. The SwiftUI app should configure the key before launching the daemon.\n\
+                 Set it manually: echo 'api_key = \"YOUR_KEY\"' > ~/.config/aura/config.toml"
+            );
+        }
         Err(_) => {
             tracing::info!("No API key found, prompting user...");
             match prompt_api_key() {
                 Some(_) => {
                     tracing::info!("API key saved to config");
-                    // Re-read config to pick up proxy settings alongside the new key
                     GeminiConfig::from_env()
                         .context("Failed to load config after saving API key")?
                 }
@@ -138,9 +145,6 @@ fn main() -> Result<()> {
     let setup = AuraSetup::new(data_dir.clone());
     setup.ensure_dirs()?;
     setup.print_status();
-
-    // Screen Recording permission is checked inside run_daemon() where UI channels are available.
-    check_screen_recording_permission();
 
     // Initialize session memory
     let db_path = data_dir.join("aura.db");
@@ -194,7 +198,6 @@ fn main() -> Result<()> {
                 // Persist permission error flag across reconnection attempts so the
                 // "Connecting..." status doesn't overwrite a mic permission error.
                 let has_permission_error = Arc::new(AtomicBool::new(false));
-                let mut first_error = true;
 
                 // Spawn a dedicated task that listens for the menu Quit signal.
                 // This fires even while run_daemon is active, triggering graceful
@@ -207,9 +210,7 @@ fn main() -> Result<()> {
                         tracing::info!("Shutdown requested via menu");
                         shutdown_cancel.cancel();
                         shutdown_bus.send(AuraEvent::Shutdown);
-                        let _ = shutdown_menu_tx
-                            .send(MenuBarMessage::Shutdown)
-                            .await;
+                        let _ = shutdown_menu_tx.send(MenuBarMessage::Shutdown).await;
                     }
                 });
 
@@ -254,14 +255,6 @@ fn main() -> Result<()> {
                     .await
                     {
                         tracing::error!("Daemon error: {e}");
-
-                        // U5: Show native dialog on first connection failure only
-                        if first_error {
-                            show_error_dialog(&format!(
-                                "Aura failed to connect:\n\n{e}\n\nCheck your API key and network connection."
-                            ));
-                            first_error = false;
-                        }
                     }
 
                     // If shutdown was requested, stop reconnecting
@@ -414,34 +407,11 @@ async fn run_daemon(
         });
     }
 
-    // Pre-check microphone permission before opening the audio device.
-    // cpal/CoreAudio will implicitly trigger a TCC popup if we open the
-    // device without authorization — skip audio capture entirely if denied.
-    let mic_granted = check_microphone_permission();
-    if !mic_granted {
-        tracing::warn!("Microphone permission not granted — voice input will be unavailable");
-        has_permission_error.store(true, Ordering::Release);
-        if let Some(ref tx) = menubar_tx {
-            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
-            let _ = tx
-                .send(MenuBarMessage::SetStatus {
-                    text: "Mic access needed — grant in System Settings > Privacy > Microphone"
-                        .into(),
-                })
-                .await;
-        }
-        let _ = ipc_tx.send(DaemonEvent::DotColor {
-            color: DotColorName::Red,
-            pulsing: false,
-        });
-        let _ = ipc_tx.send(DaemonEvent::Status {
-            message: "Mic access needed — grant in System Settings > Privacy > Microphone".into(),
-        });
-    }
-
-    // Only attempt audio capture if mic permission is granted — opening
-    // a cpal input stream without authorization triggers a macOS TCC popup.
-    let _mic_available = if mic_granted {
+    // Attempt audio capture directly. The SwiftUI app grants mic permission
+    // during onboarding — the daemon inherits it via macOS's "responsible
+    // process" mechanism. If permission wasn't granted, cpal will fail
+    // gracefully and we report the error via IPC.
+    let _mic_available = {
         match AudioCapture::new(None) {
             Ok(capture) => {
                 let mic_shutdown_flag = Arc::clone(&mic_shutdown);
@@ -484,8 +454,6 @@ async fn run_daemon(
                 false
             }
         }
-    } else {
-        false
     };
 
     // Check accessibility permission (needed for input control tools)
@@ -1418,33 +1386,6 @@ fn check_screen_recording_permission() -> bool {
     has_permission
 }
 
-/// Check Microphone permission at startup. Returns true if authorized.
-/// Uses AVFoundation's authorization status query — a silent read-only check
-/// that never triggers a macOS popup dialog. The actual system prompt (if
-/// needed) is triggered by the SwiftUI PermissionsView before the daemon starts.
-fn check_microphone_permission() -> bool {
-    // Run `osascript` to query AVCaptureDevice authorization status via a tiny
-    // JXA snippet. This avoids linking AVFoundation from the Rust binary.
-    // Returns "authorized" if mic is granted.
-    let output = std::process::Command::new("osascript")
-        .arg("-l")
-        .arg("JavaScript")
-        .arg("-e")
-        .arg("ObjC.import('AVFoundation'); $.AVCaptureDevice.authorizationStatusForMediaType($.AVMediaTypeAudio) === 3 ? 'authorized' : 'denied'")
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout.trim() == "authorized"
-        }
-        Err(e) => {
-            tracing::warn!("Failed to check microphone permission: {e}");
-            // Don't assume granted — skip audio capture to avoid TCC popup
-            false
-        }
-    }
-}
-
 /// Frame dimension snapshot used to map image-pixel coordinates to logical macOS points.
 #[derive(Clone, Copy)]
 struct FrameDims {
@@ -1546,6 +1487,20 @@ async fn execute_tool(
             Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
             Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
         },
+        // All input tools (mouse/keyboard) require Accessibility permission.
+        // CGEvent.post() silently drops events without it — check before executing
+        // so Gemini gets an honest failure instead of a fake success.
+        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag"
+            if !aura_input::accessibility::check_accessibility(false) =>
+        {
+            serde_json::json!({
+                "success": false,
+                "error": "Accessibility permission is not granted. \
+                          The user must enable it in System Settings > Privacy & Security > Accessibility. \
+                          Without it, mouse and keyboard actions are silently ignored by macOS.",
+                "error_kind": "accessibility_denied",
+            })
+        }
         "move_mouse" => {
             let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);

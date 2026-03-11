@@ -54,8 +54,12 @@ final class AppState {
 
     init() {
         let onboardingDone = UserDefaults.standard.bool(forKey: "aura.onboardingComplete")
-        if onboardingDone {
+        if onboardingDone && Self.configFileHasKey() {
             onboardingStep = .done
+        } else if onboardingDone && !Self.configFileHasKey() {
+            // Config was deleted (e.g. uninstall/reinstall) — restart onboarding
+            UserDefaults.standard.removeObject(forKey: "aura.onboardingComplete")
+            onboardingStep = .welcome
         } else if Self.configFileHasKey() {
             // Key already saved (e.g. re-install) — check if permissions are also granted
             permissionChecker.checkAll()

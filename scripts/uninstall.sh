@@ -76,6 +76,11 @@ else
     echo "  ==> $CONFIG_DIR not found (skipped)"
 fi
 
+# Clear UserDefaults (onboarding state persists across reinstalls otherwise)
+echo "  ==> Clearing UserDefaults..."
+defaults delete com.aura.desktop 2>/dev/null || true
+echo "      Done."
+
 echo ""
 echo "  ╔══════════════════════════════════════╗"
 echo "  ║   Aura has been completely removed.  ║"

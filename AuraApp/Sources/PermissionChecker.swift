@@ -5,9 +5,12 @@ import ApplicationServices
 /// Checks and requests the three permissions Aura requires:
 /// Microphone, Screen Recording, and Accessibility.
 ///
-/// Silent checks (polling) never trigger popups. The `request*` methods
-/// are called when the user taps "Grant" — these trigger the native macOS
-/// prompt, which is expected since the user explicitly initiated it.
+/// - Microphone: inline grant/deny prompt via AVCaptureDevice.
+/// - Screen Recording (macOS 15+): CGRequestScreenCaptureAccess registers Aura
+///   in System Settings and shows a one-time popup directing the user there.
+/// - Accessibility: AXIsProcessTrustedWithOptions registers Aura in System
+///   Settings and shows a one-time popup directing the user there.
+/// - Polling (checkAll) is always silent and never triggers popups.
 @Observable
 @MainActor
 final class PermissionChecker {
@@ -18,28 +21,16 @@ final class PermissionChecker {
     var allGranted: Bool { micGranted && screenGranted && accessibilityGranted }
 
     func checkAll() {
-        micGranted = checkMicrophone()
-        screenGranted = checkScreenRecording()
+        micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         accessibilityGranted = AXIsProcessTrusted()
-    }
-
-    // MARK: - Silent permission checks (polling — never trigger popups)
-
-    private func checkMicrophone() -> Bool {
-        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-    }
-
-    private func checkScreenRecording() -> Bool {
         if #available(macOS 15, *) {
-            return CGPreflightScreenCaptureAccess()
-        } else {
-            return false
+            screenGranted = CGPreflightScreenCaptureAccess()
         }
     }
 
-    // MARK: - User-initiated permission requests (called from "Grant" buttons)
+    // MARK: - Grant actions (called from "Grant" buttons)
 
-    /// Triggers the native macOS microphone prompt.
+    /// Microphone — triggers a real native inline prompt (grant/deny).
     func requestMicAccess() {
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             DispatchQueue.main.async {
@@ -48,32 +39,19 @@ final class PermissionChecker {
         }
     }
 
-    /// Triggers the native macOS Screen Recording prompt (macOS 15+)
-    /// or opens System Settings on older versions.
+    /// Screen Recording — calls the native API which registers Aura in
+    /// System Settings and shows a one-time popup directing the user there.
     func requestScreenAccess() {
         if #available(macOS 15, *) {
-            // CGRequestScreenCaptureAccess shows the native system prompt
-            // and returns the current state. The 2s poll picks up changes.
             CGRequestScreenCaptureAccess()
             screenGranted = CGPreflightScreenCaptureAccess()
-        } else {
-            open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         }
     }
 
-    /// Triggers the native macOS Accessibility prompt.
-    /// AXIsProcessTrustedWithOptions with the prompt key shows the system
-    /// dialog asking to grant Accessibility access.
+    /// Accessibility — calls the native API which registers Aura in
+    /// System Settings and shows a one-time popup directing the user there.
     func requestAccessibilityAccess() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        let trusted = AXIsProcessTrustedWithOptions(options)
-        accessibilityGranted = trusted
-    }
-
-    // MARK: - Helpers
-
-    private func open(_ urlString: String) {
-        guard let url = URL(string: urlString) else { return }
-        NSWorkspace.shared.open(url)
+        accessibilityGranted = AXIsProcessTrustedWithOptions(options)
     }
 }

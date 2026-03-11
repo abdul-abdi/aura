@@ -53,7 +53,7 @@ struct PermissionsView: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(.primary)
 
-            Text("Aura needs a few permissions to work.\nTap **Grant** to open System Settings,\ntoggle Aura on, then come back here.")
+            Text("Aura needs a few permissions to work.\nGrant each one below, then toggle Aura on in Settings.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
