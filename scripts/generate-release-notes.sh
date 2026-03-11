@@ -2,31 +2,56 @@
 # generate-release-notes.sh — Build beautiful release notes from conventional commits.
 #
 # Usage:
-#   bash scripts/generate-release-notes.sh           # auto-detect previous tag
-#   bash scripts/generate-release-notes.sh v1.0.2    # explicit base tag
+#   bash scripts/generate-release-notes.sh                     # current version, auto-detect base
+#   bash scripts/generate-release-notes.sh --for v1.0.1        # generate notes for a specific release
+#   bash scripts/generate-release-notes.sh v1.0.0              # current version, explicit base tag
 #
-# Reads commits between the given tag (or last tag) and HEAD, groups them by
-# conventional-commit type, and outputs formatted Markdown to stdout.
+# Reads commits between the base tag and target, groups them by conventional-commit
+# type, and outputs formatted Markdown to stdout.
 set -euo pipefail
 
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-CURRENT_TAG="v${VERSION}"
-BASE_TAG="${1:-}"
+# --- Parse arguments -----------------------------------------------------------
 
-if [[ -z "$BASE_TAG" ]]; then
-  # Get all version tags sorted by semver, find the one right before the current version.
-  # This avoids the bug where git-describe finds the current version's own tag.
-  BASE_TAG=$(git tag -l 'v*' --sort=-version:refname \
-    | grep -v "^${CURRENT_TAG}$" \
-    | head -1 || echo "")
+TARGET_TAG=""
+BASE_TAG=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --for) TARGET_TAG="$2"; shift 2 ;;
+    *)     BASE_TAG="$1"; shift ;;
+  esac
+done
+
+# Determine version and target ref
+if [[ -n "$TARGET_TAG" ]]; then
+  VERSION="${TARGET_TAG#v}"
+  TARGET_REF="$TARGET_TAG"
+else
+  VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+  TARGET_TAG="v${VERSION}"
+  TARGET_REF="HEAD"
 fi
 
+# Auto-detect base tag: find the tag right before the target in semver order
 if [[ -z "$BASE_TAG" ]]; then
-  RANGE="HEAD"
+  BASE_TAG=$(git tag -l 'v*' --sort=-version:refname \
+    | grep -v "^${TARGET_TAG}$" \
+    | while read -r tag; do
+        # Only include tags that are ancestors of the target
+        if git merge-base --is-ancestor "$tag" "$TARGET_REF" 2>/dev/null; then
+          echo "$tag"
+          break
+        fi
+      done || echo "")
+fi
+
+# Build git ranges
+if [[ -z "$BASE_TAG" ]]; then
+  RANGE="$TARGET_REF"
   DIFF_RANGE=""
 else
-  RANGE="${BASE_TAG}..HEAD"
-  DIFF_RANGE="${BASE_TAG}..HEAD"
+  RANGE="${BASE_TAG}..${TARGET_REF}"
+  DIFF_RANGE="${BASE_TAG}..${TARGET_REF}"
 fi
 
 # --- Collect commits by type ---------------------------------------------------
@@ -63,14 +88,14 @@ COMMIT_COUNT=$(git rev-list --count --no-merges "$RANGE" 2>/dev/null || echo "0"
 
 if [[ -n "$DIFF_RANGE" ]]; then
   STAT_LINE=$(git diff --stat "$DIFF_RANGE" | tail -1)
-  FILES_CHANGED=$(echo "$STAT_LINE" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
-  INSERTIONS=$(echo "$STAT_LINE" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
-  DELETIONS=$(echo "$STAT_LINE" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
 else
-  FILES_CHANGED="—"
-  INSERTIONS="—"
-  DELETIONS="—"
+  # First release — diff against empty tree
+  EMPTY_TREE=$(git hash-object -t tree /dev/null)
+  STAT_LINE=$(git diff --stat "$EMPTY_TREE" "$TARGET_REF" | tail -1)
 fi
+FILES_CHANGED=$(echo "$STAT_LINE" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+INSERTIONS=$(echo "$STAT_LINE" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+DELETIONS=$(echo "$STAT_LINE" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo "0")
 
 # --- Render Markdown -----------------------------------------------------------
 
