@@ -181,15 +181,8 @@ pub fn click_pid(x: f64, y: f64, button: &str, click_count: u32, pid: i32) -> Re
 pub fn scroll_pid(dx: i32, dy: i32, pid: i32) -> Result<()> {
     anyhow::ensure!(pid > 0, "Invalid PID: {pid}");
     let source = event_source()?;
-    let event = CGEvent::new_scroll_event(
-        source,
-        ScrollEventUnit::PIXEL,
-        2,
-        -dy,
-        dx,
-        0,
-    )
-    .map_err(|_| anyhow::anyhow!("Failed to create scroll event"))?;
+    let event = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, -dy, dx, 0)
+        .map_err(|_| anyhow::anyhow!("Failed to create scroll event"))?;
     event.post_to_pid(pid);
     Ok(())
 }

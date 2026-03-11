@@ -456,11 +456,7 @@ fn find_ax_raw(label: Option<&str>, role: Option<&str>) -> Option<(CfRef, UIElem
 // ── Public AX write functions ─────────────────────────────────────────────────
 
 /// Perform an AX action (e.g. "AXPress") on the element matching `label`/`role`.
-pub fn ax_perform_action(
-    label: Option<&str>,
-    role: Option<&str>,
-    action: &str,
-) -> AXActionResult {
+pub fn ax_perform_action(label: Option<&str>, role: Option<&str>, action: &str) -> AXActionResult {
     let Some((raw_ref, element)) = find_ax_raw(label, role) else {
         return AXActionResult {
             success: false,
@@ -547,7 +543,9 @@ pub fn ax_set_focused(label: Option<&str>, role: Option<&str>) -> AXActionResult
         AXActionResult {
             success: false,
             element: Some(element),
-            error: Some(format!("AXUIElementSetAttributeValue(AXFocused) returned {ret}")),
+            error: Some(format!(
+                "AXUIElementSetAttributeValue(AXFocused) returned {ret}"
+            )),
         }
     }
 }

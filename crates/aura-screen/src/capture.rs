@@ -285,7 +285,10 @@ mod tests {
     fn trigger_and_wait_sets_flag_and_provides_receiver() {
         let trigger = CaptureTrigger::new();
         let mut rx = trigger.trigger_and_wait();
-        assert!(trigger.flag.load(Ordering::Relaxed), "trigger_and_wait() should set the flag");
+        assert!(
+            trigger.flag.load(Ordering::Relaxed),
+            "trigger_and_wait() should set the flag"
+        );
         assert!(rx.try_recv().is_err());
     }
 
