@@ -57,35 +57,19 @@ final class PermissionChecker {
 
     // MARK: - Open System Settings (user-initiated only)
 
+    /// Open System Settings to Microphone privacy pane.
+    /// Never triggers a macOS TCC popup — always directs to System Settings.
     func openMicSettings() {
-        // Request mic access first — this triggers the system dialog only if
-        // the status is .notDetermined (first time ever). If already denied or
-        // authorized, it does nothing and we open System Settings for the user.
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        if status == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                Task { @MainActor in
-                    self?.micGranted = granted
-                }
-            }
-        } else {
-            open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-        }
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
     }
 
+    /// Open System Settings to Screen Recording privacy pane.
+    /// Never triggers a macOS TCC popup — always directs to System Settings.
     func openScreenSettings() {
-        if #available(macOS 15, *) {
-            // CGRequestScreenCaptureAccess shows the system dialog only if not
-            // yet determined. If already granted or denied, it's a no-op.
-            if !CGPreflightScreenCaptureAccess() {
-                CGRequestScreenCaptureAccess()
-            }
-        }
-        // Always open System Settings — the system dialog alone isn't enough
-        // on most macOS versions (user must toggle the app in Settings).
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     }
 
+    /// Open System Settings to Accessibility privacy pane.
     func openAccessibilitySettings() {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
