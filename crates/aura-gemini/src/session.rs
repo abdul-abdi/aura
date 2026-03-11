@@ -455,18 +455,17 @@ async fn connect_and_stream_inner(
 
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
-    // Send setup message
-    // Always start fresh — don't restore previous context.
-    // Session resumption preserves all accumulated screenshots/tool responses,
-    // causing context to snowball and sessions to die faster on each reconnect.
-    {
-        let mut handle = state.resumption_handle.lock().await;
-        if handle.is_some() {
-            tracing::info!("Clearing resumption handle for fresh session (context overload prevention)");
-            *handle = None;
-        }
+    // Send setup message — use the resumption handle if one is set.
+    let current_handle = {
+        let handle = state.resumption_handle.lock().await;
+        handle.clone()
+    };
+    if current_handle.is_some() {
+        tracing::info!("Resuming session with existing handle");
+    } else {
+        tracing::info!("Starting fresh session (no resumption handle)");
     }
-    let setup = build_setup_message(&state.config, None);
+    let setup = build_setup_message(&state.config, current_handle);
     let setup_json = serde_json::to_string(&setup)?;
     tracing::debug!("Sending setup message (system prompt and tool declarations redacted)");
     ws_sink.send(Message::Text(setup_json)).await?;

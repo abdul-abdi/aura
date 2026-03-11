@@ -94,6 +94,15 @@ enum Command {
     },
 }
 
+/// Whether this session resumes a previous Gemini context or starts fresh.
+#[derive(Debug, Clone)]
+enum SessionMode {
+    /// Resume previous session via handle — no greeting.
+    Resume { handle: String },
+    /// Fresh session — Aura greets and introduces itself.
+    Fresh,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -177,6 +186,7 @@ fn main() -> Result<()> {
             None,
             has_permission_error,
             ipc_tx.clone(),
+            SessionMode::Fresh,
         ))?;
     } else {
         // Create menu bar app (must run on main thread)
@@ -214,6 +224,12 @@ fn main() -> Result<()> {
                     }
                 });
 
+                // Counters for smart reconnection logic.
+                // reconnect_counter: number of successful (>=30s) sessions since last Fresh start.
+                // poison_counter: number of consecutive Resume sessions that lasted <30s.
+                let mut reconnect_counter: u32 = 0;
+                let mut poison_counter: u32 = 0;
+
                 loop {
                     // session.rs connection_loop handles transient WebSocket drops with fast retries.
                     // When it exhausts retries (permanent failure), run_daemon returns and this
@@ -242,6 +258,31 @@ fn main() -> Result<()> {
                     };
                     tracing::info!(session_id = %session_id, "Session memory initialized");
 
+                    // Determine session mode: Resume if user-triggered AND handle exists AND not poisoned.
+                    // user_triggered_reconnect is set true in the select! block below.
+                    let session_mode = {
+                        let handle: Option<String> =
+                            memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
+                                .await
+                                .flatten()
+                                .filter(|h| !h.is_empty());
+                        match handle {
+                            Some(h) if reconnect_counter < 3 => {
+                                tracing::info!(
+                                    reconnect_counter,
+                                    "Resuming session with existing handle"
+                                );
+                                SessionMode::Resume { handle: h }
+                            }
+                            _ => {
+                                tracing::info!("Starting fresh session (no handle or counter exceeded)");
+                                SessionMode::Fresh
+                            }
+                        }
+                    };
+
+                    let session_start = std::time::Instant::now();
+
                     if let Err(e) = run_daemon(
                         gemini_config.clone(),
                         bg_bus.clone(),
@@ -251,10 +292,38 @@ fn main() -> Result<()> {
                         Some(menu_tx.clone()),
                         Arc::clone(&has_permission_error),
                         bg_ipc_tx.clone(),
+                        session_mode.clone(),
                     )
                     .await
                     {
                         tracing::error!("Daemon error: {e}");
+                    }
+
+                    // Track session health to detect a poisoned resume handle.
+                    let session_duration = session_start.elapsed().as_secs();
+                    if session_duration < 30 {
+                        if matches!(session_mode, SessionMode::Resume { .. }) {
+                            poison_counter += 1;
+                            tracing::warn!(
+                                poison_counter,
+                                session_duration,
+                                "Short-lived Resume session — possible stale handle"
+                            );
+                            if poison_counter >= 2 {
+                                tracing::warn!(
+                                    "Poison counter reached — clearing stale resumption handle"
+                                );
+                                let _ = memory_op(&memory, |mem| {
+                                    mem.set_setting("resumption_handle", "")
+                                })
+                                .await;
+                                poison_counter = 0;
+                                reconnect_counter = 0;
+                            }
+                        }
+                    } else {
+                        poison_counter = 0;
+                        reconnect_counter += 1;
                     }
 
                     // If shutdown was requested, stop reconnecting
@@ -262,7 +331,8 @@ fn main() -> Result<()> {
                         break;
                     }
 
-                    // Wait for reconnect signal or auto-reconnect after 3s
+                    // Wait for reconnect signal or auto-reconnect after 3s.
+                    // Track whether the reconnect was user-initiated to inform next SessionMode.
                     let _ = menu_tx.send(MenuBarMessage::SetColor(DotColor::Gray)).await;
                     let _ = menu_tx.send(MenuBarMessage::SetPulsing(false)).await;
                     let _ = menu_tx
@@ -271,8 +341,10 @@ fn main() -> Result<()> {
                         })
                         .await;
 
+                    let mut user_triggered_reconnect = false;
                     tokio::select! {
                         Some(()) = reconnect_rx.recv() => {
+                            user_triggered_reconnect = true;
                             tracing::info!("Reconnecting via menu...");
                             let _ = menu_tx.send(MenuBarMessage::SetStatus {
                                 text: "Reconnecting...".into(),
@@ -288,6 +360,11 @@ fn main() -> Result<()> {
                                 text: "Reconnecting...".into(),
                             }).await;
                         }
+                    }
+
+                    // Auto-reconnects always start fresh (reset counter so next iteration picks Fresh)
+                    if !user_triggered_reconnect {
+                        reconnect_counter = u32::MAX; // force Fresh on next loop iteration
                     }
                 }
             });
@@ -310,7 +387,21 @@ async fn run_daemon(
     menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     has_permission_error: Arc<AtomicBool>,
     ipc_tx: broadcast::Sender<DaemonEvent>,
+    session_mode: SessionMode,
 ) -> Result<()> {
+    // Inject session-mode-specific hint before the destructive action guardrail.
+    let mode_hint = match &session_mode {
+        SessionMode::Resume { .. } => {
+            "\n\nThis is a resumed session. Continue naturally — no greeting, no reintroduction. Pick up where you left off."
+        }
+        SessionMode::Fresh => {
+            "\n\nThis is a new session. Greet the user briefly and naturally introduce yourself. You're Aura, their Mac companion. Keep it casual and short."
+        }
+    };
+    if !gemini_config.system_prompt.contains(mode_hint) {
+        gemini_config.system_prompt.push_str(mode_hint);
+    }
+
     // U9: Inject destructive action confirmation guardrail into system prompt (once)
     if !gemini_config
         .system_prompt
@@ -343,15 +434,17 @@ async fn run_daemon(
         message: "Connecting...".into(),
     });
 
-    // Load persisted session resumption handle (if any) for cross-restart continuity.
-    let resumption_handle: Option<String> =
-        memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
-            .await
-            .flatten()
-            .filter(|h| !h.is_empty());
-    if resumption_handle.is_some() {
-        tracing::info!("Loaded persisted resumption handle for session continuity");
-    }
+    // Determine resumption handle from session mode.
+    let resumption_handle: Option<String> = match &session_mode {
+        SessionMode::Resume { handle } => {
+            tracing::info!("Resuming session with persisted handle");
+            Some(handle.clone())
+        }
+        SessionMode::Fresh => {
+            tracing::info!("Starting fresh Gemini session (no resumption handle)");
+            None
+        }
+    };
 
     // Save API key before gemini_config is moved into the session
     let gemini_api_key = gemini_config.api_key.clone();
