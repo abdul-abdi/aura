@@ -1735,7 +1735,7 @@ async fn execute_tool(
                 });
             }
             // Sanitize app name to prevent AppleScript injection
-            let safe_name = name.replace('\\', "").replace('"', "");
+            let safe_name = name.replace(['\\', '"'], "");
             let script = format!(r#"tell application "{safe_name}" to activate"#);
 
             // Pre-check automation permission if we know the bundle ID
@@ -1853,14 +1853,14 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
         // Include alternatives to help Gemini self-correct
         let alternatives: Vec<String> = all_elements
             .iter()
-            .filter_map(|el| {
+            .map(|el| {
                 let label_str = el.label.as_deref().unwrap_or("(unlabeled)");
                 let role_short = el
                     .role
                     .strip_prefix("AX")
                     .unwrap_or(&el.role)
                     .to_lowercase();
-                Some(format!("{role_short} \"{label_str}\""))
+                format!("{role_short} \"{label_str}\"")
             })
             .take(15)
             .collect();
@@ -1926,11 +1926,8 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
 /// Build an AppleScript to click a menu item via System Events.
 /// Supports 2-level (menu bar > item) and 3+ level (menu bar > submenu > item) paths.
 fn build_menu_click_script(app: &str, path: &[String]) -> String {
-    let process = app.replace('\\', "").replace('"', "");
-    let escaped: Vec<String> = path
-        .iter()
-        .map(|s| s.replace('\\', "").replace('"', ""))
-        .collect();
+    let process = app.replace(['\\', '"'], "");
+    let escaped: Vec<String> = path.iter().map(|s| s.replace(['\\', '"'], "")).collect();
 
     match escaped.len() {
         2 => format!(

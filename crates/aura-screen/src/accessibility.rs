@@ -325,10 +325,10 @@ pub fn find_elements(
     elements
         .iter()
         .filter(|el| {
-            if let Some(r) = role {
-                if !matches_role(&el.role, r) {
-                    return false;
-                }
+            if let Some(r) = role
+                && !matches_role(&el.role, r)
+            {
+                return false;
             }
             if let Some(lbl) = label {
                 let lbl_lower = lbl.to_lowercase();
