@@ -47,7 +47,8 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                 FunctionDeclaration {
                     name: "get_screen_context".into(),
                     description: "Get the user's current screen context: frontmost application, \
-                        window title, list of open windows, and clipboard contents. \
+                        window title, list of open windows, clipboard contents, and interactive \
+                        UI elements with their accessibility labels and precise bounds. \
                         Invoke this tool only after the user asks you to interact with \
                         something on screen or when you need to understand their current context."
                         .into(),

@@ -136,7 +136,7 @@ impl ScreenContext {
         if !self.ui_elements.is_empty() {
             parts.push("UI Elements (interactive):".to_string());
             for (i, el) in self.ui_elements.iter().enumerate() {
-                parts.push(format!("  {}: {}", i, el.summary()));
+                parts.push(format!("  [{}] {}", i, el.summary()));
             }
         }
         parts.join("\n")
@@ -238,6 +238,8 @@ mod tests {
             s.contains("UI Elements (interactive):"),
             "summary should include UI Elements section"
         );
+        assert!(s.contains("[0]"), "summary should use [i] bracket format");
+        assert!(s.contains("[1]"), "summary should index all elements");
         assert!(s.contains("OK"), "summary should include element labels");
         assert!(
             s.contains("Cancel"),

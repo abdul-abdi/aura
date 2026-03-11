@@ -1754,11 +1754,18 @@ async fn execute_tool(
             }
 
             let result = executor.run(&script, ScriptLanguage::AppleScript, 10).await;
-            serde_json::json!({
-                "success": result.success,
-                "app": safe_name,
-                "stderr": result.stderr,
-            })
+            if result.success {
+                serde_json::json!({
+                    "success": true,
+                    "app": safe_name,
+                })
+            } else {
+                serde_json::json!({
+                    "success": false,
+                    "app": safe_name,
+                    "error": result.stderr,
+                })
+            }
         }
         "click_menu_item" => {
             let menu_path: Vec<String> = args
@@ -2084,5 +2091,38 @@ mod tests {
         let samples = vec![0.001_f32; 100];
         let threshold = calibrate_barge_in_threshold(&samples);
         assert_eq!(threshold, CALIBRATION_THRESHOLD_MIN);
+    }
+
+    #[test]
+    fn build_menu_click_script_two_level() {
+        let script = build_menu_click_script("Safari", &["File".into(), "New Window".into()]);
+        assert!(script.contains("tell process \"Safari\""));
+        assert!(script.contains("click menu item \"New Window\""));
+        assert!(script.contains("menu bar item \"File\""));
+    }
+
+    #[test]
+    fn build_menu_click_script_three_level() {
+        let script = build_menu_click_script(
+            "Safari",
+            &[
+                "View".into(),
+                "Developer".into(),
+                "JavaScript Console".into(),
+            ],
+        );
+        assert!(script.contains("tell process \"Safari\""));
+        assert!(script.contains("click menu item \"JavaScript Console\""));
+        assert!(script.contains("menu item \"Developer\""));
+        assert!(script.contains("menu bar item \"View\""));
+    }
+
+    #[test]
+    fn build_menu_click_script_sanitizes_quotes() {
+        let script = build_menu_click_script("My\"App", &["Fi\\le".into(), "Sa\"ve".into()]);
+        assert!(!script.contains(r#"My"App"#));
+        assert!(script.contains("tell process \"MyApp\""));
+        assert!(script.contains("menu item \"Save\""));
+        assert!(script.contains("menu bar item \"File\""));
     }
 }
