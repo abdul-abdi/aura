@@ -1601,6 +1601,34 @@ async fn execute_tool(
                 "error_kind": "accessibility_denied",
             })
         }
+        "click_element" => {
+            if !aura_input::accessibility::check_accessibility(false) {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "Accessibility permission is not granted. \
+                              Required for click_element to read UI elements and click. \
+                              Enable in System Settings > Privacy & Security > Accessibility.",
+                    "error_kind": "accessibility_denied",
+                });
+            }
+
+            let label = args.get("label").and_then(|v| v.as_str()).map(String::from);
+            let role = args.get("role").and_then(|v| v.as_str()).map(String::from);
+            let index = args.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+            // Run AX tree walk + click on blocking thread (FFI calls are synchronous)
+            match tokio::task::spawn_blocking(move || {
+                click_element_inner(label.as_deref(), role.as_deref(), index)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Task panicked: {e}"),
+                }),
+            }
+        }
         "move_mouse" => {
             let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1797,6 +1825,100 @@ async fn execute_tool(
         other => serde_json::json!({
             "success": false,
             "error": format!("Unknown tool: {other}"),
+        }),
+    }
+}
+
+/// Find a UI element by label/role in the frontmost app's accessibility tree and click it.
+fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) -> serde_json::Value {
+    if label.is_none() && role.is_none() {
+        return serde_json::json!({
+            "success": false,
+            "error": "At least one of 'label' or 'role' must be provided",
+        });
+    }
+
+    let all_elements = aura_screen::accessibility::get_focused_app_elements();
+    if all_elements.is_empty() {
+        return serde_json::json!({
+            "success": false,
+            "error": "No interactive UI elements found. The app may not expose accessibility data, \
+                      or Accessibility permission may not be fully granted.",
+        });
+    }
+
+    let matches = aura_screen::accessibility::find_elements(&all_elements, label, role);
+
+    if matches.is_empty() {
+        // Include alternatives to help Gemini self-correct
+        let alternatives: Vec<String> = all_elements
+            .iter()
+            .filter_map(|el| {
+                let label_str = el.label.as_deref().unwrap_or("(unlabeled)");
+                let role_short = el
+                    .role
+                    .strip_prefix("AX")
+                    .unwrap_or(&el.role)
+                    .to_lowercase();
+                Some(format!("{role_short} \"{label_str}\""))
+            })
+            .take(15)
+            .collect();
+
+        return serde_json::json!({
+            "success": false,
+            "error": format!(
+                "No element matching label={:?} role={:?}. Available elements: {}",
+                label, role, alternatives.join(", ")
+            ),
+        });
+    }
+
+    let target = match matches.get(index) {
+        Some(el) => el,
+        None => {
+            return serde_json::json!({
+                "success": false,
+                "error": format!(
+                    "Index {} out of range. Found {} matching elements.",
+                    index,
+                    matches.len()
+                ),
+            });
+        }
+    };
+
+    let bounds = match &target.bounds {
+        Some(b) => b,
+        None => {
+            return serde_json::json!({
+                "success": false,
+                "error": "Element found but has no bounds (may be offscreen or hidden)",
+                "element": {
+                    "role": target.role,
+                    "label": target.label,
+                },
+            });
+        }
+    };
+
+    // AX bounds are already in logical screen coordinates — no FrameDims conversion needed
+    let (center_x, center_y) = bounds.center();
+    match aura_input::mouse::click(center_x, center_y, "left", 1) {
+        Ok(()) => serde_json::json!({
+            "success": true,
+            "element": {
+                "role": target.role,
+                "label": target.label,
+            },
+            "clicked_at": {
+                "x": center_x,
+                "y": center_y,
+            },
+        }),
+        Err(e) => serde_json::json!({
+            "success": false,
+            "error": format!("Click failed: {e}"),
         }),
     }
 }
