@@ -58,6 +58,12 @@ struct TranscriptUpdate: Decodable {
     let role: TranscriptRole
     let text: String
     let done: Bool
+    let source: TranscriptSource
+
+    enum TranscriptSource: String, Decodable {
+        case voice
+        case text
+    }
 }
 
 enum TranscriptRole: String, Decodable {
@@ -69,6 +75,7 @@ struct ToolStatusUpdate: Decodable {
     let name: String
     let status: ToolRunStatus
     let output: String?
+    let summary: String?
 }
 
 enum ToolRunStatus: String, Decodable {

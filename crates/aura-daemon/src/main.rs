@@ -1006,6 +1006,7 @@ async fn run_processor(
                             name: name.clone(),
                             status: ToolRunStatus::Running,
                             output: None,
+                            summary: None,
                         });
 
                         // shutdown_aura stays inline — needs to break event loop
@@ -1054,6 +1055,7 @@ async fn run_processor(
                                 name: name.clone(),
                                 status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
                                 output: Some(response.to_string()),
+                                summary: None,
                             });
 
                             {
@@ -1254,6 +1256,7 @@ async fn run_processor(
                                 name: name.clone(),
                                 status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
                                 output: tool_output,
+                                summary: None,
                             });
 
                             tool_bus.send(AuraEvent::ToolExecuted {
@@ -1361,6 +1364,7 @@ async fn run_processor(
                                 role: Role::Assistant,
                                 text: filtered,
                                 done: false,
+                                source: "voice".into(),
                             });
                         }
                     }
