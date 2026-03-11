@@ -62,7 +62,7 @@ pub fn get_frontmost_pid() -> Option<i32> {
 }
 
 /// Get frontmost app name via NSWorkspace (no Automation permission needed).
-fn get_frontmost_app() -> Option<String> {
+pub fn get_frontmost_app() -> Option<String> {
     run_jxa(
         "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.js",
     )
