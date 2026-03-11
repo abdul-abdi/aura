@@ -108,15 +108,18 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                 },
                 FunctionDeclaration {
                     name: "type_text".into(),
-                    description: "Type a string of text at the current cursor position. Use for \
-                        entering text in fields, search bars, editors, etc. \
+                    description: "Type text into a UI element. If label/role are provided, targets \
+                        that specific element directly via the accessibility API (most reliable). \
+                        Otherwise types at the currently focused element. \
                         Invoke this tool only after you have confirmed a text field is focused \
-                        or have clicked into the target field."
+                        or have identified the target element from screen context."
                         .into(),
                     parameters: json!({
                         "type": "object",
                         "properties": {
-                            "text": { "type": "string", "description": "The text to type" }
+                            "text": { "type": "string", "description": "The text to type" },
+                            "label": { "type": "string", "description": "Accessibility label of the target element. If provided, types directly into this element." },
+                            "role": { "type": "string", "description": "Element role (e.g. textfield, textarea, combobox). Narrows the search when combined with label." }
                         },
                         "required": ["text"]
                     }),

@@ -67,11 +67,17 @@ unsafe extern "C" {
         value: *mut CFTypeRef,
     ) -> i32;
     fn AXValueGetValue(value: CFTypeRef, the_type: u32, value_ptr: *mut c_void) -> bool;
+    fn AXUIElementSetAttributeValue(
+        element: CFTypeRef,
+        attribute: CFTypeRef,
+        value: CFTypeRef,
+    ) -> i32;
+    fn AXUIElementPerformAction(element: CFTypeRef, action: CFTypeRef) -> i32;
 }
 
 // ── RAII wrapper for CFTypeRef ───────────────────────────────────────────────
 
-struct CfRef(CFTypeRef);
+pub(crate) struct CfRef(CFTypeRef);
 
 impl CfRef {
     /// Takes ownership of a retained CFTypeRef (from a Create/Copy function).
@@ -90,6 +96,13 @@ impl Drop for CfRef {
             unsafe { CFRelease(self.0) };
         }
     }
+}
+
+/// Result of an AX write operation (set value, perform action, set focus).
+pub struct AXActionResult {
+    pub success: bool,
+    pub element: Option<UIElement>,
+    pub error: Option<String>,
 }
 
 // ── Helper: build a CFString attribute key ───────────────────────────────────
@@ -313,6 +326,59 @@ pub fn get_focused_app_elements() -> Vec<UIElement> {
     elements
 }
 
+/// Return the currently focused interactive element, if any.
+///
+/// Uses a direct `AXFocusedUIElement` query on the app element (single IPC call)
+/// instead of walking the entire AX tree.
+pub fn get_focused_element() -> Option<UIElement> {
+    let pid = crate::macos::get_frontmost_pid()?;
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let app_ref = CfRef::new(app);
+
+    // Query the app's focused element directly
+    let attr_key = cf_string_from_str("AXFocusedUIElement");
+    let mut value: CFTypeRef = std::ptr::null();
+    let ret =
+        unsafe { AXUIElementCopyAttributeValue(app_ref.as_raw(), attr_key.as_raw(), &mut value) };
+    if ret != AX_ERROR_SUCCESS || value.is_null() {
+        return None;
+    }
+    let focused_ref = CfRef::new(value);
+
+    // Read properties from the focused element
+    let role = get_ax_string(focused_ref.as_raw(), "AXRole")?;
+    let label = get_ax_string(focused_ref.as_raw(), "AXTitle")
+        .filter(|s| !s.is_empty())
+        .or_else(|| get_ax_string(focused_ref.as_raw(), "AXDescription").filter(|s| !s.is_empty()));
+    let value = get_ax_string(focused_ref.as_raw(), "AXValue").filter(|s| !s.is_empty());
+    let enabled = get_ax_bool(focused_ref.as_raw(), "AXEnabled");
+    let focused = get_ax_bool(focused_ref.as_raw(), "AXFocused");
+    let bounds = match (
+        get_ax_position(focused_ref.as_raw()),
+        get_ax_size(focused_ref.as_raw()),
+    ) {
+        (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }),
+        _ => None,
+    };
+
+    Some(UIElement {
+        role,
+        label,
+        value,
+        bounds,
+        enabled,
+        focused,
+    })
+}
+
 /// Filter a slice of UIElements by optional label substring and optional role.
 ///
 /// - `label`: case-insensitive substring matched against `UIElement.label` and `UIElement.value`
@@ -370,6 +436,287 @@ pub fn matches_role(element_role: &str, filter: &str) -> bool {
     let filter_short = filter_lower.strip_prefix("ax").unwrap_or(&filter_lower);
 
     role_short == filter_short
+}
+
+// ── AX write helpers ──────────────────────────────────────────────────────────
+
+/// Recursively find a raw AXUIElement ref matching a UIElement by role + label.
+///
+/// The caller must CFRelease the returned value when done.
+/// Kept for use by `click_element_inner`'s error path and potential future callers.
+#[allow(dead_code)]
+fn find_raw_element(
+    element: CFTypeRef,
+    target: &UIElement,
+    depth: usize,
+    start_time: &Instant,
+) -> Option<CFTypeRef> {
+    if depth > MAX_DEPTH || start_time.elapsed().as_millis() >= TIMEOUT_MS {
+        return None;
+    }
+    let role = get_ax_string(element, "AXRole")?;
+    if INTERACTIVE_ROLES.contains(&role.as_str()) {
+        let label = get_ax_string(element, "AXTitle")
+            .filter(|s| !s.is_empty())
+            .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
+        if role == target.role && label == target.label {
+            // Retain so caller can safely wrap in CfRef (which will CFRelease on drop)
+            unsafe { CFRetain(element) };
+            return Some(element);
+        }
+        return None; // Interactive element but doesn't match — don't recurse into it
+    }
+    let children = get_ax_children(element);
+    for child in &children {
+        if let Some(found) = find_raw_element(*child, target, depth + 1, start_time) {
+            // found is already retained by the recursive call — release all children
+            // (if found == child, the retain from the recursive match keeps it alive)
+            for c in &children {
+                unsafe { CFRelease(*c) };
+            }
+            return Some(found);
+        }
+    }
+    for child in &children {
+        unsafe { CFRelease(*child) };
+    }
+    None
+}
+
+/// Single-pass tree walk that finds the first interactive element matching
+/// the given label/role filters, returning both the raw AXUIElement ref and
+/// the UIElement metadata. Avoids building a full element list and re-walking.
+fn find_element_single_pass(
+    element: CFTypeRef,
+    label_filter: Option<&str>,
+    role_filter: Option<&str>,
+    skip: &mut usize,
+    depth: usize,
+    start_time: &Instant,
+) -> Option<(CFTypeRef, UIElement)> {
+    if depth > MAX_DEPTH || start_time.elapsed().as_millis() >= TIMEOUT_MS {
+        return None;
+    }
+
+    let role = get_ax_string(element, "AXRole")?;
+
+    if INTERACTIVE_ROLES.contains(&role.as_str()) {
+        // Check role filter
+        if let Some(r) = role_filter
+            && !matches_role(&role, r)
+        {
+            return None;
+        }
+
+        // Collect label: prefer AXTitle, fall back to AXDescription
+        let label = get_ax_string(element, "AXTitle")
+            .filter(|s| !s.is_empty())
+            .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
+
+        let value = get_ax_string(element, "AXValue").filter(|s| !s.is_empty());
+
+        // Check label filter
+        if let Some(lbl) = label_filter {
+            let lbl_lower = lbl.to_lowercase();
+            let in_label = label
+                .as_deref()
+                .map(|s| s.to_lowercase().contains(&lbl_lower))
+                .unwrap_or(false);
+            let in_value = value
+                .as_deref()
+                .map(|s| s.to_lowercase().contains(&lbl_lower))
+                .unwrap_or(false);
+            if !in_label && !in_value {
+                return None;
+            }
+        }
+
+        // Match found — check skip count for index support
+        if *skip > 0 {
+            *skip -= 1;
+            return None;
+        }
+
+        let enabled = get_ax_bool(element, "AXEnabled");
+        let focused = get_ax_bool(element, "AXFocused");
+        let bounds = match (get_ax_position(element), get_ax_size(element)) {
+            (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            }),
+            _ => None,
+        };
+
+        // Retain so caller can safely wrap in CfRef
+        unsafe { CFRetain(element) };
+        return Some((
+            element,
+            UIElement {
+                role,
+                label,
+                value,
+                bounds,
+                enabled,
+                focused,
+            },
+        ));
+    }
+
+    // Not interactive — recurse into children
+    let children = get_ax_children(element);
+    for child in &children {
+        if let Some(found) = find_element_single_pass(
+            *child,
+            label_filter,
+            role_filter,
+            skip,
+            depth + 1,
+            start_time,
+        ) {
+            // Release all children (found element was separately retained)
+            for c in &children {
+                unsafe { CFRelease(*c) };
+            }
+            return Some(found);
+        }
+    }
+    for child in &children {
+        unsafe { CFRelease(*child) };
+    }
+    None
+}
+
+/// Find a raw AXUIElement and its UIElement metadata for the given label/role filters.
+fn find_ax_raw(label: Option<&str>, role: Option<&str>) -> Option<(CfRef, UIElement)> {
+    find_ax_raw_nth(label, role, 0)
+}
+
+/// Find the nth matching raw AXUIElement and its UIElement metadata.
+pub(crate) fn find_ax_raw_nth(
+    label: Option<&str>,
+    role: Option<&str>,
+    index: usize,
+) -> Option<(CfRef, UIElement)> {
+    let pid = crate::macos::get_frontmost_pid()?;
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let app_ref = CfRef::new(app);
+    let start = Instant::now();
+    let mut skip = index;
+    let (raw, el) = find_element_single_pass(app_ref.as_raw(), label, role, &mut skip, 0, &start)?;
+    Some((CfRef::new(raw), el))
+}
+
+// ── Public AX write functions ─────────────────────────────────────────────────
+
+/// Perform an AX action (e.g. "AXPress") on the element matching `label`/`role`.
+pub fn ax_perform_action(label: Option<&str>, role: Option<&str>, action: &str) -> AXActionResult {
+    ax_perform_action_nth(label, role, action, 0)
+}
+
+/// Perform an AX action on the Nth matching element (0-indexed).
+/// Single-pass walk: finds the exact element by index, then performs the action on it.
+pub fn ax_perform_action_nth(
+    label: Option<&str>,
+    role: Option<&str>,
+    action: &str,
+    index: usize,
+) -> AXActionResult {
+    let Some((raw_ref, element)) = find_ax_raw_nth(label, role, index) else {
+        return AXActionResult {
+            success: false,
+            element: None,
+            error: Some(format!(
+                "no element found for label={label:?} role={role:?} index={index}"
+            )),
+        };
+    };
+    let action_key = cf_string_from_str(action);
+    let ret = unsafe { AXUIElementPerformAction(raw_ref.as_raw(), action_key.as_raw()) };
+    if ret == AX_ERROR_SUCCESS {
+        AXActionResult {
+            success: true,
+            element: Some(element),
+            error: None,
+        }
+    } else {
+        AXActionResult {
+            success: false,
+            element: Some(element),
+            error: Some(format!("AXUIElementPerformAction returned {ret}")),
+        }
+    }
+}
+
+/// Set the AXValue of the element matching `label`/`role` to `value`.
+pub fn ax_set_value(label: Option<&str>, role: Option<&str>, value: &str) -> AXActionResult {
+    let Some((raw_ref, element)) = find_ax_raw(label, role) else {
+        return AXActionResult {
+            success: false,
+            element: None,
+            error: Some(format!(
+                "no element found for label={label:?} role={role:?}"
+            )),
+        };
+    };
+    let attr_key = cf_string_from_str("AXValue");
+    let cf_value = cf_string_from_str(value);
+    let ret = unsafe {
+        AXUIElementSetAttributeValue(raw_ref.as_raw(), attr_key.as_raw(), cf_value.as_raw())
+    };
+    if ret == AX_ERROR_SUCCESS {
+        AXActionResult {
+            success: true,
+            element: Some(element),
+            error: None,
+        }
+    } else {
+        AXActionResult {
+            success: false,
+            element: Some(element),
+            error: Some(format!("AXUIElementSetAttributeValue returned {ret}")),
+        }
+    }
+}
+
+/// Set keyboard focus on the element matching `label`/`role`.
+pub fn ax_set_focused(label: Option<&str>, role: Option<&str>) -> AXActionResult {
+    let Some((raw_ref, element)) = find_ax_raw(label, role) else {
+        return AXActionResult {
+            success: false,
+            element: None,
+            error: Some(format!(
+                "no element found for label={label:?} role={role:?}"
+            )),
+        };
+    };
+    let attr_key = cf_string_from_str("AXFocused");
+    let ret = unsafe {
+        AXUIElementSetAttributeValue(
+            raw_ref.as_raw(),
+            attr_key.as_raw(),
+            kCFBooleanTrue as CFTypeRef,
+        )
+    };
+    if ret == AX_ERROR_SUCCESS {
+        AXActionResult {
+            success: true,
+            element: Some(element),
+            error: None,
+        }
+    } else {
+        AXActionResult {
+            success: false,
+            element: Some(element),
+            error: Some(format!(
+                "AXUIElementSetAttributeValue(AXFocused) returned {ret}"
+            )),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -483,5 +830,89 @@ mod tests {
         // Non-interactive roles must NOT be present
         assert!(!INTERACTIVE_ROLES.contains(&"AXGroup"));
         assert!(!INTERACTIVE_ROLES.contains(&"AXStaticText"));
+    }
+
+    // ── AXActionResult tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn ax_action_result_default_success() {
+        let result = AXActionResult {
+            success: true,
+            element: None,
+            error: None,
+        };
+        assert!(result.success);
+        assert!(result.element.is_none());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn ax_action_result_with_element() {
+        let el = make_element("AXButton", "OK");
+        let result = AXActionResult {
+            success: true,
+            element: Some(el.clone()),
+            error: None,
+        };
+        assert!(result.success);
+        assert_eq!(result.element.unwrap().role, "AXButton");
+    }
+
+    #[test]
+    fn ax_action_result_with_error() {
+        let result = AXActionResult {
+            success: false,
+            element: None,
+            error: Some("something went wrong".to_string()),
+        };
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("something went wrong"));
+    }
+
+    // ── get_focused_element tests ──────────────────────────────────────────────
+
+    #[test]
+    fn get_focused_element_returns_none_for_unfocused_elements() {
+        // All elements have focused=false via make_element
+        let elements: Vec<UIElement> = vec![
+            make_element("AXButton", "Submit"),
+            make_element("AXTextField", "Email"),
+        ];
+        let focused = elements.into_iter().find(|el| el.focused);
+        assert!(focused.is_none());
+    }
+
+    #[test]
+    fn get_focused_element_finds_focused() {
+        let mut el = make_element("AXTextField", "Search");
+        el.focused = true;
+        let elements = vec![make_element("AXButton", "Submit"), el];
+        let focused = elements.into_iter().find(|e| e.focused);
+        assert!(focused.is_some());
+        assert_eq!(focused.unwrap().role, "AXTextField");
+    }
+
+    // ── AX write no-match error path tests ────────────────────────────────────
+
+    #[test]
+    fn ax_perform_action_no_match_returns_error() {
+        // No real AX tree (no frontmost app in test environment) — exercises no-match path.
+        let result = ax_perform_action(Some("NonExistentButton99"), Some("AXButton"), "AXPress");
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn ax_set_value_no_match_returns_error() {
+        let result = ax_set_value(Some("NonExistentField99"), Some("AXTextField"), "hello");
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn ax_set_focused_no_match_returns_error() {
+        let result = ax_set_focused(Some("NonExistentField99"), Some("AXTextField"));
+        assert!(!result.success);
+        assert!(result.error.is_some());
     }
 }

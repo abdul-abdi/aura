@@ -67,6 +67,60 @@ pub fn press_key(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Type text targeted at a specific process (PID-targeted, not global HID).
+pub fn type_text_pid(text: &str, pid: i32) -> Result<()> {
+    anyhow::ensure!(pid > 0, "Invalid PID: {pid}");
+    let source = event_source()?;
+
+    for ch in text.chars() {
+        let mut buf = [0u16; 2];
+        let encoded = ch.encode_utf16(&mut buf);
+
+        let down = CGEvent::new_keyboard_event(source.clone(), 0, true)
+            .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
+        down.set_string_from_utf16_unchecked(encoded);
+
+        let up = CGEvent::new_keyboard_event(source.clone(), 0, false)
+            .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+
+        down.post_to_pid(pid);
+        up.post_to_pid(pid);
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+/// Press a key with optional modifiers targeted at a specific process.
+pub fn press_key_pid(key: CGKeyCode, modifiers: &[&str], pid: i32) -> Result<()> {
+    anyhow::ensure!(pid > 0, "Invalid PID: {pid}");
+    let source = event_source()?;
+    let mut flags = CGEventFlags::empty();
+
+    for m in modifiers {
+        match *m {
+            "cmd" | "command" => flags |= CGEventFlags::CGEventFlagCommand,
+            "shift" => flags |= CGEventFlags::CGEventFlagShift,
+            "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
+            "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
+            _ => tracing::warn!("Unknown modifier: {m}"),
+        }
+    }
+
+    let down = CGEvent::new_keyboard_event(source.clone(), key, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
+    down.set_flags(flags);
+
+    let up = CGEvent::new_keyboard_event(source.clone(), key, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+    up.set_flags(CGEventFlags::CGEventFlagNull);
+
+    down.post_to_pid(pid);
+    up.post_to_pid(pid);
+
+    Ok(())
+}
+
 /// Map common key names to macOS virtual keycodes.
 pub fn keycode_from_name(name: &str) -> Option<CGKeyCode> {
     match name.to_lowercase().as_str() {
@@ -154,6 +208,18 @@ pub fn keycode_from_name(name: &str) -> Option<CGKeyCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_text_pid_rejects_zero_pid() {
+        let result = type_text_pid("hello", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn press_key_pid_rejects_zero_pid() {
+        let result = press_key_pid(36, &[], 0);
+        assert!(result.is_err());
+    }
 
     // --- Special keys ---
 

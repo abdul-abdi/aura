@@ -736,8 +736,11 @@ async fn run_processor(
                     }
                 };
 
-            // Skip if screen hasn't changed
+            // Skip if screen hasn't changed — but still resolve waiter
             if frame.hash == last_hash {
+                if let Some(tx) = cap_trigger.take_waiter() {
+                    let _ = tx.send(());
+                }
                 continue;
             }
             last_hash = frame.hash;
@@ -802,7 +805,15 @@ async fn run_processor(
             // saturated. Drop the frame and continue capturing.
             if let Err(e) = cap_session.send_video(&frame.jpeg_base64) {
                 tracing::debug!("Dropped screen frame (channel not ready): {e}");
+                // Still resolve waiter so tool spawn doesn't hang on timeout
+                if let Some(tx) = cap_trigger.take_waiter() {
+                    let _ = tx.send(());
+                }
                 continue;
+            }
+            // Signal any awaiting tool spawn that the screenshot was delivered
+            if let Some(tx) = cap_trigger.take_waiter() {
+                let _ = tx.send(());
             }
             tracing::debug!(
                 width = frame.width,
@@ -1074,7 +1085,7 @@ async fn run_processor(
                                 }
                             }
 
-                            let response = tokio::select! {
+                            let mut response = tokio::select! {
                                 result = execute_tool(&name, &args, &tool_executor, &tool_screen_reader, tool_dims) => result,
                                 _ = tool_cancel.cancelled() => {
                                     tracing::info!(tool = %name, "Tool execution cancelled");
@@ -1090,6 +1101,44 @@ async fn run_processor(
                                 guard.remove(&id);
                             } else {
                                 tracing::error!("active_tool_tokens lock poisoned on remove");
+                            }
+
+                            // For input tools: settle, capture screenshot, capture post_state
+                            let input_tool = is_state_changing_tool(&name);
+                            if input_tool {
+                                // Brief delay to let UI settle after the input action
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                                // Trigger screenshot and await delivery (500ms timeout)
+                                let rx = tool_capture_trigger.trigger_and_wait();
+                                tool_cap_notify.notify_one();
+                                let screenshot_delivered = tokio::time::timeout(
+                                    Duration::from_millis(500),
+                                    rx,
+                                )
+                                .await
+                                .is_ok_and(|r| r.is_ok());
+
+                                // Capture post-action state on a blocking thread (AX FFI)
+                                let post_state = tokio::time::timeout(
+                                    Duration::from_millis(600),
+                                    tokio::task::spawn_blocking(capture_post_state),
+                                )
+                                .await
+                                .unwrap_or(Ok(serde_json::json!({})))
+                                .unwrap_or_else(|_| serde_json::json!({}));
+
+                                if let Some(obj) = response.as_object_mut() {
+                                    // Override the hardcoded field with actual result
+                                    let mut ps = post_state;
+                                    if let Some(ps_obj) = ps.as_object_mut() {
+                                        ps_obj.insert(
+                                            "screenshot_delivered".to_string(),
+                                            serde_json::Value::Bool(screenshot_delivered),
+                                        );
+                                    }
+                                    obj.insert("post_state".to_string(), ps);
+                                }
                             }
 
                             let tool_success = response
@@ -1159,9 +1208,12 @@ async fn run_processor(
                                 }).await;
                             }
 
-                            // Trigger immediate screen capture so Gemini sees the result
-                            tool_capture_trigger.trigger();
-                            tool_cap_notify.notify_one();
+                            // For non-input tools, fire-and-forget screen capture
+                            // (input tools already triggered + awaited above)
+                            if !input_tool {
+                                tool_capture_trigger.trigger();
+                                tool_cap_notify.notify_one();
+                            }
 
                             // Send tool response back to Gemini
                             if let Err(e) = tool_session.send_tool_response(id, name, response).await {
@@ -1634,7 +1686,13 @@ async fn execute_tool(
             let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let x = dims.to_logical_x(raw_x);
             let y = dims.to_logical_y(raw_y);
-            run_input_blocking(move || aura_input::mouse::move_mouse(x, y)).await
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::move_mouse_pid(x, y, pid),
+                "pid_move",
+                move || aura_input::mouse::move_mouse(x, y),
+                "hid_move",
+            )
+            .await
         }
         "click" => {
             let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1652,7 +1710,14 @@ async fn execute_tool(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as u32;
             let count = count.clamp(1, CLICK_COUNT_MAX);
-            run_input_blocking(move || aura_input::mouse::click(x, y, &button, count)).await
+            let btn = button.clone();
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::click_pid(x, y, &btn, count, pid),
+                "pid_click",
+                move || aura_input::mouse::click(x, y, &button, count),
+                "hid_click",
+            )
+            .await
         }
         "type_text" => {
             let text = args
@@ -1671,7 +1736,40 @@ async fn execute_tool(
             } else {
                 text
             };
-            run_input_blocking(move || aura_input::keyboard::type_text(&text)).await
+
+            // If label/role provided, focus the target element first via AX
+            let label = args.get("label").and_then(|v| v.as_str()).map(String::from);
+            let role = args.get("role").and_then(|v| v.as_str()).map(String::from);
+            if label.is_some() || role.is_some() {
+                let focus_label = label.clone();
+                let focus_role = role.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let result = aura_screen::accessibility::ax_set_focused(
+                        focus_label.as_deref(),
+                        focus_role.as_deref(),
+                    );
+                    if !result.success {
+                        tracing::debug!(
+                            error = ?result.error,
+                            "ax_set_focused failed, will type at current focus"
+                        );
+                    }
+                })
+                .await;
+                // Pause for focus to settle (60ms covers Electron/browser apps)
+                tokio::time::sleep(Duration::from_millis(60)).await;
+            }
+
+            // Type via keyboard synthesis (triggers onChange/validation in target apps)
+            // PID-targeted first, then HID fallback
+            let pid_text = text.clone();
+            run_with_pid_fallback(
+                move |pid| aura_input::keyboard::type_text_pid(&pid_text, pid),
+                "pid_type",
+                move || aura_input::keyboard::type_text(&text),
+                "hid_type",
+            )
+            .await
         }
         "press_key" => {
             let key_name = args
@@ -1690,10 +1788,20 @@ async fn execute_tool(
                 .unwrap_or_default();
             match aura_input::keyboard::keycode_from_name(&key_name) {
                 Some(keycode) => {
-                    run_input_blocking(move || {
-                        let mod_refs: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
-                        aura_input::keyboard::press_key(keycode, &mod_refs)
-                    })
+                    let mods = modifiers.clone();
+                    run_with_pid_fallback(
+                        move |pid| {
+                            let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
+                            aura_input::keyboard::press_key_pid(keycode, &mod_refs, pid)
+                        },
+                        "pid_key",
+                        move || {
+                            let mod_refs: Vec<&str> =
+                                modifiers.iter().map(|s| s.as_str()).collect();
+                            aura_input::keyboard::press_key(keycode, &mod_refs)
+                        },
+                        "hid_key",
+                    )
                     .await
                 }
                 None => {
@@ -1713,7 +1821,13 @@ async fn execute_tool(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .clamp(-(SCROLL_MAX as i64), SCROLL_MAX as i64) as i32;
-            run_input_blocking(move || aura_input::mouse::scroll(dx, dy)).await
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::scroll_pid(dx, dy, pid),
+                "pid_scroll",
+                move || aura_input::mouse::scroll(dx, dy),
+                "hid_scroll",
+            )
+            .await
         }
         "drag" => {
             let raw_fx = args.get("from_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1724,7 +1838,13 @@ async fn execute_tool(
             let fy = dims.to_logical_y(raw_fy);
             let tx = dims.to_logical_x(raw_tx);
             let ty = dims.to_logical_y(raw_ty);
-            run_input_blocking(move || aura_input::mouse::drag(fx, fy, tx, ty)).await
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::drag_pid(fx, fy, tx, ty, pid),
+                "pid_drag",
+                move || aura_input::mouse::drag(fx, fy, tx, ty),
+                "hid_drag",
+            )
+            .await
         }
         "activate_app" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -1754,6 +1874,8 @@ async fn execute_tool(
             }
 
             let result = executor.run(&script, ScriptLanguage::AppleScript, 10).await;
+            // Invalidate PID/app cache since frontmost app changed
+            aura_screen::macos::clear_frontmost_cache();
             if result.success {
                 serde_json::json!({
                     "success": true,
@@ -1845,55 +1967,86 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
         });
     }
 
-    let all_elements = aura_screen::accessibility::get_focused_app_elements();
-    if all_elements.is_empty() {
+    // Try 1: AX press action via single-pass walk (finds the exact Nth match and presses it)
+    let ax_result =
+        aura_screen::accessibility::ax_perform_action_nth(label, role, "AXPress", index);
+    if ax_result.success {
+        let el = ax_result.element.as_ref();
         return serde_json::json!({
-            "success": false,
-            "error": "No interactive UI elements found. The app may not expose accessibility data, \
-                      or Accessibility permission may not be fully granted.",
+            "success": true,
+            "method": "ax_press",
+            "element": {
+                "role": el.map(|e| &e.role),
+                "label": el.and_then(|e| e.label.as_ref()),
+            },
         });
     }
 
-    let matches = aura_screen::accessibility::find_elements(&all_elements, label, role);
-
-    if matches.is_empty() {
-        // Include alternatives to help Gemini self-correct
-        let alternatives: Vec<String> = all_elements
-            .iter()
-            .map(|el| {
-                let label_str = el.label.as_deref().unwrap_or("(unlabeled)");
-                let role_short = el
-                    .role
-                    .strip_prefix("AX")
-                    .unwrap_or(&el.role)
-                    .to_lowercase();
-                format!("{role_short} \"{label_str}\"")
-            })
-            .take(15)
-            .collect();
-
-        return serde_json::json!({
-            "success": false,
-            "error": format!(
-                "No element matching label={:?} role={:?}. Available elements: {}",
-                label, role, alternatives.join(", ")
-            ),
-        });
-    }
-
-    let target = match matches.get(index) {
+    // AXPress failed — need bounds for coordinate fallback.
+    // Check if ax_perform_action_nth found the element but couldn't press it (has element),
+    // or if the element wasn't found at all (no element).
+    let target = match ax_result.element {
         Some(el) => el,
         None => {
-            return serde_json::json!({
-                "success": false,
-                "error": format!(
-                    "Index {} out of range. Found {} matching elements.",
-                    index,
-                    matches.len()
-                ),
-            });
+            // Element not found — do a full walk for diagnostic alternatives
+            let all_elements = aura_screen::accessibility::get_focused_app_elements();
+            if all_elements.is_empty() {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "No interactive UI elements found. The app may not expose accessibility data, \
+                              or Accessibility permission may not be fully granted.",
+                });
+            }
+
+            let matches = aura_screen::accessibility::find_elements(&all_elements, label, role);
+            if matches.is_empty() {
+                let alternatives: Vec<String> = all_elements
+                    .iter()
+                    .map(|el| {
+                        let label_str = el.label.as_deref().unwrap_or("(unlabeled)");
+                        let role_short = el
+                            .role
+                            .strip_prefix("AX")
+                            .unwrap_or(&el.role)
+                            .to_lowercase();
+                        format!("{role_short} \"{label_str}\"")
+                    })
+                    .take(15)
+                    .collect();
+
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "No element matching label={:?} role={:?}. Available elements: {}",
+                        label, role, alternatives.join(", ")
+                    ),
+                });
+            }
+
+            return match matches.get(index) {
+                Some(_target) => serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "AXPress failed on element ({}). {}",
+                        ax_result.error.unwrap_or_default(),
+                        "Element has no bounds for coordinate fallback.",
+                    ),
+                }),
+                None => serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Index {} out of range. Found {} matching elements.",
+                        index, matches.len()
+                    ),
+                }),
+            };
         }
     };
+
+    tracing::debug!(
+        error = ?ax_result.error,
+        "AXPress failed, trying PID-targeted click"
+    );
 
     let bounds = match &target.bounds {
         Some(b) => b,
@@ -1911,9 +2064,31 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
 
     // AX bounds are already in logical screen coordinates — no FrameDims conversion needed
     let (center_x, center_y) = bounds.center();
+
+    // Try 2: PID-targeted click
+    if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
+        if aura_input::mouse::click_pid(center_x, center_y, "left", 1, pid).is_ok() {
+            return serde_json::json!({
+                "success": true,
+                "method": "pid_click",
+                "element": {
+                    "role": target.role,
+                    "label": target.label,
+                },
+                "clicked_at": {
+                    "x": center_x,
+                    "y": center_y,
+                },
+            });
+        }
+        tracing::debug!("PID-targeted click_element failed, falling back to HID");
+    }
+
+    // Try 3: HID click fallback
     match aura_input::mouse::click(center_x, center_y, "left", 1) {
         Ok(()) => serde_json::json!({
             "success": true,
+            "method": "hid_click",
             "element": {
                 "role": target.role,
                 "label": target.label,
@@ -1925,7 +2100,7 @@ fn click_element_inner(label: Option<&str>, role: Option<&str>, index: usize) ->
         }),
         Err(e) => serde_json::json!({
             "success": false,
-            "error": format!("Click failed: {e}"),
+            "error": format!("Click failed (all methods exhausted): {e}"),
         }),
     }
 }
@@ -1966,13 +2141,83 @@ fn build_menu_click_script(app: &str, path: &[String]) -> String {
     }
 }
 
+/// Returns true if the tool changes screen state and should get post_state enrichment
+/// and screenshot await behavior.
+fn is_state_changing_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "move_mouse"
+            | "click"
+            | "type_text"
+            | "press_key"
+            | "scroll"
+            | "drag"
+            | "click_element"
+            | "activate_app"
+            | "click_menu_item"
+    )
+}
+
+/// Capture post-action state: frontmost app, focused element, screenshot_delivered flag.
+/// Must be called from a blocking thread (AX FFI is synchronous).
+fn capture_post_state() -> serde_json::Value {
+    let frontmost_app = aura_screen::macos::get_frontmost_app().unwrap_or_default();
+    let focused = aura_screen::accessibility::get_focused_element();
+    let focused_json = match focused {
+        Some(el) => {
+            let mut m = serde_json::json!({
+                "role": el.role,
+                "label": el.label,
+                "value": el.value,
+            });
+            if let Some(ref b) = el.bounds {
+                m["bounds"] = serde_json::json!({
+                    "x": b.x, "y": b.y, "width": b.width, "height": b.height,
+                });
+            }
+            m
+        }
+        None => serde_json::Value::Null,
+    };
+    serde_json::json!({
+        "frontmost_app": frontmost_app,
+        "focused_element": focused_json,
+    })
+}
+
+/// Try PID-targeted input first, fall back to global HID.
+async fn run_with_pid_fallback<F1, F2>(
+    pid_fn: F1,
+    pid_method: &'static str,
+    hid_fn: F2,
+    hid_method: &'static str,
+) -> serde_json::Value
+where
+    F1: FnOnce(i32) -> anyhow::Result<()> + Send + 'static,
+    F2: FnOnce() -> anyhow::Result<()> + Send + 'static,
+{
+    if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
+        let result = run_input_blocking(move || pid_fn(pid), pid_method).await;
+        if result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return result;
+        }
+        tracing::debug!("{pid_method} failed, falling back to HID");
+    }
+    run_input_blocking(hid_fn, hid_method).await
+}
+
 /// Run a blocking input operation on a dedicated thread to avoid blocking tokio.
-async fn run_input_blocking<F>(f: F) -> serde_json::Value
+/// Returns `{ "success": true/false, "method": method }` on success.
+async fn run_input_blocking<F>(f: F, method: &'static str) -> serde_json::Value
 where
     F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
     match tokio::task::spawn_blocking(f).await {
-        Ok(Ok(())) => serde_json::json!({ "success": true }),
+        Ok(Ok(())) => serde_json::json!({ "success": true, "method": method }),
         Ok(Err(e)) => serde_json::json!({ "success": false, "error": format!("{e}") }),
         Err(e) => serde_json::json!({ "success": false, "error": format!("Task panicked: {e}") }),
     }
