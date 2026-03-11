@@ -69,10 +69,20 @@ jobs:
             "target/release/Aura-${VERSION}.dmg"
           rm -rf "$DMG_DIR"
 
+      - name: Fetch tags for release notes
+        run: git fetch --tags
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          NOTES=$(bash scripts/generate-release-notes.sh)
+          # Write to file to avoid shell escaping issues
+          echo "$NOTES" > /tmp/release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: Aura v${{ steps.version.outputs.version }}
-          generate_release_notes: true
+          body_path: /tmp/release-notes.md
           files: target/release/Aura-${{ steps.version.outputs.version }}.dmg
