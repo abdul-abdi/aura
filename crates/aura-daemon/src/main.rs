@@ -712,6 +712,8 @@ async fn run_processor(
     tokio::spawn(async move {
         let mut last_res: (u32, u32) = (0, 0);
         let mut censored_warned = false;
+        let mut idle_skip_count: u32 = 0;
+        const IDLE_THRESHOLD: u32 = 10; // 10 × 500ms = 5s of no change → slow down
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.tick().await; // skip first immediate tick
 
@@ -813,6 +815,13 @@ async fn run_processor(
                 if let Some(tx) = cap_trigger.take_waiter() {
                     let _ = tx.send(());
                 }
+                idle_skip_count += 1;
+                if idle_skip_count == IDLE_THRESHOLD {
+                    // Screen static for 5s — switch to slow polling (2s)
+                    interval = tokio::time::interval(Duration::from_millis(2000));
+                    interval.tick().await;
+                    tracing::debug!("Screen idle for 5s — switching to 2s capture interval");
+                }
                 tracing::trace!("Skipped duplicate send (hash unchanged since last send)");
                 continue;
             }
@@ -825,6 +834,14 @@ async fn run_processor(
                 continue;
             }
             cap_last_sent.store(frame.hash, Ordering::Release);
+
+            // Screen changed — reset idle counter and restore fast polling
+            if idle_skip_count >= IDLE_THRESHOLD {
+                interval = tokio::time::interval(Duration::from_millis(500));
+                interval.tick().await;
+                tracing::debug!("Screen changed — restoring 500ms capture interval");
+            }
+            idle_skip_count = 0;
 
             // Signal any awaiting tool spawn that the screenshot was delivered
             if let Some(tx) = cap_trigger.take_waiter() {
