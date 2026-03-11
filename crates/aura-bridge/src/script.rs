@@ -106,7 +106,7 @@ impl ScriptExecutor {
 
             // Wait with timeout using a polling loop
             let start = std::time::Instant::now();
-            let result = loop {
+            loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         // Process finished — read output
@@ -159,9 +159,7 @@ impl ScriptExecutor {
                         };
                     }
                 }
-            };
-
-            result
+            }
         });
 
         match handle.await {

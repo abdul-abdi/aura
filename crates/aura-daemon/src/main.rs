@@ -783,22 +783,21 @@ async fn run_processor(
                 if let Ok(jpeg_bytes) = base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &frame.jpeg_base64,
-                ) {
-                    if let Ok(img) =
+                )
+                    && let Ok(img) =
                         image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
-                    {
-                        let rgb = img.to_rgb8();
-                        if aura_screen::capture::frame_looks_censored(
-                            rgb.as_raw(),
-                            rgb.width() as usize,
-                            rgb.height() as usize,
-                        ) {
-                            tracing::error!(
-                                "Screen capture appears CENSORED — window contents are blank. \
-                                 Grant Screen Recording in System Settings > Privacy & Security > Screen Recording, \
-                                 then restart Aura."
-                            );
-                        }
+                {
+                    let rgb = img.to_rgb8();
+                    if aura_screen::capture::frame_looks_censored(
+                        rgb.as_raw(),
+                        rgb.width() as usize,
+                        rgb.height() as usize,
+                    ) {
+                        tracing::error!(
+                            "Screen capture appears CENSORED — window contents are blank. \
+                             Grant Screen Recording in System Settings > Privacy & Security > Screen Recording, \
+                             then restart Aura."
+                        );
                     }
                 }
                 censored_warned = true;
@@ -1494,25 +1493,24 @@ async fn execute_tool(
             // previously denied Automation access. Scripts targeting apps where
             // permission hasn't been decided yet proceed normally (macOS shows the
             // one-time consent popup).
-            if let Some(target_app) = aura_bridge::automation::extract_target_app(script) {
-                if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&target_app)
-                {
-                    let perm = aura_bridge::automation::check_automation_permission(bundle_id);
-                    if perm == aura_bridge::automation::AutomationPermission::Denied {
-                        tracing::warn!(
-                            target_app = %target_app,
-                            "Automation permission denied for {target_app} — skipping script"
-                        );
-                        return serde_json::json!({
-                            "success": false,
-                            "error": format!(
-                                "Automation permission for {target_app} is denied. \
-                                 The user must grant it in System Settings > Privacy & Security > Automation, \
-                                 then toggle Aura's access to {target_app} on."
-                            ),
-                            "error_kind": "automation_denied",
-                        });
-                    }
+            if let Some(target_app) = aura_bridge::automation::extract_target_app(script)
+                && let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&target_app)
+            {
+                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                if perm == aura_bridge::automation::AutomationPermission::Denied {
+                    tracing::warn!(
+                        target_app = %target_app,
+                        "Automation permission denied for {target_app} — skipping script"
+                    );
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Automation permission for {target_app} is denied. \
+                             The user must grant it in System Settings > Privacy & Security > Automation, \
+                             then toggle Aura's access to {target_app} on."
+                        ),
+                        "error_kind": "automation_denied",
+                    });
                 }
             }
 

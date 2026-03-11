@@ -128,10 +128,10 @@ fn read_config_file_proxy_url() -> Option<String> {
 
 fn read_config_value(key: &str) -> Option<String> {
     // Check platform config dir first (~/Library/Application Support/aura/ on macOS)
-    if let Some(path) = dirs::config_dir().map(|d| d.join("aura/config.toml")) {
-        if let Some(val) = read_config_value_from_path(&path, key) {
-            return Some(val);
-        }
+    if let Some(path) = dirs::config_dir().map(|d| d.join("aura/config.toml"))
+        && let Some(val) = read_config_value_from_path(&path, key)
+    {
+        return Some(val);
     }
     // Fallback to ~/.config/aura/ (where WelcomeView.swift saves on macOS)
     if let Some(home) = dirs::home_dir() {
