@@ -563,14 +563,17 @@ mod tests {
         let mem = SessionMemory::open(&dir.path().join("test.db")).unwrap();
 
         let sid = mem.start_session().unwrap();
-        mem.add_fact(&sid, "preference", "likes dark mode", None, 0.8).unwrap();
+        mem.add_fact(&sid, "preference", "likes dark mode", None, 0.8)
+            .unwrap();
         mem.end_session(&sid, Some("test session")).unwrap();
 
         // Backdate session to 100 days ago
-        mem.conn.execute(
-            "UPDATE sessions SET started_at = datetime('now', '-100 days') WHERE id = ?1",
-            rusqlite::params![sid],
-        ).unwrap();
+        mem.conn
+            .execute(
+                "UPDATE sessions SET started_at = datetime('now', '-100 days') WHERE id = ?1",
+                rusqlite::params![sid],
+            )
+            .unwrap();
 
         let deleted = mem.prune_old_sessions(30).unwrap();
         assert_eq!(deleted, 1);

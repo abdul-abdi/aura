@@ -198,10 +198,13 @@ version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

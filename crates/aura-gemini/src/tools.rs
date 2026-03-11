@@ -220,11 +220,7 @@ mod tests {
     #[test]
     fn tool_declarations_returns_two_tool_objects() {
         let tools = build_tool_declarations();
-        assert_eq!(
-            tools.len(),
-            2,
-            "Function declarations + Google Search"
-        );
+        assert_eq!(tools.len(), 2, "Function declarations + Google Search");
         let decls = tools[0].function_declarations.as_ref().unwrap();
         assert_eq!(decls.len(), 10, "Should have 10 function declarations");
     }
@@ -292,7 +288,10 @@ mod tests {
         let decls = tools[0].function_declarations.as_ref().unwrap();
         for decl in decls {
             if decl.name == "shutdown_aura" {
-                assert!(decl.behavior.is_none(), "shutdown_aura should have no behavior");
+                assert!(
+                    decl.behavior.is_none(),
+                    "shutdown_aura should have no behavior"
+                );
             } else {
                 assert_eq!(
                     decl.behavior.as_deref(),

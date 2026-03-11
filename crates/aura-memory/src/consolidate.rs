@@ -6,8 +6,7 @@ use serde::Deserialize;
 use crate::store::{Message, MessageRole};
 
 const CONSOLIDATION_MODEL: &str = "gemini-2.0-flash-lite";
-const GEMINI_REST_URL: &str =
-    "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_REST_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /// Maximum characters in the consolidation prompt (≈12K tokens).
 const MAX_PROMPT_CHARS: usize = 50_000;
@@ -105,9 +104,7 @@ pub async fn consolidate_session(
     }
 
     let prompt = build_consolidation_prompt(&filtered);
-    let url = format!(
-        "{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent"
-    );
+    let url = format!("{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent");
 
     let body = serde_json::json!({
         "contents": [{
@@ -227,7 +224,11 @@ mod tests {
             .collect();
         let refs: Vec<&Message> = messages.iter().collect();
         let prompt = build_consolidation_prompt(&refs);
-        assert!(prompt.len() < 60_000, "Prompt was {} chars, expected < 60K", prompt.len());
+        assert!(
+            prompt.len() < 60_000,
+            "Prompt was {} chars, expected < 60K",
+            prompt.len()
+        );
         assert!(prompt.contains("Message number 999"));
     }
 }
