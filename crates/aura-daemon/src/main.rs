@@ -769,8 +769,8 @@ async fn run_processor(
             _ = cancel.cancelled() => break,
             event = events.recv() => {
                 match event {
-                    Ok(GeminiEvent::Connected) => {
-                        tracing::info!("Gemini session connected");
+                    Ok(GeminiEvent::Connected { is_first }) => {
+                        tracing::info!(is_first, "Gemini session connected");
                         is_interrupted.store(false, Ordering::Release);
                         bus.send(AuraEvent::GeminiConnected);
 
@@ -791,8 +791,6 @@ async fn run_processor(
                         let _ = ipc_tx.send(DaemonEvent::Status {
                             message: "Connected — Listening".into(),
                         });
-
-                        let is_first = session.is_first_connect();
 
                         if is_first {
                             // Inject recent session history for cross-session memory

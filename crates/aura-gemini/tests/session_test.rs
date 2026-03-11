@@ -131,7 +131,7 @@ async fn test_session_connect_and_receive_audio() {
     // Should receive Connected
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -184,7 +184,7 @@ async fn test_session_send_audio() {
     // Wait for connection
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -253,7 +253,7 @@ async fn test_session_tool_call_and_response() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -322,7 +322,7 @@ async fn test_session_interrupted() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -356,7 +356,7 @@ async fn test_session_turn_complete() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -432,7 +432,7 @@ async fn test_session_tool_call_cancellation() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -478,7 +478,7 @@ async fn test_session_transcription() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -515,7 +515,7 @@ async fn test_session_reconnect_on_server_close() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;
@@ -641,7 +641,7 @@ async fn test_go_away_triggers_reconnect() {
     // First Connected
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected (first)",
     )
     .await;
@@ -650,7 +650,7 @@ async fn test_go_away_triggers_reconnect() {
     // The next event we care about is a second Connected.
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected (second, after goAway)",
     )
     .await;
@@ -687,7 +687,7 @@ async fn test_binary_frame_handled_like_text() {
 
     expect_event(
         &mut rx,
-        |e| matches!(e, GeminiEvent::Connected),
+        |e| matches!(e, GeminiEvent::Connected { .. }),
         "Connected",
     )
     .await;

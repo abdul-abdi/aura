@@ -26,7 +26,9 @@ const MIN_STABLE_CONNECTION_SECS: u64 = 30;
 /// Events emitted by the Gemini session.
 #[derive(Debug, Clone)]
 pub enum GeminiEvent {
-    Connected,
+    Connected {
+        is_first: bool,
+    },
     AudioResponse {
         samples: Vec<f32>,
     },
@@ -418,11 +420,10 @@ async fn connect_and_stream_inner(
 
     *was_connected = true;
     *connected_at = std::time::Instant::now();
-    let _ = event_tx.send(GeminiEvent::Connected);
-    // Set after sending so the receiver sees true on first connect
-    state
+    let is_first = state
         .is_first_connect
-        .store(false, std::sync::atomic::Ordering::Release);
+        .swap(false, std::sync::atomic::Ordering::AcqRel);
+    let _ = event_tx.send(GeminiEvent::Connected { is_first });
     tracing::info!("Gemini Live session connected");
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
