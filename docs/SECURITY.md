@@ -14,7 +14,7 @@ This document describes the threat model, the defense-in-depth layers that mitig
 |---|---|---|
 | Execute scripts | `osascript` (AppleScript / JXA) | Any macOS app or shell command reachable via `do shell script` |
 | Synthetic input | `CGEvent.post()` via `aura-input` | Move mouse, click, type text, press keys, scroll, drag |
-| Read screen | `CGDisplay::image()` via `aura-screen` | Full-screen capture at 1 fps, retina resolution |
+| Read screen | `CGDisplay::image()` via `aura-screen` | Full-screen capture at 2 fps (500ms), retina resolution |
 | Capture audio | `cpal` via `aura-voice` | Default input device, 16 kHz mono PCM |
 | Network | WebSocket to Gemini Live API | Bidirectional audio + tool calls over `wss://` |
 
@@ -54,7 +54,7 @@ All script content is checked against blocklists *before* execution. This applie
 | `unlink ` | File deletion (trailing space prevents matching "unlinked") |
 | `diskutil erase` | Disk erase |
 
-**Blocked JXA patterns** (`BLOCKED_JXA_PATTERNS`, checked case-insensitively):
+**Blocked JXA patterns** (`BLOCKED_JXA_PATTERNS`; all patterns — shell and JXA — are checked case-insensitively by lowercasing the entire script before matching):
 
 | Pattern | Threat |
 |---|---|
@@ -131,7 +131,7 @@ Speaker bleed-through from laptop speakers can re-enter the microphone and trigg
 - **Clamped range:** [0.02, 0.15] (`CALIBRATION_THRESHOLD_MIN` / `CALIBRATION_THRESHOLD_MAX`)
   - Floor of 0.02 prevents any noise from triggering barge-in
   - Ceiling of 0.15 prevents the gate from suppressing real speech
-- **Effect:** While Aura is speaking (audio playback active), mic frames below the threshold are dropped, preventing the model from interrupting itself
+- **Effect:** While audio is actively playing through speakers, mic frames are **unconditionally dropped** (full mute). The energy gate applies during the pre-playback phase when Gemini has started responding but audio hasn't reached the speaker yet, preventing premature barge-in from speaker bleed
 
 ---
 
@@ -200,7 +200,7 @@ The destructive action confirmation (Layer 4) depends entirely on Gemini followi
 
 ### Screen Captures Contain Sensitive Data
 
-Screen captures are sent to Gemini at 1 fps. Anything visible on screen -- passwords in a password manager, private messages, financial data -- is transmitted. There is no content filtering or redaction of captured frames.
+Screen captures are sent to Gemini at 2 fps. Anything visible on screen -- passwords in a password manager, private messages, financial data -- is transmitted. There is no content filtering or redaction of captured frames.
 
 ---
 

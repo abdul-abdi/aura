@@ -75,7 +75,7 @@ open /Applications/Aura.app
 | Dot color | Meaning |
 |---|---|
 | Green | Listening and connected |
-| Green (pulsing) | Processing your request |
+| Green (pulsing) | Connected and listening |
 | Amber | Reconnecting or running a tool |
 | Red | Error (usually a permission issue) |
 | Gray | Disconnected |
@@ -86,7 +86,9 @@ open /Applications/Aura.app
 
 ### Config file
 
-Aura reads its configuration from `~/.config/aura/config.toml`:
+Aura checks two locations for its config file (first match wins):
+1. `~/Library/Application Support/aura/config.toml` (macOS default)
+2. `~/.config/aura/config.toml` (fallback, also used by the Welcome screen)
 
 ```toml
 api_key = "your-gemini-api-key"
@@ -103,6 +105,8 @@ Environment variables override the config file:
 | `AURA_PROXY_URL` | WebSocket relay URL (optional) |
 | `AURA_PROXY_AUTH_TOKEN` | Auth token for the proxy |
 | `RUST_LOG` | Log verbosity (e.g. `debug`, `aura_gemini=trace`) |
+| `PORT` | Proxy server listen port (default 8080) |
+| `AURA_CLOUD_REGION` | GCP region for deploy-proxy.sh (default `us-central1`) |
 
 ### Data directory
 

@@ -21,7 +21,7 @@ See the full architecture diagram in [architecture.mmd](architecture.mmd).
 |-------|------:|-------------|-----------|
 | **aura-daemon** | ~2,890 | Orchestrator. CLI entry point, tokio runtime, Gemini event loop, tool dispatch, mic bridge, screen capture loop, IPC server. | `main.rs` (1,734), `bus.rs`, `event.rs`, `ipc.rs`, `protocol.rs`, `setup.rs` |
 | **aura-gemini** | ~1,879 | WebSocket client for the Gemini Live API. Connection lifecycle, reconnection with exponential backoff, setup message construction, server message parsing, audio encoding/decoding. | `session.rs` (781), `protocol.rs` (559), `config.rs` (279), `tools.rs` (254) |
-| **aura-voice** | ~687 | Audio capture via cpal (48kHz native, rubato SincFixedIn resampler to 16kHz) and playback via rodio (24kHz, dedicated thread, 80ms pre-buffer). | `audio.rs`, `playback.rs`, `wakeword.rs` |
+| **aura-voice** | ~687 | Audio capture via cpal (prefers 48kHz, adapts to device native rate; rubato SincFixedIn resampler to 16kHz) and playback via rodio (24kHz, dedicated thread, 80ms pre-buffer). | `audio.rs`, `playback.rs`, `wakeword.rs` |
 | **aura-screen** | ~490 | Screen capture (CGDisplay BGRA to RGB to JPEG 80%, max 1920px), FNV-1a change detection (8192-pixel sample), screen context via osascript, post-action capture trigger. | `capture.rs`, `context.rs`, `macos.rs` |
 | **aura-bridge** | ~653 | AppleScript/JXA execution through osascript with polling-based timeout (max 60s), dangerous pattern blocklist (10 shell + 3 JXA patterns), obfuscated command detection (string concatenation/variable splitting). Output capped at 10 KB. | `script.rs`, `automation.rs` |
 | **aura-input** | ~525 | Synthetic mouse and keyboard via CGEvent. Mouse: move, click (left/right, 1-3x), scroll (pixel units), drag (with 50ms inter-event delays). Keyboard: type_text (per-character Unicode via UTF-16), press_key (virtual keycodes + modifier flags). | `mouse.rs`, `keyboard.rs`, `accessibility.rs` |
@@ -42,7 +42,7 @@ The Cocoa run loop (`NSApplication::run`). All AppKit calls -- NSStatusItem crea
 Spawned on a `std::thread` so the main thread remains free for AppKit. Hosts:
 - Gemini WebSocket connection loop (`session.rs::connection_loop`)
 - Audio mic bridge (std::sync::mpsc to tokio::mpsc adapter with RMS energy gate)
-- Screen capture loop (1 fps, change-detection gated)
+- Screen capture loop (2 fps / 500ms interval, change-detection gated)
 - Tool dispatch (tokio::spawn per tool call, semaphore-limited to 8 concurrent)
 - IPC server (Unix domain socket, one tokio task per connected client)
 - Event bus subscriber (processes GeminiEvent, updates menu bar, persists to SQLite)
@@ -65,7 +65,7 @@ Microphone
   --> rubato SincFixedIn resampler (48kHz -> 16kHz, chunk size 1024)
   --> std::sync::mpsc (unbounded, from cpal callback thread)
   --> mic bridge (tokio task, std mpsc -> tokio mpsc adapter)
-  --> RMS energy gate (threshold: 0.04, suppresses speaker bleed during playback)
+  --> full mute while speaker is active (unconditional drop); RMS energy gate (threshold: 0.04) when Gemini is speaking but playback hasn't started
   --> tokio::mpsc (capacity: 256)
   --> GeminiLiveSession::audio_tx (capacity: 64)
   --> f32 -> PCM 16-bit LE -> base64 encoding
@@ -89,7 +89,7 @@ CGDisplay::image() (active display under mouse cursor)
   --> WebSocket Text frame -> Gemini Live API
 ```
 
-Post-action capture: After each tool execution, a `CaptureTrigger` (Arc<AtomicBool>) signals the screen capture loop to take an immediate screenshot, bypassing the 1-second interval. This lets Gemini see the result of its action without waiting.
+Post-action capture: After each tool execution, a `CaptureTrigger` (Arc<AtomicBool>) signals the screen capture loop to take an immediate screenshot, bypassing the 500ms interval. A `tokio::sync::Notify` is also used to immediately wake the capture loop. This lets Gemini see the result of its action without waiting.
 
 ### 4.3 Tool Execution (Gemini to macOS)
 
@@ -102,7 +102,7 @@ Gemini Live API
   --> tokio::Semaphore::acquire (8 permits max)
   --> tokio::spawn tool handler
   --> dispatch by name:
-      run_applescript  -> ScriptExecutor (osascript, 30s default timeout)
+      run_applescript  -> ScriptExecutor (osascript, max 60s timeout)
       get_screen_context -> MacOSScreenReader (osascript queries + pbpaste)
       shutdown_aura    -> CancellationToken::cancel (inline, breaks event loop)
       move_mouse       -> aura_input::mouse::move_mouse (CGEvent)

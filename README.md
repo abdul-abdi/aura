@@ -57,11 +57,11 @@ graph LR
 | | Feature | Detail |
 |---|---|---|
 | 🎙 | **Real-time voice** | 16kHz in, 24kHz out, barge-in detection with RMS energy gating |
-| 👁 | **Screen understanding** | 1 FPS capture with FNV-1a change detection, auto-trigger after tool use |
+| 👁 | **Screen understanding** | 2 FPS capture with FNV-1a change detection, auto-trigger after tool use |
 | 🖱 | **9 control tools** | `move_mouse`, `click`, `scroll`, `drag`, `type_text`, `press_key`, `run_applescript`, `get_screen_context`, `shutdown_aura` |
-| 🔒 | **Defense-in-depth** | Sandbox execution, pattern blocklists, obfuscation detection |
+| 🔒 | **Defense-in-depth** | Pattern blocklists, obfuscation detection, input clamping |
 | 🔄 | **Session resumption** | Reconnect without losing context, exponential backoff + jitter |
-| 🟢 | **Menu bar UI** | 5-color status dot — listening, thinking, error, disconnected, pulsing |
+| 🟢 | **Menu bar UI** | 5-color status dot — listening, reconnecting, error, disconnected, pulsing |
 | 💾 | **Persistent memory** | SQLite WAL-mode storage for sessions, messages, and settings |
 | ☁️ | **Cloud relay** | Optional Cloud Run WebSocket proxy for NAT traversal |
 
@@ -105,7 +105,7 @@ bash scripts/bundle.sh    # → target/release/Aura.app
 | `aura-gemini` | WebSocket client, Gemini Live API protocol |
 | `aura-voice` | CoreAudio capture (16kHz) + rodio playback (24kHz) |
 | `aura-screen` | CGDisplay capture, JPEG encoding, change detection |
-| `aura-bridge` | Sandboxed AppleScript/JXA execution |
+| `aura-bridge` | AppleScript/JXA execution with pattern blocklists |
 | `aura-input` | CGEvent synthetic mouse + keyboard |
 | `aura-memory` | SQLite persistence (sessions, messages, settings) |
 | `aura-menubar` | Cocoa FFI — NSStatusItem, NSPopover, context menu |
@@ -117,9 +117,8 @@ bash scripts/bundle.sh    # → target/release/Aura.app
 
 Aura runs AI-generated code on your machine. Safety is non-negotiable.
 
-- **Sandboxed execution** — all scripts run inside `sandbox-exec` with a restrictive profile
-- **Pattern blocklists** — blocks `rm -rf`, `sudo`, `dd`, `chmod 777`, `diskutil erase`, and [more](docs/SECURITY.md)
-- **JXA hardening** — blocks `$.system`, `ObjC.import`, `Application("Terminal")` escape vectors
+- **Pattern blocklists** — blocks `rm -rf`, `sudo`, `dd if=`, `chmod 777`, `diskutil erase`, and [more](docs/SECURITY.md)
+- **JXA hardening** — blocks `$.system`, `ObjC.import`, `.doScript()` escape vectors
 - **Obfuscation detection** — catches dangerous commands split across string concatenation or variables
 
 > Full security model: [`docs/SECURITY.md`](docs/SECURITY.md)

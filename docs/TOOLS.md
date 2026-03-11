@@ -61,10 +61,10 @@ Execute AppleScript or JXA code to control any macOS application or system featu
 
 ### Notes
 
-- Executed via `osascript` in a `sandbox-exec` restrictive profile.
-- Output is truncated to 10 KB (`MAX_OUTPUT_BYTES`).
+- Executed via `osascript` as a child process (no `sandbox-exec` — see [SECURITY.md](SECURITY.md#4-whats-not-sandboxed-honest-assessment) for details).
+- Output is truncated to 10,240 bytes (`MAX_OUTPUT_BYTES`).
 - Timeout is enforced with `Child::kill()` -- the process is actually terminated, not just abandoned.
-- **Dangerous pattern blocklist** -- scripts are checked against `BLOCKED_SHELL_PATTERNS` (e.g. `rm -rf`, `sudo`, `mkfs`, `dd if=`, `chmod 777`, `diskutil erase`) and `BLOCKED_JXA_PATTERNS` (e.g. `$.system`, `ObjC.import`, `.doScript(`). Blocked scripts return an error without executing.
+- **Dangerous pattern blocklist** -- scripts are checked (case-insensitively) against `BLOCKED_SHELL_PATTERNS` (`rm -rf`, `rm -r`, `sudo`, `mkfs`, `dd if=`, `chmod 777`, `:(){ :|:`, `> /dev/sd`, `unlink `, `diskutil erase`) and `BLOCKED_JXA_PATTERNS` (`$.system`, `objc.import`, `.doScript(`). Blocked scripts return an error without executing.
 - **Obfuscation detection** -- fragmented dangerous commands split across string concatenation or variables are caught (e.g. `set a to "rm"` + `set b to " -rf"`).
 - **Automation permission preflight** -- before executing, the handler checks whether Aura has Automation access to the target app. If denied, it returns an `automation_denied` error immediately instead of running the script.
 
@@ -348,6 +348,6 @@ All tools pass through validation before execution:
 | Obfuscation detection | `run_applescript` | Catches dangerous commands split across string concatenation or variable assignments. |
 | Automation permission preflight | `run_applescript` | Checks if Aura has Automation access to the target app before running the script. |
 | Input clamping | `click` (`click_count`), `scroll` (`dx`, `dy`), `type_text` (`text` length) | Values are clamped to safe ranges to prevent abuse. |
-| Output truncation | `run_applescript` | stdout/stderr capped at 10 KB. |
+| Output truncation | `run_applescript` | stdout/stderr capped at 10,240 bytes. |
 | Timeout enforcement | `run_applescript` | Process killed via `Child::kill()` after timeout (max 60s). |
 | Destructive action guardrail | All tools (via system prompt) | Gemini is instructed to confirm with the user before any destructive action (deleting files, emptying trash, etc.). |
