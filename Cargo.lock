@@ -124,7 +124,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "aura-bridge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "aura-daemon"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "aura-bridge",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "aura-gemini"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "aura-gemini",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "aura-input"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.1",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "aura-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "aura-menubar"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cocoa",
@@ -222,7 +222,7 @@ dependencies = [
 
 [[package]]
 name = "aura-proxy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "aura-screen"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "aura-voice"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "cpal",

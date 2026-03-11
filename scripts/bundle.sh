@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 APP_NAME="Aura"
-VERSION="1.0.0"
+VERSION=$(grep '^version' "${PROJECT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
 BUNDLE_DIR="${PROJECT_DIR}/target/release/${APP_NAME}.app"
 DMG_PATH="${PROJECT_DIR}/target/release/${APP_NAME}-${VERSION}.dmg"
 

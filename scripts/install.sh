@@ -7,13 +7,6 @@ APP_NAME="Aura"
 REPO_URL="https://github.com/abdul-abdi/aura"
 INSTALL_DIR="/Applications"
 
-echo ""
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║         Installing Aura v0.2         ║"
-echo "  ║   Voice-first AI desktop companion   ║"
-echo "  ╚══════════════════════════════════════╝"
-echo ""
-
 # --- Pre-flight checks ---
 
 # macOS only
@@ -44,7 +37,7 @@ WORK_DIR="${TMPDIR:-/tmp}/aura-install-$$"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
-if [[ -d "$1" ]] 2>/dev/null; then
+if [[ -d "${1:-}" ]] 2>/dev/null; then
     # If a local path is provided, use it
     PROJECT_DIR="$1"
     echo "==> Using local source: $PROJECT_DIR"
@@ -53,6 +46,16 @@ else
     git clone --depth 1 "$REPO_URL" "$WORK_DIR"
     PROJECT_DIR="$WORK_DIR"
 fi
+
+# --- Read version from Cargo.toml (single source of truth) ---
+VERSION=$(grep '^version' "${PROJECT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+
+echo ""
+echo "  ╔══════════════════════════════════════╗"
+echo "  ║       Installing Aura v${VERSION}        ║"
+echo "  ║   Voice-first AI desktop companion   ║"
+echo "  ╚══════════════════════════════════════╝"
+echo ""
 
 # --- Build ---
 echo "==> Building Aura (release mode)..."
@@ -74,7 +77,7 @@ mkdir -p "${BUNDLE}/Contents/MacOS"
 mkdir -p "${BUNDLE}/Contents/Resources"
 cp "$BINARY" "${BUNDLE}/Contents/MacOS/aura-daemon"
 
-cat > "${BUNDLE}/Contents/Info.plist" << 'PLIST'
+cat > "${BUNDLE}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -86,9 +89,9 @@ cat > "${BUNDLE}/Contents/Info.plist" << 'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.aura.desktop</string>
     <key>CFBundleVersion</key>
-    <string>0.2.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>aura-daemon</string>
     <key>CFBundlePackageType</key>
