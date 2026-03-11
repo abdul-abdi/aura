@@ -1104,10 +1104,10 @@ async fn run_processor(
                             }
 
                             // For input tools: settle, capture screenshot, capture post_state
-                            let input_tool = is_input_tool(&name);
+                            let input_tool = is_state_changing_tool(&name);
                             if input_tool {
                                 // Brief delay to let UI settle after the input action
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                tokio::time::sleep(Duration::from_millis(150)).await;
 
                                 // Trigger screenshot and await delivery (500ms timeout)
                                 let rx = tool_capture_trigger.trigger_and_wait();
@@ -1686,22 +1686,13 @@ async fn execute_tool(
             let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let x = dims.to_logical_x(raw_x);
             let y = dims.to_logical_y(raw_y);
-            if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-                let result = run_input_blocking(
-                    move || aura_input::mouse::move_mouse_pid(x, y, pid),
-                    "pid_move",
-                )
-                .await;
-                if result
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return result;
-                }
-                tracing::debug!("PID-targeted move_mouse failed, falling back to HID");
-            }
-            run_input_blocking(move || aura_input::mouse::move_mouse(x, y), "hid_move").await
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::move_mouse_pid(x, y, pid),
+                "pid_move",
+                move || aura_input::mouse::move_mouse(x, y),
+                "hid_move",
+            )
+            .await
         }
         "click" => {
             let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1719,23 +1710,10 @@ async fn execute_tool(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as u32;
             let count = count.clamp(1, CLICK_COUNT_MAX);
-            if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-                let btn = button.clone();
-                let result = run_input_blocking(
-                    move || aura_input::mouse::click_pid(x, y, &btn, count, pid),
-                    "pid_click",
-                )
-                .await;
-                if result
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return result;
-                }
-                tracing::debug!("PID-targeted click failed, falling back to HID");
-            }
-            run_input_blocking(
+            let btn = button.clone();
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::click_pid(x, y, &btn, count, pid),
+                "pid_click",
                 move || aura_input::mouse::click(x, y, &button, count),
                 "hid_click",
             )
@@ -1784,25 +1762,14 @@ async fn execute_tool(
 
             // Type via keyboard synthesis (triggers onChange/validation in target apps)
             // PID-targeted first, then HID fallback
-            if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-                let pid_text = text.clone();
-                let result = run_input_blocking(
-                    move || aura_input::keyboard::type_text_pid(&pid_text, pid),
-                    "pid_type",
-                )
-                .await;
-                if result
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return result;
-                }
-                tracing::debug!("PID-targeted type_text failed, falling back to HID");
-            }
-
-            // HID fallback
-            run_input_blocking(move || aura_input::keyboard::type_text(&text), "hid_type").await
+            let pid_text = text.clone();
+            run_with_pid_fallback(
+                move |pid| aura_input::keyboard::type_text_pid(&pid_text, pid),
+                "pid_type",
+                move || aura_input::keyboard::type_text(&text),
+                "hid_type",
+            )
+            .await
         }
         "press_key" => {
             let key_name = args
@@ -1821,26 +1788,13 @@ async fn execute_tool(
                 .unwrap_or_default();
             match aura_input::keyboard::keycode_from_name(&key_name) {
                 Some(keycode) => {
-                    if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-                        let mods = modifiers.clone();
-                        let result = run_input_blocking(
-                            move || {
-                                let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
-                                aura_input::keyboard::press_key_pid(keycode, &mod_refs, pid)
-                            },
-                            "pid_key",
-                        )
-                        .await;
-                        if result
-                            .get("success")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            return result;
-                        }
-                        tracing::debug!("PID-targeted press_key failed, falling back to HID");
-                    }
-                    run_input_blocking(
+                    let mods = modifiers.clone();
+                    run_with_pid_fallback(
+                        move |pid| {
+                            let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
+                            aura_input::keyboard::press_key_pid(keycode, &mod_refs, pid)
+                        },
+                        "pid_key",
                         move || {
                             let mod_refs: Vec<&str> =
                                 modifiers.iter().map(|s| s.as_str()).collect();
@@ -1867,22 +1821,13 @@ async fn execute_tool(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .clamp(-(SCROLL_MAX as i64), SCROLL_MAX as i64) as i32;
-            if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-                let result = run_input_blocking(
-                    move || aura_input::mouse::scroll_pid(dx, dy, pid),
-                    "pid_scroll",
-                )
-                .await;
-                if result
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return result;
-                }
-                tracing::debug!("PID-targeted scroll failed, falling back to HID");
-            }
-            run_input_blocking(move || aura_input::mouse::scroll(dx, dy), "hid_scroll").await
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::scroll_pid(dx, dy, pid),
+                "pid_scroll",
+                move || aura_input::mouse::scroll(dx, dy),
+                "hid_scroll",
+            )
+            .await
         }
         "drag" => {
             let raw_fx = args.get("from_x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1893,22 +1838,13 @@ async fn execute_tool(
             let fy = dims.to_logical_y(raw_fy);
             let tx = dims.to_logical_x(raw_tx);
             let ty = dims.to_logical_y(raw_ty);
-            if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-                let result = run_input_blocking(
-                    move || aura_input::mouse::drag_pid(fx, fy, tx, ty, pid),
-                    "pid_drag",
-                )
-                .await;
-                if result
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return result;
-                }
-                tracing::debug!("PID-targeted drag failed, falling back to HID");
-            }
-            run_input_blocking(move || aura_input::mouse::drag(fx, fy, tx, ty), "hid_drag").await
+            run_with_pid_fallback(
+                move |pid| aura_input::mouse::drag_pid(fx, fy, tx, ty, pid),
+                "pid_drag",
+                move || aura_input::mouse::drag(fx, fy, tx, ty),
+                "hid_drag",
+            )
+            .await
         }
         "activate_app" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -2195,12 +2131,20 @@ fn build_menu_click_script(app: &str, path: &[String]) -> String {
     }
 }
 
-/// Returns true if the tool name is an input tool that should get post_state enrichment
+/// Returns true if the tool changes screen state and should get post_state enrichment
 /// and screenshot await behavior.
-fn is_input_tool(name: &str) -> bool {
+fn is_state_changing_tool(name: &str) -> bool {
     matches!(
         name,
-        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "click_element"
+        "move_mouse"
+            | "click"
+            | "type_text"
+            | "press_key"
+            | "scroll"
+            | "drag"
+            | "click_element"
+            | "activate_app"
+            | "click_menu_item"
     )
 }
 
@@ -2229,6 +2173,31 @@ fn capture_post_state() -> serde_json::Value {
         "frontmost_app": frontmost_app,
         "focused_element": focused_json,
     })
+}
+
+/// Try PID-targeted input first, fall back to global HID.
+async fn run_with_pid_fallback<F1, F2>(
+    pid_fn: F1,
+    pid_method: &'static str,
+    hid_fn: F2,
+    hid_method: &'static str,
+) -> serde_json::Value
+where
+    F1: FnOnce(i32) -> anyhow::Result<()> + Send + 'static,
+    F2: FnOnce() -> anyhow::Result<()> + Send + 'static,
+{
+    if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
+        let result = run_input_blocking(move || pid_fn(pid), pid_method).await;
+        if result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return result;
+        }
+        tracing::debug!("{pid_method} failed, falling back to HID");
+    }
+    run_input_blocking(hid_fn, hid_method).await
 }
 
 /// Run a blocking input operation on a dedicated thread to avoid blocking tokio.

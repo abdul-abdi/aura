@@ -1,8 +1,15 @@
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::Result;
 
 use crate::context::ScreenContext;
+
+const FRONTMOST_CACHE_TTL_MS: u128 = 300;
+
+static FRONTMOST_PID_CACHE: Mutex<Option<(Instant, i32)>> = Mutex::new(None);
+static FRONTMOST_APP_CACHE: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 
 #[derive(Clone, Default)]
 pub struct MacOSScreenReader;
@@ -52,20 +59,42 @@ pub fn run_jxa(script: &str) -> Option<String> {
 }
 
 /// Get the process ID of the frontmost application.
+/// Results are cached for 300ms to avoid repeated subprocess overhead.
 pub fn get_frontmost_pid() -> Option<i32> {
-    run_jxa(
+    if let Ok(guard) = FRONTMOST_PID_CACHE.lock()
+        && let Some((ts, pid)) = guard.as_ref()
+        && ts.elapsed().as_millis() < FRONTMOST_CACHE_TTL_MS
+    {
+        return Some(*pid);
+    }
+    let pid: i32 = run_jxa(
         "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier",
     )?
     .trim()
     .parse()
-    .ok()
+    .ok()?;
+    if let Ok(mut guard) = FRONTMOST_PID_CACHE.lock() {
+        *guard = Some((Instant::now(), pid));
+    }
+    Some(pid)
 }
 
 /// Get frontmost app name via NSWorkspace (no Automation permission needed).
+/// Results are cached for 300ms to avoid repeated subprocess overhead.
 pub fn get_frontmost_app() -> Option<String> {
-    run_jxa(
+    if let Ok(guard) = FRONTMOST_APP_CACHE.lock()
+        && let Some((ts, name)) = guard.as_ref()
+        && ts.elapsed().as_millis() < FRONTMOST_CACHE_TTL_MS
+    {
+        return Some(name.clone());
+    }
+    let name = run_jxa(
         "ObjC.import('AppKit'); $.NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.js",
-    )
+    )?;
+    if let Ok(mut guard) = FRONTMOST_APP_CACHE.lock() {
+        *guard = Some((Instant::now(), name.clone()));
+    }
+    Some(name)
 }
 
 /// Get frontmost window title via CGWindowListCopyWindowInfo.

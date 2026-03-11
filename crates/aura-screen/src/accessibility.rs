@@ -77,7 +77,7 @@ unsafe extern "C" {
 
 // ── RAII wrapper for CFTypeRef ───────────────────────────────────────────────
 
-struct CfRef(CFTypeRef);
+pub(crate) struct CfRef(CFTypeRef);
 
 impl CfRef {
     /// Takes ownership of a retained CFTypeRef (from a Create/Copy function).
@@ -327,9 +327,56 @@ pub fn get_focused_app_elements() -> Vec<UIElement> {
 }
 
 /// Return the currently focused interactive element, if any.
+///
+/// Uses a direct `AXFocusedUIElement` query on the app element (single IPC call)
+/// instead of walking the entire AX tree.
 pub fn get_focused_element() -> Option<UIElement> {
-    let elements = get_focused_app_elements();
-    elements.into_iter().find(|el| el.focused)
+    let pid = crate::macos::get_frontmost_pid()?;
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let app_ref = CfRef::new(app);
+
+    // Query the app's focused element directly
+    let attr_key = cf_string_from_str("AXFocusedUIElement");
+    let mut value: CFTypeRef = std::ptr::null();
+    let ret =
+        unsafe { AXUIElementCopyAttributeValue(app_ref.as_raw(), attr_key.as_raw(), &mut value) };
+    if ret != AX_ERROR_SUCCESS || value.is_null() {
+        return None;
+    }
+    let focused_ref = CfRef::new(value);
+
+    // Read properties from the focused element
+    let role = get_ax_string(focused_ref.as_raw(), "AXRole")?;
+    let label = get_ax_string(focused_ref.as_raw(), "AXTitle")
+        .filter(|s| !s.is_empty())
+        .or_else(|| get_ax_string(focused_ref.as_raw(), "AXDescription").filter(|s| !s.is_empty()));
+    let value = get_ax_string(focused_ref.as_raw(), "AXValue").filter(|s| !s.is_empty());
+    let enabled = get_ax_bool(focused_ref.as_raw(), "AXEnabled");
+    let focused = get_ax_bool(focused_ref.as_raw(), "AXFocused");
+    let bounds = match (
+        get_ax_position(focused_ref.as_raw()),
+        get_ax_size(focused_ref.as_raw()),
+    ) {
+        (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }),
+        _ => None,
+    };
+
+    Some(UIElement {
+        role,
+        label,
+        value,
+        bounds,
+        enabled,
+        focused,
+    })
 }
 
 /// Filter a slice of UIElements by optional label substring and optional role.
@@ -396,6 +443,8 @@ pub fn matches_role(element_role: &str, filter: &str) -> bool {
 /// Recursively find a raw AXUIElement ref matching a UIElement by role + label.
 ///
 /// The caller must CFRelease the returned value when done.
+/// Kept for use by `click_element_inner`'s error path and potential future callers.
+#[allow(dead_code)]
 fn find_raw_element(
     element: CFTypeRef,
     target: &UIElement,
@@ -434,25 +483,132 @@ fn find_raw_element(
     None
 }
 
-/// Find a raw AXUIElement and its UIElement metadata for the given label/role filters.
-fn find_ax_raw(label: Option<&str>, role: Option<&str>) -> Option<(CfRef, UIElement)> {
-    let pid = crate::macos::get_frontmost_pid()?;
-    let app_element = unsafe { AXUIElementCreateApplication(pid) };
-    if app_element.is_null() {
+/// Single-pass tree walk that finds the first interactive element matching
+/// the given label/role filters, returning both the raw AXUIElement ref and
+/// the UIElement metadata. Avoids building a full element list and re-walking.
+fn find_element_single_pass(
+    element: CFTypeRef,
+    label_filter: Option<&str>,
+    role_filter: Option<&str>,
+    skip: &mut usize,
+    depth: usize,
+    start_time: &Instant,
+) -> Option<(CFTypeRef, UIElement)> {
+    if depth > MAX_DEPTH || start_time.elapsed().as_millis() >= TIMEOUT_MS {
         return None;
     }
-    let app_ref = CfRef::new(app_element);
 
-    let mut elements = Vec::new();
-    let start_time = Instant::now();
-    walk_element(app_ref.as_raw(), 0, &mut elements, &start_time);
+    let role = get_ax_string(element, "AXRole")?;
 
-    let matches = find_elements(&elements, label, role);
-    let target = matches.first()?.clone();
+    if INTERACTIVE_ROLES.contains(&role.as_str()) {
+        // Check role filter
+        if let Some(r) = role_filter
+            && !matches_role(&role, r)
+        {
+            return None;
+        }
 
-    let raw = find_raw_element(app_ref.as_raw(), &target, 0, &Instant::now())?;
-    // raw is already retained by find_raw_element
-    Some((CfRef::new(raw), target))
+        // Collect label: prefer AXTitle, fall back to AXDescription
+        let label = get_ax_string(element, "AXTitle")
+            .filter(|s| !s.is_empty())
+            .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
+
+        let value = get_ax_string(element, "AXValue").filter(|s| !s.is_empty());
+
+        // Check label filter
+        if let Some(lbl) = label_filter {
+            let lbl_lower = lbl.to_lowercase();
+            let in_label = label
+                .as_deref()
+                .map(|s| s.to_lowercase().contains(&lbl_lower))
+                .unwrap_or(false);
+            let in_value = value
+                .as_deref()
+                .map(|s| s.to_lowercase().contains(&lbl_lower))
+                .unwrap_or(false);
+            if !in_label && !in_value {
+                return None;
+            }
+        }
+
+        // Match found — check skip count for index support
+        if *skip > 0 {
+            *skip -= 1;
+            return None;
+        }
+
+        let enabled = get_ax_bool(element, "AXEnabled");
+        let focused = get_ax_bool(element, "AXFocused");
+        let bounds = match (get_ax_position(element), get_ax_size(element)) {
+            (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            }),
+            _ => None,
+        };
+
+        // Retain so caller can safely wrap in CfRef
+        unsafe { CFRetain(element) };
+        return Some((
+            element,
+            UIElement {
+                role,
+                label,
+                value,
+                bounds,
+                enabled,
+                focused,
+            },
+        ));
+    }
+
+    // Not interactive — recurse into children
+    let children = get_ax_children(element);
+    for child in &children {
+        if let Some(found) = find_element_single_pass(
+            *child,
+            label_filter,
+            role_filter,
+            skip,
+            depth + 1,
+            start_time,
+        ) {
+            // Release all children (found element was separately retained)
+            for c in &children {
+                unsafe { CFRelease(*c) };
+            }
+            return Some(found);
+        }
+    }
+    for child in &children {
+        unsafe { CFRelease(*child) };
+    }
+    None
+}
+
+/// Find a raw AXUIElement and its UIElement metadata for the given label/role filters.
+fn find_ax_raw(label: Option<&str>, role: Option<&str>) -> Option<(CfRef, UIElement)> {
+    find_ax_raw_nth(label, role, 0)
+}
+
+/// Find the nth matching raw AXUIElement and its UIElement metadata.
+pub(crate) fn find_ax_raw_nth(
+    label: Option<&str>,
+    role: Option<&str>,
+    index: usize,
+) -> Option<(CfRef, UIElement)> {
+    let pid = crate::macos::get_frontmost_pid()?;
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let app_ref = CfRef::new(app);
+    let start = Instant::now();
+    let mut skip = index;
+    let (raw, el) = find_element_single_pass(app_ref.as_raw(), label, role, &mut skip, 0, &start)?;
+    Some((CfRef::new(raw), el))
 }
 
 // ── Public AX write functions ─────────────────────────────────────────────────
