@@ -353,6 +353,9 @@ async fn run_daemon(
         tracing::info!("Loaded persisted resumption handle for session continuity");
     }
 
+    // Save API key before gemini_config is moved into the session
+    let gemini_api_key = gemini_config.api_key.clone();
+
     let session = GeminiLiveSession::connect(gemini_config, resumption_handle)
         .await
         .context("Failed to connect Gemini Live session")?;
@@ -601,6 +604,7 @@ async fn run_daemon(
             proc_permission_error,
             proc_ipc_tx,
             player,
+            gemini_api_key,
         )
         .await
         {
@@ -672,6 +676,7 @@ async fn run_processor(
     has_permission_error: Arc<AtomicBool>,
     ipc_tx: broadcast::Sender<DaemonEvent>,
     player: Option<AudioPlayer>,
+    gemini_api_key: String,
 ) -> Result<()> {
     let mut events = session.subscribe();
 
@@ -1246,9 +1251,66 @@ async fn run_processor(
                             message: "Disconnected".into(),
                         });
 
-                        // End the memory session
-                        let es_sid = session_id.clone();
-                        memory_op(&memory, move |mem| mem.end_session(&es_sid, None)).await;
+                        // Run end-of-session consolidation (extracts facts + sets summary)
+                        {
+                            let es_sid = session_id.clone();
+                            let es_key = gemini_api_key.clone();
+
+                            // Fetch messages with lock, then drop lock for async work
+                            let messages = memory_op(&memory, {
+                                let sid = es_sid.clone();
+                                move |mem| mem.get_messages(&sid)
+                            }).await;
+
+                            if let Some(messages) = messages {
+                                match aura_memory::consolidate::consolidate_session(&es_key, &messages).await {
+                                    Ok(response) => {
+                                        if !response.summary.is_empty() || !response.facts.is_empty() {
+                                            let summary = response.summary.clone();
+                                            let facts_json: Vec<(String, String, Option<String>, f64)> = response
+                                                .facts
+                                                .iter()
+                                                .map(|f| {
+                                                    let entities = if f.entities.is_empty() {
+                                                        None
+                                                    } else {
+                                                        serde_json::to_string(&f.entities).ok()
+                                                    };
+                                                    (f.category.clone(), f.content.clone(), entities, f.importance)
+                                                })
+                                                .collect();
+
+                                            memory_op(&memory, move |mem| {
+                                                if !summary.is_empty() {
+                                                    mem.end_session(&es_sid, Some(&summary))?;
+                                                } else {
+                                                    mem.end_session(&es_sid, None)?;
+                                                }
+                                                for (cat, content, entities, importance) in &facts_json {
+                                                    mem.add_fact(&es_sid, cat, content, entities.as_deref(), *importance)?;
+                                                }
+                                                Ok(())
+                                            }).await;
+                                            tracing::info!("Session consolidation complete");
+                                        } else {
+                                            // No facts extracted — just end session normally
+                                            let sid = es_sid.clone();
+                                            memory_op(&memory, move |mem| mem.end_session(&sid, None)).await;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Session consolidation failed: {e}");
+                                        // Fallback: end session without summary
+                                        let sid = es_sid.clone();
+                                        memory_op(&memory, move |mem| mem.end_session(&sid, None)).await;
+                                    }
+                                }
+                            } else {
+                                // Couldn't fetch messages — end session normally
+                                let sid = es_sid.clone();
+                                memory_op(&memory, move |mem| mem.end_session(&sid, None)).await;
+                            }
+                        }
                         break;
                     }
                     Ok(GeminiEvent::SessionHandle { handle }) => {
