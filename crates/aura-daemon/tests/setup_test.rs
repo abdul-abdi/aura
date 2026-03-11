@@ -2,15 +2,6 @@ use aura_daemon::setup::AuraSetup;
 use tempfile::TempDir;
 
 #[test]
-fn test_setup_detects_missing_wakeword() {
-    let tmp = TempDir::new().unwrap();
-    let setup = AuraSetup::new(tmp.path().to_path_buf());
-    let status = setup.check();
-
-    assert!(!status.wakeword_model_ready);
-}
-
-#[test]
 fn test_setup_creates_directories() {
     let tmp = TempDir::new().unwrap();
     let setup = AuraSetup::new(tmp.path().to_path_buf());
@@ -24,7 +15,7 @@ fn test_setup_creates_directories() {
 
 #[test]
 fn test_is_ready_without_local_models() {
-    // With Gemini, is_ready() should return true even without local models
+    // With Gemini, is_ready() should return true — no local models needed
     let tmp = TempDir::new().unwrap();
     let setup = AuraSetup::new(tmp.path().to_path_buf());
     let status = setup.check();
@@ -36,25 +27,11 @@ fn test_is_ready_without_local_models() {
 }
 
 #[test]
-fn test_wakeword_detected_when_present() {
-    let tmp = TempDir::new().unwrap();
-    let setup = AuraSetup::new(tmp.path().to_path_buf());
-    setup.ensure_dirs().unwrap();
-
-    std::fs::write(tmp.path().join("models/hey-aura.rpw"), b"fake").unwrap();
-
-    let status = setup.check();
-    assert!(status.wakeword_model_ready);
-}
-
-#[test]
-fn test_missing_components_lists_optional() {
+fn test_missing_components_is_empty() {
     let tmp = TempDir::new().unwrap();
     let setup = AuraSetup::new(tmp.path().to_path_buf());
     let status = setup.check();
     let missing = status.missing_components();
 
-    // Only wakeword is missing, and it's optional
-    assert_eq!(missing.len(), 1);
-    assert!(missing[0].contains("hey-aura.rpw"));
+    assert!(missing.is_empty(), "No components should be missing");
 }

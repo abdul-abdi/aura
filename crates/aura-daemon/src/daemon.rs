@@ -24,9 +24,6 @@ impl Daemon {
                             tracing::info!("Shutdown signal received");
                             break;
                         }
-                        Ok(AuraEvent::WakeWordDetected) => {
-                            tracing::info!("Wake word detected — listening");
-                        }
                         Ok(AuraEvent::ToolExecuted { name, success, output }) => {
                             tracing::info!(%name, %success, "Tool executed");
                             tracing::debug!(%output, "Tool output");

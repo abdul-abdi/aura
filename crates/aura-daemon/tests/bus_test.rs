@@ -6,10 +6,10 @@ async fn test_event_bus_send_receive() {
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe();
 
-    bus.send(AuraEvent::WakeWordDetected);
+    bus.send(AuraEvent::Shutdown);
 
     let event = rx.recv().await.unwrap();
-    assert!(matches!(event, AuraEvent::WakeWordDetected));
+    assert!(matches!(event, AuraEvent::Shutdown));
 }
 
 #[tokio::test]
