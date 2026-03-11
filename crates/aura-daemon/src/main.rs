@@ -804,17 +804,28 @@ async fn run_processor(
                 }
             }
 
-            // Send to Gemini — never break on failure; a full channel just means
-            // the WebSocket isn't ready yet (pre-setupComplete) or is momentarily
-            // saturated. Drop the frame and continue capturing.
+            // Only send to Gemini if the screen actually changed since last send.
+            // This is the #1 context savings: static screens produce zero token cost.
+            let already_sent = cap_last_sent.load(Ordering::Acquire);
+            if frame.hash == already_sent {
+                // Frame captured (hash differs from last_frame_hash) but already sent
+                // to Gemini — skip. Still resolve waiter so tool spawns don't hang.
+                if let Some(tx) = cap_trigger.take_waiter() {
+                    let _ = tx.send(());
+                }
+                tracing::trace!("Skipped duplicate send (hash unchanged since last send)");
+                continue;
+            }
+
             if let Err(e) = cap_session.send_video(&frame.jpeg_base64) {
                 tracing::debug!("Dropped screen frame (channel not ready): {e}");
-                // Still resolve waiter so tool spawn doesn't hang on timeout
                 if let Some(tx) = cap_trigger.take_waiter() {
                     let _ = tx.send(());
                 }
                 continue;
             }
+            cap_last_sent.store(frame.hash, Ordering::Release);
+
             // Signal any awaiting tool spawn that the screenshot was delivered
             if let Some(tx) = cap_trigger.take_waiter() {
                 let _ = tx.send(());
