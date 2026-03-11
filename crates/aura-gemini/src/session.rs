@@ -615,6 +615,7 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
                         },
                     },
                 }),
+                media_resolution: Some("MEDIA_RESOLUTION_HIGH".to_string()),
             }),
             system_instruction: Some(Content {
                 role: None,

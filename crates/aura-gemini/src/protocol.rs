@@ -49,6 +49,9 @@ pub struct GenerationConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speech_config: Option<SpeechConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_resolution: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -323,6 +326,7 @@ mod tests {
                             },
                         },
                     }),
+                    media_resolution: None,
                 }),
                 system_instruction: Some(Content {
                     role: None,

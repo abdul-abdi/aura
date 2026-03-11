@@ -210,6 +210,12 @@ impl AudioPlayer {
     pub fn is_playing(&self) -> bool {
         self.playing.load(Ordering::Acquire)
     }
+
+    /// Return a clone of the internal playing flag so callers can share it
+    /// across tasks without polling `is_playing()`.
+    pub fn playing_arc(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.playing)
+    }
 }
 
 #[cfg(test)]

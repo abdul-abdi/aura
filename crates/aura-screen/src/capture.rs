@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum width to send to Gemini (downscale retina captures).
 const MAX_WIDTH: u32 = 1920;
-/// JPEG quality (0-100). 60 balances readability vs bandwidth.
-const JPEG_QUALITY: u8 = 60;
+/// JPEG quality (0-100). 80 balances readability vs bandwidth.
+const JPEG_QUALITY: u8 = 80;
 
 /// A captured frame ready to send to Gemini.
 pub struct CapturedFrame {
@@ -151,10 +151,10 @@ pub fn capture_screen() -> Result<CapturedFrame> {
     })
 }
 
-/// Compute an FNV-1a hash by sampling 2048 pixels across the frame.
+/// Compute an FNV-1a hash by sampling 8192 pixels across the frame.
 fn compute_frame_hash(rgb: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    let step = (rgb.len() / 2048).max(1);
+    let step = (rgb.len() / 8192).max(1);
     for i in (0..rgb.len()).step_by(step) {
         hash ^= rgb[i] as u64;
         hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
@@ -172,8 +172,8 @@ mod tests {
         let mut frame1 = vec![128u8; size];
         let frame2 = frame1.clone();
         // Change a pixel at a sampled position (step-aligned)
-        let step = (size / 2048).max(1);
-        frame1[step * 1024] = 129; // middle of the sampled range
+        let step = (size / 8192).max(1);
+        frame1[step * 4096] = 129; // middle of the sampled range
         let h1 = compute_frame_hash(&frame1);
         let h2 = compute_frame_hash(&frame2);
         assert_ne!(h1, h2, "Hash should detect single-pixel change");

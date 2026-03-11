@@ -373,6 +373,25 @@ async fn run_daemon(
     // Starts at the default and is updated after ambient noise calibration.
     let barge_in_threshold = Arc::new(AtomicU32::new(BARGE_IN_ENERGY_THRESHOLD_DEFAULT.to_bits()));
 
+    // Audio playback (optional — warn if unavailable).
+    // Created here so the mic bridge can share the player's playing flag and
+    // fully mute itself during hardware playback (prevents feedback loop).
+    let player = match AudioPlayer::new() {
+        Ok(p) => {
+            tracing::info!("Audio playback ready");
+            Some(p)
+        }
+        Err(e) => {
+            tracing::warn!("Audio playback unavailable: {e}");
+            None
+        }
+    };
+    // Arc<AtomicBool> that mirrors player.playing — false when no player.
+    let audio_playing: Arc<AtomicBool> = player
+        .as_ref()
+        .map(|p| p.playing_arc())
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
     let _mic_available = match AudioCapture::new(None) {
         Ok(capture) => {
             let mic_shutdown_flag = Arc::clone(&mic_shutdown);
@@ -417,7 +436,7 @@ async fn run_daemon(
     };
 
     // Check accessibility permission (needed for input control tools)
-    if !aura_input::accessibility::check_accessibility(true) {
+    if !aura_input::accessibility::check_accessibility(false) {
         tracing::warn!("Accessibility permission not granted — input tools will fail silently");
         if let Some(ref tx) = menubar_tx {
             let _ = tx
@@ -431,12 +450,16 @@ async fn run_daemon(
     }
 
     // Bridge std::sync::mpsc -> tokio -> session.send_audio()
-    // Applies energy gating while Aura is speaking to prevent echo-triggered barge-in.
+    // Fully mutes the mic while Aura is playing back audio to prevent the AI
+    // from hearing its own voice through the MacBook speakers.  A 300 ms
+    // post-playback guard absorbs room reverb after the speaker goes quiet.
+    // Barge-in can be re-enabled later with proper AEC.
     let audio_session = Arc::clone(&session);
     let audio_cancel = cancel.clone();
     let bridge_shutdown = Arc::clone(&mic_shutdown);
     let bridge_speaking = Arc::clone(&is_speaking);
     let bridge_threshold = Arc::clone(&barge_in_threshold);
+    let bridge_audio_playing = Arc::clone(&audio_playing);
     tokio::spawn(async move {
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(MIC_BRIDGE_CAPACITY);
 
@@ -464,6 +487,13 @@ async fn run_daemon(
         let mut calibration_samples: Vec<f32> = Vec::with_capacity(CALIBRATION_CHUNK_COUNT);
         let mut calibration_done = false;
 
+        // Tracks when hardware playback last stopped, for post-playback mute guard.
+        let mut playback_stopped_at: Option<std::time::Instant> = None;
+        // Whether audio was playing on the previous iteration (to detect stop edge).
+        let mut prev_playing = false;
+        // How long to keep muting after playback ends (absorbs room reverb).
+        const POST_PLAYBACK_MUTE_MS: u128 = 300;
+
         loop {
             tokio::select! {
                 _ = audio_cancel.cancelled() => break,
@@ -486,15 +516,38 @@ async fn run_daemon(
                         }
                     }
 
-                    // When Aura is speaking, gate the mic to prevent echo-triggered barge-in.
-                    // Only send audio chunks with enough energy to be intentional speech.
-                    if bridge_speaking.load(Ordering::Acquire) {
-                        let threshold = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
-                        let rms = rms_energy(&samples);
-                        if rms < threshold {
-                            continue; // Skip this chunk — likely speaker bleed-through
+                    // Full mic mute during playback to prevent audio feedback loop.
+                    // On MacBook hardware the speakers are close enough to the mic
+                    // that the AI's own voice easily exceeds any energy threshold.
+                    // Barge-in can be re-enabled later with proper AEC.
+                    let currently_playing = bridge_audio_playing.load(Ordering::Acquire);
+                    let gemini_speaking = bridge_speaking.load(Ordering::Acquire);
+
+                    // Detect transition: playing → stopped.  Arm the reverb guard.
+                    if prev_playing && !currently_playing {
+                        playback_stopped_at = Some(std::time::Instant::now());
+                        tracing::debug!("Playback stopped — entering post-playback mute guard");
+                    }
+                    prev_playing = currently_playing;
+
+                    if currently_playing {
+                        continue; // Fully mute mic while speaker is active
+                    }
+
+                    if gemini_speaking {
+                        // Gemini is still sending audio data but the pre-buffer
+                        // hasn't flushed to the hardware yet (~80 ms window).
+                        // Mute to be safe.
+                        continue;
+                    }
+
+                    // Post-playback reverb guard: keep muting for 300 ms after the
+                    // speaker goes silent to absorb room echo.
+                    if let Some(stopped_at) = playback_stopped_at {
+                        if stopped_at.elapsed().as_millis() < POST_PLAYBACK_MUTE_MS {
+                            continue; // Still within reverb-guard window
                         }
-                        tracing::debug!(rms, threshold, "Barge-in detected while speaking");
+                        playback_stopped_at = None; // Guard expired — allow mic through
                     }
 
                     if let Err(e) = audio_session.send_audio(&samples).await {
@@ -526,6 +579,7 @@ async fn run_daemon(
             is_interrupted,
             proc_permission_error,
             proc_ipc_tx,
+            player,
         )
         .await
         {
@@ -596,20 +650,9 @@ async fn run_processor(
     is_interrupted: Arc<AtomicBool>,
     has_permission_error: Arc<AtomicBool>,
     ipc_tx: broadcast::Sender<DaemonEvent>,
+    player: Option<AudioPlayer>,
 ) -> Result<()> {
     let mut events = session.subscribe();
-
-    // Audio playback (optional — warn if unavailable)
-    let player = match AudioPlayer::new() {
-        Ok(p) => {
-            tracing::info!("Audio playback ready");
-            Some(p)
-        }
-        Err(e) => {
-            tracing::warn!("Audio playback unavailable: {e}");
-            None
-        }
-    };
 
     // Script executor for tool calls
     let executor = ScriptExecutor::new();
@@ -639,7 +682,7 @@ async fn run_processor(
     tokio::spawn(async move {
         let mut last_hash: u64 = 0;
         let mut last_res: (u32, u32) = (0, 0);
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.tick().await; // skip first immediate tick
 
         loop {
@@ -1254,27 +1297,17 @@ fn show_error_dialog(message: &str) {
 /// Check Screen Recording permission at startup and warn if not granted.
 fn check_screen_recording_permission() {
     // CGPreflightScreenCaptureAccess returns true if permission is granted.
-    // It does NOT prompt the user — we use CGRequestScreenCaptureAccess for that.
+    // It does NOT prompt the user — we only check and warn, never request.
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
-        fn CGRequestScreenCaptureAccess() -> bool;
     }
 
     let has_permission = unsafe { CGPreflightScreenCaptureAccess() };
     if !has_permission {
-        tracing::warn!("Screen Recording permission not granted — requesting");
-        let granted = unsafe { CGRequestScreenCaptureAccess() };
-        if !granted {
-            tracing::warn!(
-                "Screen Recording permission denied. Screen capture will return blank frames."
-            );
-            show_error_dialog(
-                "Aura needs Screen Recording permission to see your screen.\n\n\
-                 Go to System Settings > Privacy & Security > Screen Recording and enable Aura.\n\n\
-                 You may need to restart Aura after granting permission.",
-            );
-        }
+        tracing::warn!(
+            "Screen Recording permission denied. Screen capture will return blank frames."
+        );
     }
 }
 
