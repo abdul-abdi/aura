@@ -6,7 +6,7 @@ use serde_json::json;
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
 /// Returns a `Vec<Tool>` with:
-/// - 10 function declarations for macOS automation and computer control
+/// - 13 function declarations for macOS automation and computer control
 /// - Google Search grounding (current events, weather, facts, etc.)
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![
@@ -19,7 +19,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                         or system feature. You can open apps, manage windows, interact with UI \
                         elements, automate workflows, manipulate files, control system settings, \
                         send keystrokes, and more. Write the script based on what the user needs. \
-                        Prefer simple scripts — chain multiple calls over one complex script. \
+                        For complex workflows, a single well-written script is better than multiple calls. \
                         Invoke this tool only after you have confirmed the user's intent and \
                         understand what action to take."
                             .into(),
@@ -200,6 +200,78 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },
+                FunctionDeclaration {
+                    name: "click_element".into(),
+                    description:
+                        "Click a UI element by its accessibility label and/or role. More reliable than \
+                        clicking by coordinates — finds the element in the app's accessibility tree and \
+                        clicks its exact center. Use for buttons, text fields, checkboxes, links, tabs, \
+                        and other labeled UI elements. \
+                        Invoke this tool only after you have identified the element you want to click \
+                        from screen context or the user's instruction."
+                            .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "description": "Text label to match (case-insensitive substring). Matches against the element's title, description, or value."
+                            },
+                            "role": {
+                                "type": "string",
+                                "description": "Element type to match: button, textfield, checkbox, link, tab, menuitem, popupbutton, slider, combobox"
+                            },
+                            "index": {
+                                "type": "integer",
+                                "description": "If multiple elements match, click the Nth one (0-indexed). Default: 0"
+                            }
+                        }
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "activate_app".into(),
+                    description:
+                        "Launch an application or bring it to the front. More reliable than clicking \
+                        the Dock or using Spotlight. \
+                        Invoke this tool only after the user asks to open, switch to, or launch an app."
+                            .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Application name, e.g. 'Safari', 'Terminal', 'Slack', 'Visual Studio Code'"
+                            }
+                        },
+                        "required": ["name"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "click_menu_item".into(),
+                    description:
+                        "Click a menu bar item by path. More reliable than clicking menus by coordinates \
+                        (menus dismiss on mis-click). Supports nested submenus up to 3 levels. \
+                        Invoke this tool only after you know the exact menu path needed."
+                            .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "menu_path": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Menu item path from menu bar, e.g. [\"File\", \"Save As...\"] or [\"View\", \"Developer\", \"JavaScript Console\"]"
+                            },
+                            "app": {
+                                "type": "string",
+                                "description": "Target app name. Defaults to the frontmost app if omitted."
+                            }
+                        },
+                        "required": ["menu_path"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
             ]),
             google_search: None,
             code_execution: None,
@@ -222,7 +294,7 @@ mod tests {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 2, "Function declarations + Google Search");
         let decls = tools[0].function_declarations.as_ref().unwrap();
-        assert_eq!(decls.len(), 10, "Should have 10 function declarations");
+        assert_eq!(decls.len(), 13, "Should have 13 function declarations");
     }
 
     #[test]
@@ -243,6 +315,9 @@ mod tests {
                 "scroll",
                 "drag",
                 "recall_memory",
+                "click_element",
+                "activate_app",
+                "click_menu_item",
             ]
         );
     }
@@ -261,7 +336,7 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 10);
+        assert_eq!(decls.len(), 13);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
@@ -314,5 +389,39 @@ mod tests {
                 decl.name
             );
         }
+    }
+
+    #[test]
+    fn click_element_has_label_and_role_params() {
+        let tools = build_tool_declarations();
+        let decls = tools[0].function_declarations.as_ref().unwrap();
+        let ce = decls.iter().find(|d| d.name == "click_element").unwrap();
+        assert!(ce.parameters["properties"]["label"].is_object());
+        assert!(ce.parameters["properties"]["role"].is_object());
+        assert!(ce.parameters["properties"]["index"].is_object());
+        // No required params — both label and role are optional
+        let required = ce.parameters.get("required");
+        assert!(
+            required.is_none() || required.unwrap().as_array().map_or(true, |a| a.is_empty()),
+            "click_element should have no required params"
+        );
+    }
+
+    #[test]
+    fn activate_app_has_required_name() {
+        let tools = build_tool_declarations();
+        let decls = tools[0].function_declarations.as_ref().unwrap();
+        let aa = decls.iter().find(|d| d.name == "activate_app").unwrap();
+        let required = aa.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "name"));
+    }
+
+    #[test]
+    fn click_menu_item_has_required_menu_path() {
+        let tools = build_tool_declarations();
+        let decls = tools[0].function_declarations.as_ref().unwrap();
+        let cmi = decls.iter().find(|d| d.name == "click_menu_item").unwrap();
+        let required = cmi.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "menu_path"));
     }
 }
