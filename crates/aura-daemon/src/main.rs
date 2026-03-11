@@ -1007,14 +1007,6 @@ async fn run_processor(
                                 output: Some(response.to_string()),
                             });
 
-                            // Log the tool call + result in memory
-                            {
-                                let tc_sid = session_id.clone();
-                                let tc_content = format!("recall_memory: {}", args.to_string());
-                                memory_op(&memory, move |mem| {
-                                    mem.add_message(&tc_sid, aura_memory::MessageRole::ToolCall, &tc_content, None)
-                                }).await;
-                            }
                             {
                                 let tr_sid = session_id.clone();
                                 let tr_content = response.to_string();
