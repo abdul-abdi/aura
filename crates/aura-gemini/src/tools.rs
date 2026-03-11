@@ -6,7 +6,7 @@ use serde_json::json;
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
 /// Returns a `Vec<Tool>` with:
-/// - 9 function declarations for macOS automation and computer control
+/// - 10 function declarations for macOS automation and computer control
 /// - Google Search grounding (current events, weather, facts, etc.)
 /// - Code Execution (server-side Python for math, data analysis, etc.)
 pub fn build_tool_declarations() -> Vec<Tool> {
@@ -155,6 +155,26 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                         "required": ["from_x", "from_y", "to_x", "to_y"]
                     }),
                 },
+                FunctionDeclaration {
+                    name: "recall_memory".into(),
+                    description: "Search Aura's memory for information from past sessions. \
+                        Use this when the user asks about something you did before, references \
+                        a past conversation, or when context from a previous session would help \
+                        the current task. Returns matching facts and session summaries ranked \
+                        by relevance. If no results are found, tell the user you don't have \
+                        that in memory."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Natural language search query. Example: 'dark mode preference', 'report.pdf', 'what was the user working on yesterday'"
+                            }
+                        },
+                        "required": ["query"]
+                    }),
+                },
             ]),
             google_search: None,
             code_execution: None,
@@ -187,7 +207,7 @@ mod tests {
             "Function declarations + Google Search + Code Execution"
         );
         let decls = tools[0].function_declarations.as_ref().unwrap();
-        assert_eq!(decls.len(), 9, "Should have 9 function declarations");
+        assert_eq!(decls.len(), 10, "Should have 10 function declarations");
     }
 
     #[test]
@@ -207,6 +227,7 @@ mod tests {
                 "press_key",
                 "scroll",
                 "drag",
+                "recall_memory",
             ]
         );
     }
@@ -230,12 +251,13 @@ mod tests {
         let value = serde_json::to_value(&tools).unwrap();
         // Function declarations
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 9);
+        assert_eq!(decls.len(), 10);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
         assert_eq!(decls[3]["name"], "move_mouse");
         assert_eq!(decls[8]["name"], "drag");
+        assert_eq!(decls[9]["name"], "recall_memory");
         // Google Search
         assert!(value[1]["googleSearch"].is_object());
         // Code Execution
