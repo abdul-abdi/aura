@@ -983,6 +983,52 @@ async fn run_processor(
                             break;
                         }
 
+                        // recall_memory stays inline — just a fast SQLite query
+                        if name == "recall_memory" {
+                            let query = args["query"].as_str().unwrap_or("").to_string();
+                            let response = if query.is_empty() {
+                                serde_json::json!({"error": "query parameter is required", "facts": [], "sessions": []})
+                            } else {
+                                match memory_op(&memory, move |mem| mem.search_memory_with_sessions(&query)).await {
+                                    Some(results) => results,
+                                    None => serde_json::json!({"error": "Memory search failed", "facts": [], "sessions": []}),
+                                }
+                            };
+
+                            let tool_success = !response.get("error").is_some();
+                            bus.send(AuraEvent::ToolExecuted {
+                                name: name.clone(),
+                                success: tool_success,
+                                output: response.to_string(),
+                            });
+                            let _ = ipc_tx.send(DaemonEvent::ToolStatus {
+                                name: name.clone(),
+                                status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
+                                output: Some(response.to_string()),
+                            });
+
+                            // Log the tool call + result in memory
+                            {
+                                let tc_sid = session_id.clone();
+                                let tc_content = format!("recall_memory: {}", args.to_string());
+                                memory_op(&memory, move |mem| {
+                                    mem.add_message(&tc_sid, aura_memory::MessageRole::ToolCall, &tc_content, None)
+                                }).await;
+                            }
+                            {
+                                let tr_sid = session_id.clone();
+                                let tr_content = response.to_string();
+                                memory_op(&memory, move |mem| {
+                                    mem.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
+                                }).await;
+                            }
+
+                            if let Err(e) = session.send_tool_response(id, name, response).await {
+                                tracing::error!("Failed to send recall_memory tool response: {e}");
+                            }
+                            continue;  // Skip the background tool spawn
+                        }
+
                         // All other tools: spawn in background so audio keeps flowing
                         let tool_session = Arc::clone(&session);
                         let tool_bus = bus.clone();
