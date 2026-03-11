@@ -571,8 +571,8 @@ async fn run_daemon(
                         playback_stopped_at = None; // Guard expired — allow mic through
                     }
 
-                    if let Err(e) = audio_session.send_audio(&samples).await {
-                        tracing::warn!("Failed to send audio to Gemini: {e}");
+                    if let Err(e) = audio_session.send_audio(&samples) {
+                        tracing::warn!("Gemini session closed, stopping audio bridge: {e}");
                         break;
                     }
                 }

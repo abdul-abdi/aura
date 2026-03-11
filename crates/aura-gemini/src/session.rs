@@ -124,11 +124,22 @@ impl GeminiLiveSession {
     }
 
     /// Send PCM f32 audio at 16kHz to Gemini.
-    pub async fn send_audio(&self, pcm_16khz: &[f32]) -> Result<()> {
-        self.audio_tx
-            .send(pcm_16khz.to_vec())
-            .await
-            .map_err(|_| anyhow::anyhow!("Session closed"))
+    ///
+    /// Uses `try_send` so this never blocks. During reconnection the channel
+    /// may be full (streaming loop isn't draining it) — frames are silently
+    /// dropped rather than blocking the audio bridge, which would kill the mic.
+    /// Returns `Err` only when the session is closed (receiver dropped).
+    pub fn send_audio(&self, pcm_16khz: &[f32]) -> Result<()> {
+        match self.audio_tx.try_send(pcm_16khz.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Channel full — drop frame silently (reconnecting or backpressure)
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("Session closed"))
+            }
+        }
     }
 
     /// Send a JPEG screenshot frame to Gemini.
@@ -259,6 +270,12 @@ async fn connection_loop(
         // Drain any pending reconnect signals before connecting
         while reconnect_rx.try_recv().is_ok() {}
 
+        // Drain stale audio/video frames from previous connection.
+        // Without this, buffered frames from before the disconnect flood the new
+        // connection immediately after setupComplete, causing the server to close
+        // it as a protocol violation — leading to a reconnect loop.
+        drain_channels(&mut channels);
+
         // Race the stream against a user-initiated reconnect request.
         // If reconnect fires, the stream future is dropped (closing the WebSocket)
         // and we loop back to reconnect immediately.
@@ -294,6 +311,19 @@ async fn connection_loop(
 
                 attempt += 1;
                 if attempt > MAX_RECONNECT_ATTEMPTS {
+                    // Clear stale resumption handle — if it's the reason reconnects
+                    // keep failing, a fresh session is the only way forward.
+                    {
+                        let mut handle = state.resumption_handle.lock().await;
+                        if handle.is_some() {
+                            tracing::info!("Clearing resumption handle after max retries");
+                            *handle = None;
+                            let _ = event_tx.send(GeminiEvent::SessionHandle {
+                                handle: String::new(),
+                            });
+                        }
+                    }
+
                     let _ = event_tx.send(GeminiEvent::Error {
                         message: format!("Max reconnection attempts exceeded: {}", outcome.error),
                     });
@@ -335,6 +365,34 @@ async fn connection_loop(
                 }
             }
         }
+    }
+}
+
+/// Drain all buffered frames from the audio, video, and text channels.
+/// Called before each reconnection attempt so stale data from the previous
+/// connection doesn't flood the new one.
+fn drain_channels(channels: &mut StreamChannels) {
+    let mut audio_drained = 0u32;
+    while channels.audio_rx.try_recv().is_ok() {
+        audio_drained += 1;
+    }
+    let mut video_drained = 0u32;
+    while channels.video_rx.try_recv().is_ok() {
+        video_drained += 1;
+    }
+    let mut text_drained = 0u32;
+    while channels.text_rx.try_recv().is_ok() {
+        text_drained += 1;
+    }
+    // Don't drain tool_response_rx — in-flight tool responses should still
+    // be delivered to maintain consistency.
+    if audio_drained + video_drained + text_drained > 0 {
+        tracing::info!(
+            audio = audio_drained,
+            video = video_drained,
+            text = text_drained,
+            "Drained stale channel data before reconnect"
+        );
     }
 }
 
@@ -570,6 +628,14 @@ async fn handle_server_message(
             let mut handle = state.resumption_handle.lock().await;
             *handle = Some(new_handle.clone());
             let _ = event_tx.send(GeminiEvent::SessionHandle { handle: new_handle });
+        } else if update.resumable == Some(false) {
+            // Server explicitly says session is not resumable — clear stale handle
+            tracing::info!("Server indicates session is not resumable, clearing handle");
+            let mut handle = state.resumption_handle.lock().await;
+            *handle = None;
+            let _ = event_tx.send(GeminiEvent::SessionHandle {
+                handle: String::new(),
+            });
         }
         return false;
     }

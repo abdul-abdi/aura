@@ -191,7 +191,7 @@ async fn test_session_send_audio() {
 
     // Send audio
     let pcm = vec![0.0_f32, 0.5, -0.5, 1.0];
-    session.send_audio(&pcm).await.unwrap();
+    session.send_audio(&pcm).unwrap();
 
     // Verify server received a realtimeInput message
     let received = timeout(TEST_TIMEOUT, verify_rx.recv())
