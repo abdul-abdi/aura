@@ -280,12 +280,38 @@ mod tests {
             "cloned trigger should see the original's trigger"
         );
     }
+
+    #[test]
+    fn trigger_and_wait_sets_flag_and_provides_receiver() {
+        let trigger = CaptureTrigger::new();
+        let mut rx = trigger.trigger_and_wait();
+        assert!(trigger.flag.load(Ordering::Relaxed), "trigger_and_wait() should set the flag");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn trigger_and_wait_receiver_completes_on_send() {
+        let trigger = CaptureTrigger::new();
+        let mut rx = trigger.trigger_and_wait();
+        if let Some(tx) = trigger.take_waiter() {
+            let _ = tx.send(());
+        }
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn take_waiter_returns_none_when_no_pending() {
+        let trigger = CaptureTrigger::new();
+        trigger.trigger(); // regular trigger, no waiter
+        assert!(trigger.take_waiter().is_none());
+    }
 }
 
 /// Handle for triggering immediate captures (post-action).
 #[derive(Clone)]
 pub struct CaptureTrigger {
     flag: Arc<AtomicBool>,
+    waiter: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl Default for CaptureTrigger {
@@ -298,6 +324,7 @@ impl CaptureTrigger {
     pub fn new() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
+            waiter: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -306,8 +333,25 @@ impl CaptureTrigger {
         self.flag.store(true, Ordering::Release);
     }
 
+    /// Signal that an immediate capture should happen and return a receiver
+    /// that completes when the capture loop has delivered the frame.
+    pub fn trigger_and_wait(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Ok(mut guard) = self.waiter.lock() {
+            *guard = Some(tx);
+        }
+        self.flag.store(true, Ordering::Release);
+        rx
+    }
+
     /// Check and clear the trigger flag.
     pub fn check_and_clear(&self) -> bool {
         self.flag.swap(false, Ordering::AcqRel)
+    }
+
+    /// Take the pending waiter sender, if any. Called by the capture loop
+    /// after delivering the frame.
+    pub fn take_waiter(&self) -> Option<tokio::sync::oneshot::Sender<()>> {
+        self.waiter.lock().ok()?.take()
     }
 }
