@@ -162,6 +162,39 @@ fn compute_frame_hash(rgb: &[u8]) -> u64 {
     hash
 }
 
+/// Check if a captured frame looks censored (blank/uniform content).
+/// macOS returns a valid image even without Screen Recording permission,
+/// but window contents are blanked out — only wallpaper and window chrome remain.
+/// This samples pixels and checks color variance: a real screen has high variance,
+/// a censored one is mostly uniform.
+pub fn frame_looks_censored(rgb: &[u8], width: usize, height: usize) -> bool {
+    if rgb.len() < width * height * 3 || width == 0 || height == 0 {
+        return true;
+    }
+
+    // Sample ~256 pixels spread across the frame
+    let total_pixels = width * height;
+    let step = (total_pixels / 256).max(1);
+    let mut unique_colors: std::collections::HashSet<(u8, u8, u8)> =
+        std::collections::HashSet::new();
+
+    for i in (0..total_pixels).step_by(step) {
+        let offset = i * 3;
+        if offset + 2 < rgb.len() {
+            unique_colors.insert((rgb[offset], rgb[offset + 1], rgb[offset + 2]));
+        }
+        // Real screens have many unique colors; bail early if clearly not censored
+        if unique_colors.len() > 32 {
+            return false;
+        }
+    }
+
+    // A real screen with apps open typically has 100+ unique sampled colors.
+    // Censored captures (wallpaper-only) may have few colors, but a solid-color
+    // wallpaper could also have <32. Use a very conservative threshold.
+    unique_colors.len() <= 8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

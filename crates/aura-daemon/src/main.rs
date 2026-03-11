@@ -139,7 +139,7 @@ fn main() -> Result<()> {
     setup.ensure_dirs()?;
     setup.print_status();
 
-    // Check Screen Recording permission at startup
+    // Screen Recording permission is checked inside run_daemon() where UI channels are available.
     check_screen_recording_permission();
 
     // Initialize session memory
@@ -392,6 +392,27 @@ async fn run_daemon(
         .as_ref()
         .map(|p| p.playing_arc())
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+    // Notify UI if Screen Recording was denied at startup.
+    if !check_screen_recording_permission() {
+        has_permission_error.store(true, Ordering::Release);
+        if let Some(ref tx) = menubar_tx {
+            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
+            let _ = tx
+                .send(MenuBarMessage::SetStatus {
+                    text: "Screen Recording needed — grant in System Settings > Privacy & Security > Screen Recording"
+                        .into(),
+                })
+                .await;
+        }
+        let _ = ipc_tx.send(DaemonEvent::DotColor {
+            color: DotColorName::Red,
+            pulsing: false,
+        });
+        let _ = ipc_tx.send(DaemonEvent::Status {
+            message: "Screen Recording needed — grant in System Settings > Privacy & Security > Screen Recording".into(),
+        });
+    }
 
     // Pre-check microphone permission before opening the audio device.
     // cpal/CoreAudio will implicitly trigger a TCC popup if we open the
@@ -707,6 +728,7 @@ async fn run_processor(
     tokio::spawn(async move {
         let mut last_hash: u64 = 0;
         let mut last_res: (u32, u32) = (0, 0);
+        let mut censored_warned = false;
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         interval.tick().await; // skip first immediate tick
 
@@ -739,6 +761,39 @@ async fn run_processor(
                 continue;
             }
             last_hash = frame.hash;
+
+            // On first non-duplicate frame, log at INFO so it's visible without --verbose.
+            // Also check if the frame looks censored (Screen Recording not granted).
+            if !censored_warned {
+                tracing::info!(
+                    width = frame.width,
+                    height = frame.height,
+                    scale = frame.scale_factor,
+                    size_kb = frame.jpeg_base64.len() / 1024,
+                    "First screen frame captured"
+                );
+                // Decode the base64 back to check pixel content for censorship detection.
+                if let Ok(jpeg_bytes) = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &frame.jpeg_base64,
+                ) {
+                    if let Ok(img) = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg) {
+                        let rgb = img.to_rgb8();
+                        if aura_screen::capture::frame_looks_censored(
+                            rgb.as_raw(),
+                            rgb.width() as usize,
+                            rgb.height() as usize,
+                        ) {
+                            tracing::error!(
+                                "Screen capture appears CENSORED — window contents are blank. \
+                                 Grant Screen Recording in System Settings > Privacy & Security > Screen Recording, \
+                                 then restart Aura."
+                            );
+                        }
+                    }
+                }
+                censored_warned = true;
+            }
 
             // Store frame dimensions for coordinate mapping in tool handlers.
             cap_img_w.store(frame.width, Ordering::Release);
@@ -1328,7 +1383,7 @@ fn show_error_dialog(message: &str) {
 /// Check Screen Recording permission at startup and warn if not granted.
 /// Uses CGPreflightScreenCaptureAccess — a silent read-only check that never
 /// triggers a macOS popup dialog.
-fn check_screen_recording_permission() {
+fn check_screen_recording_permission() -> bool {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
@@ -1337,9 +1392,11 @@ fn check_screen_recording_permission() {
     let has_permission = unsafe { CGPreflightScreenCaptureAccess() };
     if !has_permission {
         tracing::warn!(
-            "Screen Recording permission denied. Screen capture will return blank frames."
+            "Screen Recording permission not granted — screen capture will return blank/censored frames. \
+             Grant in System Settings > Privacy & Security > Screen Recording."
         );
     }
+    has_permission
 }
 
 /// Check Microphone permission at startup. Returns true if authorized.
