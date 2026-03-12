@@ -414,8 +414,7 @@ pub(crate) async fn run_daemon(
         }
     });
 
-    // Run until either processor or daemon exits
-    let daemon = aura_daemon::daemon::Daemon::new(bus.clone());
+    // Run until either processor exits, Ctrl+C, or IPC shutdown
     let ipc_session = Arc::clone(&session);
     let ipc_bus = bus.clone();
     let ipc_cancel = cancel.clone();
@@ -423,10 +422,10 @@ pub(crate) async fn run_daemon(
         _ = processor_handle => {
             tracing::info!("Processor finished, ending session");
         }
-        result = daemon.run() => {
-            if let Err(e) = result {
-                tracing::error!("Daemon error: {e}");
-            }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Ctrl+C received, shutting down");
+            bus.send(AuraEvent::Shutdown);
+            cancel.cancel();
         }
         _ = async {
             while let Some(cmd) = ipc_cmd_rx.recv().await {
