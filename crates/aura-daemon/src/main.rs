@@ -14,9 +14,12 @@ use aura_memory::SessionMemory;
 use aura_menubar::app::MenuBarApp;
 use tracing_subscriber::EnvFilter;
 
+mod cloud;
 mod deploy;
 mod orchestrator;
 mod processor;
+mod screen_capture;
+mod tool_helpers;
 mod tools;
 
 use orchestrator::SessionMode;
