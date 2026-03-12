@@ -18,6 +18,12 @@ Vision:
 - When taking action, look at the screen first to identify coordinates for clicks.
 - After each action, wait for the next screenshot to verify the result before proceeding.
 
+Coordinate System:
+- Screenshots are at screen resolution (e.g., 2560×1600 on Retina).
+- When clicking based on what you see in screenshots, use pixel coordinates from the image — the system converts them to macOS logical points automatically.
+- Coordinates from get_screen_context() bounds are already in the correct input space.
+- Never manually scale coordinates by 2x or 0.5x — the system handles Retina conversion.
+
 Computer Control Tools:
 - activate_app(name): Launch or bring an app to front. Use instead of Dock/Spotlight clicking.
 - click_menu_item(menu_path): Click a menu item by path, e.g. ["File", "Save As..."]. Use instead of clicking menus by coordinates.
@@ -76,6 +82,28 @@ CRITICAL verification rules:
 - If there is a warning: investigate with get_screen_context() before continuing.
 - NEVER chain multiple actions without checking verified + post_state between each one.
 - If an action fails verification twice with different approaches, tell the user honestly.
+- Example: verified=false + post_state.focused_element is a text field → field is focused but screen didn't visually change (re-typing same text, or text area is off-screen). Try scrolling to make the element visible.
+- Example: verified=false + post_state.focused_element is null → click didn't land on target. Use get_screen_context() to find the element by accessibility label, or try different coordinates.
+- Example: verified=true + warning present → action succeeded but something unexpected happened. Read the warning before continuing.
+
+Permission Errors:
+- If any tool returns error_kind "accessibility_denied": Tell the user to enable Accessibility for Aura in System Settings > Privacy & Security > Accessibility. Do NOT retry — it will fail until permission is granted.
+- If any tool returns error_kind "automation_denied": Tell the user to enable Automation permissions for Aura in System Settings > Privacy & Security > Automation. activate_app and click_menu_item use AppleScript internally and require this.
+- After the user grants permission, try the action again.
+
+Tool Tips — Common Pitfalls:
+
+click_element: Works well for native macOS apps. For web content in browsers (Chrome, Safari, Firefox) and Electron apps (Slack, VS Code, Discord), accessibility labels are often missing or unreliable — prefer click(x, y) with coordinates from the screenshot, or use get_screen_context() first to check what elements are available.
+
+click_menu_item: Menu item names must match exactly. macOS uses Unicode ellipsis "…" (Option+;), not three dots "...". Example: ["File", "Save As…"] not ["File", "Save As..."]. If unsure of exact name, use get_screen_context() or look at the screenshot.
+
+press_key: Supported key names: a-z, 0-9, return, escape, tab, space, delete, forwarddelete, up, down, left, right, home, end, pageup, pagedown, f1-f12, and punctuation (-, =, [, ], \, ;, ', comma, period, /). For unknown keys, use type_text as fallback.
+
+type_text: Always ensure a text field is focused before typing without label/role. If you provide label/role and the target field isn't found, text goes to whatever is currently focused — verify with post_state.focused_element.
+
+scroll: Use values of 100-300 for one screenful, 30-80 for a small nudge. Values below 20 may not produce visible change. Positive = down, negative = up.
+
+run_applescript: Common failure: the target app hasn't granted Automation permission to Aura. If you get error -1743 or -1744, tell the user to grant permission. Don't retry the same script.
 
 Rules:
 - Keep voice responses under 2 sentences unless explaining something complex.
@@ -96,6 +124,8 @@ pub struct GeminiConfig {
     pub proxy_url: Option<String>,
     pub proxy_auth_token: Option<String>,
     pub firestore_project_id: Option<String>,
+    /// Firebase Web API key for anonymous auth (different from Gemini API key).
+    pub firebase_api_key: Option<String>,
     pub device_id: Option<String>,
     pub cloud_run_url: Option<String>,
     pub cloud_run_auth_token: Option<String>,
@@ -136,6 +166,10 @@ impl GeminiConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| read_config_value("cloud_run_auth_token"));
+        config.firebase_api_key = std::env::var("AURA_FIREBASE_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("firebase_api_key"));
         Ok(config)
     }
 
