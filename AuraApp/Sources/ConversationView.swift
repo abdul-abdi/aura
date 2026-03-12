@@ -9,51 +9,53 @@ struct ConversationView: View {
     let onReconnect: () -> Void
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(spacing: 0) {
-                    if connectionState == .disconnected {
-                        reconnectBanner
-                    }
+        VStack(spacing: 0) {
+            if connectionState == .disconnected {
+                reconnectBanner
+            }
 
-                    if events.isEmpty && !isThinking {
-                        emptyState
-                    } else {
-                        LazyVStack(spacing: 4) {
-                            ForEach(events) { event in
-                                ActivityRow(event: event)
-                                    .id(event.id)
-                                    .transition(
-                                        .asymmetric(
-                                            insertion: .move(edge: .bottom)
-                                                .combined(with: .opacity),
-                                            removal: .opacity
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 0) {
+                        if events.isEmpty && !isThinking {
+                            emptyState
+                        } else {
+                            LazyVStack(spacing: 4) {
+                                ForEach(events) { event in
+                                    ActivityRow(event: event)
+                                        .id(event.id)
+                                        .transition(
+                                            .asymmetric(
+                                                insertion: .move(edge: .bottom)
+                                                    .combined(with: .opacity),
+                                                removal: .opacity
+                                            )
                                         )
-                                    )
-                            }
+                                }
 
-                            if isThinking {
-                                TypingIndicator()
-                                    .id("typing-indicator")
-                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                if isThinking {
+                                    TypingIndicator()
+                                        .id("typing-indicator")
+                                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                }
                             }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
                     }
                 }
-            }
-            .onChange(of: events.count) { _, _ in
-                if let lastEvent = events.last {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        proxy.scrollTo(lastEvent.id, anchor: .bottom)
+                .onChange(of: events.count) { _, _ in
+                    if let lastEvent = events.last {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            proxy.scrollTo(lastEvent.id, anchor: .bottom)
+                        }
                     }
                 }
-            }
-            .onChange(of: isThinking) { _, thinking in
-                if thinking {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        proxy.scrollTo("typing-indicator", anchor: .bottom)
+                .onChange(of: isThinking) { _, thinking in
+                    if thinking {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            proxy.scrollTo("typing-indicator", anchor: .bottom)
+                        }
                     }
                 }
             }
