@@ -112,6 +112,56 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Total: ${PASSED} passed, ${FAILED} failed**" >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Code coverage ──────────────────────────────────────────────────────
+  coverage:
+    name: Code Coverage
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cov-
+      - name: Generate coverage
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee /tmp/cov-output.txt
+      - name: Coverage summary
+        if: always()
+        run: |
+          cargo llvm-cov report --workspace 2>&1 | tee /tmp/cov-report.txt
+          echo "## Code Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/cov-report.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Docker build verification ───────────────────────────────────────────
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: proxy
+            context: .
+            dockerfile: crates/aura-proxy/Dockerfile
+          - name: consolidation
+            context: infrastructure/
+            dockerfile: infrastructure/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.name }} Docker image
+        run: docker build -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+
   # ── Build verification ─────────────────────────────────────────────────
   build:
     name: Build
@@ -187,7 +237,7 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
 
           ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$1} END {print s+0}')
-          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$1} END {print s+0}')
+          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$2} END {print s+0}')
           TOTAL=$((ADDITIONS + DELETIONS))
           FILES=$(git diff --name-only "${BASE}..${HEAD}" | wc -l | tr -d ' ')
 
@@ -221,7 +271,7 @@ jobs:
     name: Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, lint, test, build, audit]
+    needs: [format, lint, test, build, audit, coverage, docker]
     steps:
       - name: Check required jobs
         run: |
@@ -230,12 +280,16 @@ jobs:
           echo "test:     ${{ needs.test.result }}"
           echo "build:    ${{ needs.build.result }}"
           echo "audit:    ${{ needs.audit.result }}"
+          echo "coverage: ${{ needs.coverage.result }}"
+          echo "docker:   ${{ needs.docker.result }}"
 
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs.audit.result }}" != "success" ]]; then
+             [[ "${{ needs.audit.result }}" != "success" ]] || \
+             [[ "${{ needs.coverage.result }}" != "success" ]] || \
+             [[ "${{ needs.docker.result }}" != "success" ]]; then
             echo "::error::One or more required checks failed"
             exit 1
           fi
