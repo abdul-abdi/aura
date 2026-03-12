@@ -1505,6 +1505,14 @@ async fn run_processor(
                         is_speaking.store(false, Ordering::Release);
                         is_interrupted.store(false, Ordering::Release);
                         tracing::debug!("Turn complete");
+
+                        // Notify UI that assistant turn is done
+                        let _ = ipc_tx.send(DaemonEvent::Transcript {
+                            role: Role::Assistant,
+                            text: String::new(),
+                            done: true,
+                            source: "voice".into(),
+                        });
                     }
                     Ok(GeminiEvent::Error { message }) => {
                         tracing::error!(%message, "Gemini error");
@@ -2409,13 +2417,21 @@ fn truncate_tool_response(response: &mut serde_json::Value) {
         }
     }
 
-    // General size cap: if still too large, keep only essential fields
+    // General size cap: if still too large, keep essential fields + truncated error/stdout
     let serialized_len = response.to_string().len();
     if serialized_len > MAX_TOOL_RESPONSE_CHARS
         && let Some(obj) = response.as_object_mut()
     {
         let success = obj.get("success").cloned();
         let verified = obj.get("verified").cloned();
+        let error = obj
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, 500));
+        let stdout = obj
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, 500));
         obj.clear();
         if let Some(s) = success {
             obj.insert("success".to_string(), s);
@@ -2423,10 +2439,60 @@ fn truncate_tool_response(response: &mut serde_json::Value) {
         if let Some(v) = verified {
             obj.insert("verified".to_string(), v);
         }
+        if let Some(e) = error {
+            obj.insert("error".to_string(), serde_json::Value::String(e));
+        }
+        if let Some(o) = stdout {
+            obj.insert("stdout".to_string(), serde_json::Value::String(o));
+        }
         obj.insert(
             "truncated".to_string(),
             serde_json::json!(format!("Response truncated from {serialized_len} chars to save context")),
         );
+    }
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        s.to_string()
+    } else {
+        format!("{}...[truncated]", &s[..max_chars])
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_preserves_error_and_stdout() {
+        let large_output = "x".repeat(10_000);
+        let mut response = serde_json::json!({
+            "success": false,
+            "error": format!("Something went wrong: {large_output}"),
+            "stdout": format!("Output: {large_output}"),
+            "verified": true
+        });
+        truncate_tool_response(&mut response);
+        let obj = response.as_object().unwrap();
+        assert!(obj.contains_key("error"), "error field should be preserved");
+        assert!(obj.contains_key("stdout"), "stdout field should be preserved");
+        assert!(obj.contains_key("success"), "success field should be preserved");
+        let error_len = obj["error"].as_str().unwrap().len();
+        let stdout_len = obj["stdout"].as_str().unwrap().len();
+        assert!(error_len <= 520, "error should be truncated, got {error_len}");
+        assert!(stdout_len <= 520, "stdout should be truncated, got {stdout_len}");
+    }
+
+    #[test]
+    fn truncate_small_response_unchanged() {
+        let mut response = serde_json::json!({
+            "success": true,
+            "stdout": "hello"
+        });
+        let original = response.clone();
+        truncate_tool_response(&mut response);
+        assert_eq!(response, original);
     }
 }
 
