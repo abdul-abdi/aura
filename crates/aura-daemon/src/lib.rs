@@ -1,5 +1,5 @@
 pub mod bus;
-pub mod daemon;
+pub mod context;
 pub mod deploy;
 pub mod event;
 pub mod ipc;

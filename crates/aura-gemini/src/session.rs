@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::config::GeminiConfig;
 use crate::protocol::*;
@@ -445,9 +446,26 @@ async fn connect_and_stream_inner(
 ) -> Result<bool> {
     let url = state.config.ws_url();
     tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
+
+    // Build an HTTP request so we can attach custom headers (proxy mode sends
+    // credentials as headers instead of query parameters).
+    let mut request = url
+        .parse::<tokio_tungstenite::tungstenite::http::Uri>()
+        .context("Invalid WebSocket URL")?
+        .into_client_request()
+        .context("Failed to build WebSocket request")?;
+    for (name, value) in state.config.ws_headers() {
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                .context("Invalid header name")?,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
+                .context("Invalid header value")?,
+        );
+    }
+
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async(&url),
+        tokio_tungstenite::connect_async(request),
     )
     .await
     .context("WebSocket connection timed out (10s)")?
@@ -455,18 +473,17 @@ async fn connect_and_stream_inner(
 
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
-    // Send setup message
-    // Always start fresh — don't restore previous context.
-    // Session resumption preserves all accumulated screenshots/tool responses,
-    // causing context to snowball and sessions to die faster on each reconnect.
-    {
-        let mut handle = state.resumption_handle.lock().await;
-        if handle.is_some() {
-            tracing::info!("Clearing resumption handle for fresh session (context overload prevention)");
-            *handle = None;
-        }
+    // Send setup message — use the resumption handle if one is set.
+    let current_handle = {
+        let handle = state.resumption_handle.lock().await;
+        handle.clone()
+    };
+    if current_handle.is_some() {
+        tracing::info!("Resuming session with existing handle");
+    } else {
+        tracing::info!("Starting fresh session (no resumption handle)");
     }
-    let setup = build_setup_message(&state.config, None);
+    let setup = build_setup_message(&state.config, current_handle);
     let setup_json = serde_json::to_string(&setup)?;
     tracing::debug!("Sending setup message (system prompt and tool declarations redacted)");
     ws_sink.send(Message::Text(setup_json)).await?;
@@ -821,6 +838,11 @@ mod tests {
             temperature: 0.9,
             proxy_url: None,
             proxy_auth_token: None,
+            firestore_project_id: None,
+            firebase_api_key: None,
+            device_id: None,
+            cloud_run_url: None,
+            cloud_run_auth_token: None,
         };
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
@@ -840,6 +862,11 @@ mod tests {
             temperature: 0.9,
             proxy_url: None,
             proxy_auth_token: None,
+            firestore_project_id: None,
+            firebase_api_key: None,
+            device_id: None,
+            cloud_run_url: None,
+            cloud_run_auth_token: None,
         };
         let msg = build_setup_message(&config, Some("tok_resume_123".into()));
         let json = serde_json::to_string(&msg).unwrap();

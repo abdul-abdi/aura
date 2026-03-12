@@ -20,6 +20,8 @@ pub enum DaemonEvent {
         role: Role,
         text: String,
         done: bool,
+        #[serde(default = "default_source")]
+        source: String,
     },
 
     /// Tool execution status.
@@ -28,6 +30,8 @@ pub enum DaemonEvent {
         status: ToolRunStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
 
     /// Status message update.
@@ -83,6 +87,10 @@ pub enum UICommand {
     Shutdown,
 }
 
+fn default_source() -> String {
+    "voice".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,11 +101,12 @@ mod tests {
             role: Role::Assistant,
             text: "Hello".into(),
             done: false,
+            source: "voice".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"transcript","role":"assistant","text":"Hello","done":false}"#
+            r#"{"type":"transcript","role":"assistant","text":"Hello","done":false,"source":"voice"}"#
         );
 
         // Roundtrip
@@ -133,6 +142,7 @@ mod tests {
             name: "click".into(),
             status: ToolRunStatus::Running,
             output: None,
+            summary: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
@@ -147,6 +157,7 @@ mod tests {
             name: "click".into(),
             status: ToolRunStatus::Completed,
             output: Some("done".into()),
+            summary: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
@@ -192,5 +203,17 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(json, r#"{"type":"status","message":"Connected"}"#);
+    }
+
+    #[test]
+    fn transcript_with_source_serialization() {
+        let event = DaemonEvent::Transcript {
+            role: Role::User,
+            text: "hello".into(),
+            done: true,
+            source: "text".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""source":"text""#));
     }
 }

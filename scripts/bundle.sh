@@ -16,10 +16,12 @@ DMG_PATH="${PROJECT_DIR}/target/release/${APP_NAME}-${VERSION}.dmg"
 
 BUILD_DMG=false
 LEGACY=false
+STRICT=false
 for arg in "$@"; do
     case "$arg" in
         --dmg) BUILD_DMG=true ;;
         --legacy) LEGACY=true ;;
+        --strict) STRICT=true ;;
     esac
 done
 
@@ -48,8 +50,11 @@ if [[ "$LEGACY" == false ]]; then
 
         SWIFTUI_BINARY="${SWIFTUI_DIR}/.build/release/AuraApp"
         if [[ ! -f "$SWIFTUI_BINARY" ]]; then
-            echo "ERROR: SwiftUI binary not found at ${SWIFTUI_BINARY}"
-            echo "Falling back to legacy build."
+            if [[ "$STRICT" == true ]]; then
+                echo "ERROR: SwiftUI binary not found. Failing (--strict mode)."
+                exit 1
+            fi
+            echo "WARNING: SwiftUI binary not found. Falling back to legacy build."
             LEGACY=true
         fi
     else

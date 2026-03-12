@@ -443,8 +443,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let devPath = findDevelopmentDaemon()
             guard let path = devPath else {
                 appState.statusMessage = "Daemon not found"
-                appState.messages.append(ChatMessage(
-                    role: .assistant,
+                appState.events.append(ActivityEvent(
+                    kind: .assistantSpeech,
                     text: "Could not find the Aura daemon. Please rebuild with `cargo build --release -p aura-daemon` and restart the app."
                 ))
                 return

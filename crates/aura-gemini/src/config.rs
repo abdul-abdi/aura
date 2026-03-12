@@ -18,6 +18,12 @@ Vision:
 - When taking action, look at the screen first to identify coordinates for clicks.
 - After each action, wait for the next screenshot to verify the result before proceeding.
 
+Coordinate System:
+- Screenshots are at screen resolution (e.g., 2560×1600 on Retina).
+- When clicking based on what you see in screenshots, use pixel coordinates from the image — the system converts them to macOS logical points automatically.
+- Coordinates from get_screen_context() bounds are already in the correct input space.
+- Never manually scale coordinates by 2x or 0.5x — the system handles Retina conversion.
+
 Computer Control Tools:
 - activate_app(name): Launch or bring an app to front. Use instead of Dock/Spotlight clicking.
 - click_menu_item(menu_path): Click a menu item by path, e.g. ["File", "Save As..."]. Use instead of clicking menus by coordinates.
@@ -76,6 +82,28 @@ CRITICAL verification rules:
 - If there is a warning: investigate with get_screen_context() before continuing.
 - NEVER chain multiple actions without checking verified + post_state between each one.
 - If an action fails verification twice with different approaches, tell the user honestly.
+- Example: verified=false + post_state.focused_element is a text field → field is focused but screen didn't visually change (re-typing same text, or text area is off-screen). Try scrolling to make the element visible.
+- Example: verified=false + post_state.focused_element is null → click didn't land on target. Use get_screen_context() to find the element by accessibility label, or try different coordinates.
+- Example: verified=true + warning present → action succeeded but something unexpected happened. Read the warning before continuing.
+
+Permission Errors:
+- If any tool returns error_kind "accessibility_denied": Tell the user to enable Accessibility for Aura in System Settings > Privacy & Security > Accessibility. Do NOT retry — it will fail until permission is granted.
+- If any tool returns error_kind "automation_denied": Tell the user to enable Automation permissions for Aura in System Settings > Privacy & Security > Automation. activate_app and click_menu_item use AppleScript internally and require this.
+- After the user grants permission, try the action again.
+
+Tool Tips — Common Pitfalls:
+
+click_element: Works well for native macOS apps. For web content in browsers (Chrome, Safari, Firefox) and Electron apps (Slack, VS Code, Discord), accessibility labels are often missing or unreliable — prefer click(x, y) with coordinates from the screenshot, or use get_screen_context() first to check what elements are available.
+
+click_menu_item: Menu item names must match exactly. macOS uses Unicode ellipsis "…" (Option+;), not three dots "...". Example: ["File", "Save As…"] not ["File", "Save As..."]. If unsure of exact name, use get_screen_context() or look at the screenshot.
+
+press_key: Supported key names: a-z, 0-9, return, escape, tab, space, delete, forwarddelete, up, down, left, right, home, end, pageup, pagedown, f1-f12, and punctuation (-, =, [, ], \, ;, ', comma, period, /). For unknown keys, use type_text as fallback.
+
+type_text: Always ensure a text field is focused before typing without label/role. If you provide label/role and the target field isn't found, text goes to whatever is currently focused — verify with post_state.focused_element.
+
+scroll: Use values of 100-300 for one screenful, 30-80 for a small nudge. Values below 20 may not produce visible change. Positive = down, negative = up.
+
+run_applescript: Common failure: the target app hasn't granted Automation permission to Aura. If you get error -1743 or -1744, tell the user to grant permission. Don't retry the same script.
 
 Rules:
 - Keep voice responses under 2 sentences unless explaining something complex.
@@ -95,6 +123,12 @@ pub struct GeminiConfig {
     pub temperature: f64,
     pub proxy_url: Option<String>,
     pub proxy_auth_token: Option<String>,
+    pub firestore_project_id: Option<String>,
+    /// Firebase Web API key for anonymous auth (different from Gemini API key).
+    pub firebase_api_key: Option<String>,
+    pub device_id: Option<String>,
+    pub cloud_run_url: Option<String>,
+    pub cloud_run_auth_token: Option<String>,
 }
 
 impl GeminiConfig {
@@ -116,6 +150,26 @@ impl GeminiConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| read_config_value("proxy_auth_token"));
+        config.firestore_project_id = std::env::var("AURA_FIRESTORE_PROJECT_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("firestore_project_id"));
+        config.device_id = std::env::var("AURA_DEVICE_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("device_id"));
+        config.cloud_run_url = std::env::var("AURA_CLOUD_RUN_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("cloud_run_url"));
+        config.cloud_run_auth_token = std::env::var("AURA_CLOUD_RUN_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("cloud_run_auth_token"));
+        config.firebase_api_key = std::env::var("AURA_FIREBASE_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("firebase_api_key"));
         Ok(config)
     }
 
@@ -128,34 +182,50 @@ impl GeminiConfig {
             temperature: 0.7,
             proxy_url: None,
             proxy_auth_token: None,
+            firestore_project_id: None,
+            firebase_api_key: None,
+            device_id: None,
+            cloud_run_url: None,
+            cloud_run_auth_token: None,
         }
     }
 
+    /// Build the WebSocket URL.
+    ///
+    /// - **Direct mode**: `wss://...googleapis.com/...?key=<API_KEY>` (Google requirement).
+    /// - **Proxy mode**: bare proxy URL — credentials are sent via HTTP headers
+    ///   (see [`ws_headers`]).
     pub fn ws_url(&self) -> String {
         if let Some(ref proxy) = self.proxy_url {
-            let sep = if proxy.contains('?') { '&' } else { '?' };
-            let mut url = format!("{proxy}{sep}api_key={}", self.api_key);
-            if let Some(ref token) = self.proxy_auth_token {
-                url.push_str("&auth_token=");
-                url.push_str(token);
-            }
-            url
+            proxy.clone()
         } else {
             format!("{WS_BASE}?key={}", self.api_key)
         }
     }
 
     pub fn ws_url_redacted(&self) -> String {
-        if let Some(ref proxy) = self.proxy_url {
-            let sep = if proxy.contains('?') { '&' } else { '?' };
-            let mut url = format!("{proxy}{sep}api_key=REDACTED");
-            if self.proxy_auth_token.is_some() {
-                url.push_str("&auth_token=REDACTED");
-            }
-            url
+        if self.proxy_url.is_some() {
+            // Proxy mode: URL contains no secrets
+            self.ws_url()
         } else {
             format!("{WS_BASE}?key=REDACTED")
         }
+    }
+
+    /// Return custom HTTP headers for the WebSocket upgrade request.
+    ///
+    /// In proxy mode, the API key and auth token are sent as headers instead of
+    /// query parameters so they are not logged by intermediaries.
+    /// In direct mode, returns an empty vec (credentials are in the URL per Google's API).
+    pub fn ws_headers(&self) -> Vec<(String, String)> {
+        if self.proxy_url.is_none() {
+            return Vec::new();
+        }
+        let mut headers = vec![("x-gemini-key".to_string(), self.api_key.clone())];
+        if let Some(ref token) = self.proxy_auth_token {
+            headers.push(("x-auth-token".to_string(), token.clone()));
+        }
+        headers
     }
 }
 
@@ -242,12 +312,41 @@ mod tests {
     }
 
     #[test]
-    fn test_proxy_url_overrides_direct_connection() {
+    fn test_proxy_url_no_query_params() {
         let mut config = GeminiConfig::from_env_inner("test-key-123");
         config.proxy_url = Some("wss://aura-proxy-xyz.run.app/ws".into());
         let url = config.ws_url();
-        assert!(url.starts_with("wss://aura-proxy-xyz.run.app/ws"));
-        assert!(url.contains("api_key=test-key-123"));
+        // Proxy URL should NOT contain API key in query params
+        assert_eq!(url, "wss://aura-proxy-xyz.run.app/ws");
+        assert!(!url.contains("api_key="));
+        assert!(!url.contains("auth_token="));
+    }
+
+    #[test]
+    fn test_ws_headers_proxy_mode() {
+        let mut config = GeminiConfig::from_env_inner("test-key-123");
+        config.proxy_url = Some("wss://proxy.example.com/ws".into());
+        config.proxy_auth_token = Some("secret-token".into());
+        let headers = config.ws_headers();
+        assert_eq!(headers.len(), 2);
+        assert!(headers.contains(&("x-gemini-key".to_string(), "test-key-123".to_string())));
+        assert!(headers.contains(&("x-auth-token".to_string(), "secret-token".to_string())));
+    }
+
+    #[test]
+    fn test_ws_headers_proxy_mode_no_auth_token() {
+        let mut config = GeminiConfig::from_env_inner("test-key-123");
+        config.proxy_url = Some("wss://proxy.example.com/ws".into());
+        let headers = config.ws_headers();
+        assert_eq!(headers.len(), 1);
+        assert!(headers.contains(&("x-gemini-key".to_string(), "test-key-123".to_string())));
+    }
+
+    #[test]
+    fn test_ws_headers_direct_mode_empty() {
+        let config = GeminiConfig::from_env_inner("test-key-123");
+        let headers = config.ws_headers();
+        assert!(headers.is_empty());
     }
 
     #[test]
@@ -284,13 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn ws_url_redacted_hides_key_with_proxy() {
+    fn ws_url_redacted_proxy_is_clean_url() {
         let mut config = GeminiConfig::from_env_inner("secret-key-123");
         config.proxy_url = Some("wss://proxy.example.com/ws".into());
         let redacted = config.ws_url_redacted();
+        // Proxy mode: redacted URL is just the proxy URL (no secrets in URL)
+        assert_eq!(redacted, "wss://proxy.example.com/ws");
         assert!(!redacted.contains("secret-key-123"));
-        assert!(redacted.contains("REDACTED"));
-        assert!(redacted.contains("proxy.example.com"));
     }
 
     #[test]

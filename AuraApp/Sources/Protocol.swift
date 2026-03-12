@@ -58,6 +58,23 @@ struct TranscriptUpdate: Decodable {
     let role: TranscriptRole
     let text: String
     let done: Bool
+    let source: TranscriptSource
+
+    enum TranscriptSource: Decodable, Equatable {
+        case voice
+        case text
+        case unknown(String)
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            switch rawValue {
+            case "voice": self = .voice
+            case "text": self = .text
+            default: self = .unknown(rawValue)
+            }
+        }
+    }
 }
 
 enum TranscriptRole: String, Decodable {
@@ -69,6 +86,7 @@ struct ToolStatusUpdate: Decodable {
     let name: String
     let status: ToolRunStatus
     let output: String?
+    let summary: String?
 }
 
 enum ToolRunStatus: String, Decodable {
@@ -112,25 +130,27 @@ enum UICommand: Encodable {
     }
 }
 
-// MARK: - Message Model
+// MARK: - Activity Stream Model
 
-/// A single message displayed in the conversation view.
-struct ChatMessage: Identifiable {
+/// A single event in the activity stream.
+struct ActivityEvent: Identifiable {
     let id: UUID
-    let role: MessageRole
+    let kind: EventKind
     var text: String
     let timestamp: Date
 
-    init(role: MessageRole, text: String) {
+    init(kind: EventKind, text: String) {
         self.id = UUID()
-        self.role = role
+        self.kind = kind
         self.text = text
         self.timestamp = Date()
     }
 }
 
-enum MessageRole {
-    case user
-    case assistant
-    case tool(ToolRunStatus)
+enum EventKind: Equatable {
+    case userSpeech          // 🎤 voice transcript
+    case userText            // 💬 typed message
+    case assistantSpeech     // 🔊 what Aura said
+    case toolCall(ToolRunStatus)  // ⚡ tool execution
+    case turnSeparator       // ─ ─ visual break
 }

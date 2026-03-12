@@ -72,6 +72,18 @@ impl SessionMemory {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+
+        // Check whether the FTS virtual table already exists before running DDL,
+        // so we can decide whether a one-time backfill rebuild is needed.
+        let fts_existed: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='facts_fts'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -99,8 +111,34 @@ impl SessionMemory {
                 entities TEXT,
                 importance REAL NOT NULL DEFAULT 0.5,
                 created_at TEXT NOT NULL
-            );",
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+                content, category, entities,
+                content='facts',
+                content_rowid='id',
+                tokenize='porter unicode61'
+            );
+            CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+                INSERT INTO facts_fts(rowid, content, category, entities)
+                VALUES (new.id, new.content, new.category, COALESCE(new.entities, ''));
+            END;
+            CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+                INSERT INTO facts_fts(facts_fts, rowid, content, category, entities)
+                VALUES ('delete', old.id, old.content, old.category, COALESCE(old.entities, ''));
+            END;
+            CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+                INSERT INTO facts_fts(facts_fts, rowid, content, category, entities)
+                VALUES ('delete', old.id, old.content, old.category, COALESCE(old.entities, ''));
+                INSERT INTO facts_fts(rowid, content, category, entities)
+                VALUES (new.id, new.content, new.category, COALESCE(new.entities, ''));
+            END;",
         )?;
+
+        // Backfill the FTS index from existing facts when the virtual table was
+        // just created for the first time (i.e. upgrading an existing database).
+        if !fts_existed {
+            conn.execute_batch("INSERT INTO facts_fts(facts_fts) VALUES('rebuild');")?;
+        }
         Ok(Self { conn })
     }
 
@@ -354,28 +392,61 @@ impl SessionMemory {
     }
 
     pub fn search_memory(&self, query: &str) -> Result<Vec<Fact>> {
-        let pattern = format!("%{query}%");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, category, content, entities, importance, created_at
-             FROM facts
-             WHERE content LIKE ?1 OR entities LIKE ?1
-             ORDER BY importance DESC, created_at DESC
-             LIMIT 10",
-        )?;
-        let facts = stmt
-            .query_map(params![pattern], |row| {
-                Ok(Fact {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    category: row.get(2)?,
-                    content: row.get(3)?,
-                    entities: row.get(4)?,
-                    importance: row.get(5)?,
-                    created_at: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(facts)
+        // Use FTS5 for queries of 2+ characters; fall back to LIKE for single chars.
+        if query.len() >= 2 {
+            let fts_query = query
+                .split_whitespace()
+                .map(|w| format!("\"{}\"", w.replace('"', "")))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+
+            let mut stmt = self.conn.prepare(
+                "SELECT f.id, f.session_id, f.category, f.content, f.entities,
+                        f.importance, f.created_at
+                 FROM facts f
+                 JOIN facts_fts ON f.id = facts_fts.rowid
+                 WHERE facts_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT 10",
+            )?;
+            let facts = stmt
+                .query_map(params![fts_query], |row| {
+                    Ok(Fact {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        category: row.get(2)?,
+                        content: row.get(3)?,
+                        entities: row.get(4)?,
+                        importance: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(facts)
+        } else {
+            let pattern = format!("%{query}%");
+            let mut stmt = self.conn.prepare(
+                "SELECT id, session_id, category, content, entities, importance, created_at
+                 FROM facts
+                 WHERE content LIKE ?1 OR entities LIKE ?1
+                 ORDER BY importance DESC, created_at DESC
+                 LIMIT 10",
+            )?;
+            let facts = stmt
+                .query_map(params![pattern], |row| {
+                    Ok(Fact {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        category: row.get(2)?,
+                        content: row.get(3)?,
+                        entities: row.get(4)?,
+                        importance: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(facts)
+        }
     }
 
     pub fn search_memory_with_sessions(&self, query: &str) -> Result<serde_json::Value> {

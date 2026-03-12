@@ -23,6 +23,11 @@ fn test_config(url: String) -> GeminiConfig {
         temperature: 0.7,
         proxy_url: Some(format!("{url}/")),
         proxy_auth_token: None,
+        firestore_project_id: None,
+        firebase_api_key: None,
+        device_id: None,
+        cloud_run_url: None,
+        cloud_run_auth_token: None,
     }
 }
 

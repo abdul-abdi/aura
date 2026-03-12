@@ -2,9 +2,6 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuraEvent {
-    // Voice
-    WakeWordDetected,
-
     // Gemini session
     GeminiConnected,
     GeminiReconnecting {

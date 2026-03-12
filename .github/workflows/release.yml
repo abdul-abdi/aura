@@ -49,7 +49,7 @@ jobs:
         run: cargo build --release -p aura-daemon
 
       - name: Bundle Aura.app
-        run: bash scripts/bundle.sh
+        run: bash scripts/bundle.sh --strict
 
       - name: Extract version
         id: version
@@ -88,3 +88,20 @@ jobs:
           name: Aura v${{ steps.version.outputs.version }}
           body_path: /tmp/release-notes.md
           files: target/release/Aura-${{ steps.version.outputs.version }}.dmg
+
+      # After GitHub Release creation, trigger cloud deploy
+      - name: Deploy cloud services
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'deploy-cloud.yml',
+              ref: 'prod',
+              inputs: {
+                service: 'all',
+                environment: 'production'
+              }
+            });

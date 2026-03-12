@@ -3,10 +3,9 @@ use tokio::sync::broadcast;
 
 /// Event bus for distributing [`AuraEvent`]s to multiple consumers.
 ///
-/// Uses `tokio::sync::broadcast` because both the [`crate::daemon::Daemon`] event loop
-/// and the Gemini processor (in `main.rs`) subscribe independently and must each
-/// receive every event. An `mpsc` channel would only deliver each event to a single
-/// consumer, which would break the fan-out requirement.
+/// Uses `tokio::sync::broadcast` because the orchestrator, processor, and other
+/// subscribers each receive every event independently. An `mpsc` channel would only
+/// deliver each event to a single consumer, which would break the fan-out requirement.
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<AuraEvent>,

@@ -8,7 +8,6 @@ tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 cpal = "0.15"
-rustpotter = "3"
 rodio = "0.20"
 dirs = "6"
 which = "7"

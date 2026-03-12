@@ -1,5 +1,4 @@
-//! Aura voice engine: audio capture, playback, and wake word detection
+//! Aura voice engine: audio capture and playback
 
 pub mod audio;
 pub mod playback;
-pub mod wakeword;
