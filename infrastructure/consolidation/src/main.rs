@@ -230,9 +230,10 @@ fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// Compare two strings in constant time by hashing both with SHA-256 first.
 fn constant_time_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
     let ha = Sha256::digest(a.as_bytes());
     let hb = Sha256::digest(b.as_bytes());
-    ha == hb
+    ha.ct_eq(&hb).into()
 }
 
 // ---------------------------------------------------------------------------

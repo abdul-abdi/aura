@@ -16,5 +16,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 sha2 = "0.10"
+subtle = "2"
 chrono = "0.4.44"
 futures = "0.3.32"

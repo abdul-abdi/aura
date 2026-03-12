@@ -54,21 +54,18 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-/// Constant-time auth check. Returns `true` when access should be allowed.
-/// If `expected` is `None`, auth is not required and always passes.
-pub fn check_auth(token: Option<&str>, expected: Option<&str>) -> bool {
-    match expected {
-        None => true,
-        Some(expected) => match token {
-            Some(token) => {
-                use subtle::ConstantTimeEq;
-                // Hash both to fixed length to avoid length oracle
-                let token_hash = hash_token(token.as_bytes());
-                let expected_hash = hash_token(expected.as_bytes());
-                token_hash.ct_eq(&expected_hash).unwrap_u8() == 1
-            }
-            None => false,
-        },
+/// Constant-time auth check. Returns `true` when the provided token matches.
+/// Auth is always required — both `token` and `expected` must be present and match.
+pub fn check_auth(token: Option<&str>, expected: &str) -> bool {
+    match token {
+        Some(token) => {
+            use subtle::ConstantTimeEq;
+            // Hash both to fixed length to avoid length oracle
+            let token_hash = hash_token(token.as_bytes());
+            let expected_hash = hash_token(expected.as_bytes());
+            token_hash.ct_eq(&expected_hash).unwrap_u8() == 1
+        }
+        None => false,
     }
 }
 
@@ -84,12 +81,12 @@ async fn ws_handler_with_sem(
     ws: WebSocketUpgrade,
     headers: HeaderMap,
     query: HashMap<String, String>,
-    expected: Option<String>,
+    expected: String,
     semaphore: Arc<tokio::sync::Semaphore>,
 ) -> Response {
     let params = extract_connect_params(&headers, &query);
 
-    if !check_auth(params.auth_token.as_deref(), expected.as_deref()) {
+    if !check_auth(params.auth_token.as_deref(), &expected) {
         return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
 
@@ -116,22 +113,22 @@ async fn ws_handler_with_sem(
 async fn ws_auth_preflight_with_token(
     headers: HeaderMap,
     query: HashMap<String, String>,
-    expected: Option<String>,
+    expected: String,
 ) -> Response {
     let params = extract_connect_params(&headers, &query);
 
-    if !check_auth(params.auth_token.as_deref(), expected.as_deref()) {
+    if !check_auth(params.auth_token.as_deref(), &expected) {
         return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
     StatusCode::OK.into_response()
 }
 
 pub async fn run_server(port: u16) -> Result<()> {
-    if std::env::var("AURA_PROXY_AUTH_TOKEN").is_err() {
-        tracing::warn!("AURA_PROXY_AUTH_TOKEN not set — proxy accepts unauthenticated connections");
-    }
-
-    let auth_token: Option<String> = std::env::var("AURA_PROXY_AUTH_TOKEN").ok();
+    let auth_token: String = std::env::var("AURA_PROXY_AUTH_TOKEN").unwrap_or_else(|_| {
+        panic!(
+            "FATAL: AURA_PROXY_AUTH_TOKEN must be set. Refusing to start without authentication."
+        )
+    });
     let ws_semaphore = Arc::new(tokio::sync::Semaphore::new(10));
 
     let app = Router::new()

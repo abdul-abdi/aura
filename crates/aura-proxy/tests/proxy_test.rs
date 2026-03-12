@@ -22,42 +22,29 @@ async fn start_server(port: u16) -> tokio::task::JoinHandle<()> {
 // ── Unit tests for check_auth ────────────────────────────────────────
 
 #[test]
-fn test_check_auth_no_expected() {
-    // No auth required — any token (or none) should pass.
-    assert!(aura_proxy::check_auth(None, None));
-    assert!(aura_proxy::check_auth(Some("anything"), None));
-}
-
-#[test]
 fn test_check_auth_valid_token() {
-    assert!(aura_proxy::check_auth(Some("secret123"), Some("secret123")));
+    assert!(aura_proxy::check_auth(Some("secret123"), "secret123"));
 }
 
 #[test]
 fn test_check_auth_wrong_token() {
-    assert!(!aura_proxy::check_auth(Some("wrong"), Some("secret123")));
+    assert!(!aura_proxy::check_auth(Some("wrong"), "secret123"));
 }
 
 #[test]
 fn test_check_auth_missing_token() {
-    assert!(!aura_proxy::check_auth(None, Some("secret123")));
+    assert!(!aura_proxy::check_auth(None, "secret123"));
 }
 
 #[test]
 fn test_check_auth_length_mismatch() {
-    assert!(!aura_proxy::check_auth(Some("short"), Some("longer_token")));
+    assert!(!aura_proxy::check_auth(Some("short"), "longer_token"));
 }
 
 #[test]
 fn test_check_auth_different_lengths_still_compared() {
-    assert!(!aura_proxy::check_auth(
-        Some("short"),
-        Some("muchlongertoken")
-    ));
-    assert!(!aura_proxy::check_auth(
-        Some("muchlongertoken"),
-        Some("short")
-    ));
+    assert!(!aura_proxy::check_auth(Some("short"), "muchlongertoken"));
+    assert!(!aura_proxy::check_auth(Some("muchlongertoken"), "short"));
 }
 
 // ── Header extraction unit tests ─────────────────────────────────────
@@ -117,7 +104,7 @@ fn test_extract_connect_params_headers_take_precedence() {
 async fn test_health_endpoint() {
     let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: Serialized by ENV_MUTEX.
-    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "test_secret") };
 
     let port = free_port();
     let handle = start_server(port).await;
@@ -129,25 +116,29 @@ async fn test_health_endpoint() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
 
+    // SAFETY: Serialized by ENV_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
     handle.abort();
 }
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn test_auth_not_required() {
+async fn test_auth_required_without_token_rejected() {
     let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: Serialized by ENV_MUTEX.
-    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "test_secret") };
 
     let port = free_port();
     let handle = start_server(port).await;
 
-    // Without auth token env var, /ws/auth should return 200 (no auth needed).
+    // Without providing auth token, /ws/auth should return 401 (auth always required).
     let resp = reqwest::get(format!("http://127.0.0.1:{port}/ws/auth?api_key=test_key"))
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 401);
 
+    // SAFETY: Serialized by ENV_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
     handle.abort();
 }
 
