@@ -10,5 +10,18 @@ docs/HANDOFF.md
 HANDOFF.md
 .worktrees/
 
+# Secrets & credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+credentials.json
+serviceAccountKey.json
+
+# Logs
+*.log
+firebase-debug.log
+
 # Remotion promo video project (only the rendered output is committed)
 promo/
