@@ -1469,6 +1469,10 @@ async fn run_processor(
                             p.stop();
                         }
                         bus.send(AuraEvent::BargeIn);
+                        // Notify UI that we're back to listening
+                        let _ = ipc_tx.send(DaemonEvent::Status {
+                            message: "Listening...".into(),
+                        });
                     }
                     Ok(GeminiEvent::Transcription { text }) => {
                         // Native audio models generate text and audio independently.
