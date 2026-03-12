@@ -1,0 +1,157 @@
+name: Deploy Cloud Services
+
+on:
+  push:
+    branches: [main, prod]
+    paths:
+      - 'infrastructure/**'
+      - 'crates/aura-proxy/**'
+      - '.github/workflows/deploy-cloud.yml'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy'
+        required: true
+        type: choice
+        options:
+          - all
+          - proxy
+          - consolidation
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel in-progress deployments
+
+permissions:
+  contents: read
+  id-token: write  # For Workload Identity Federation
+
+jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      proxy: ${{ steps.changes.outputs.proxy }}
+      consolidation: ${{ steps.changes.outputs.consolidation }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: changes
+        run: |
+          if git diff --name-only HEAD~1 | grep -q 'crates/aura-proxy/'; then
+            echo "proxy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "proxy=false" >> "$GITHUB_OUTPUT"
+          fi
+          if git diff --name-only HEAD~1 | grep -q 'infrastructure/'; then
+            echo "consolidation=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "consolidation=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy-proxy:
+    name: Deploy Proxy
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      needs.detect-changes.outputs.proxy == 'true' ||
+      github.event.inputs.service == 'all' ||
+      github.event.inputs.service == 'proxy'
+    environment:
+      name: ${{ github.ref == 'refs/heads/prod' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE="gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy"
+
+          gcloud builds submit . \
+            --config=<(cat <<'YAML'
+          steps:
+            - name: 'gcr.io/cloud-builders/docker'
+              args: ['build', '-t', '${{ secrets.GCP_PROJECT_ID }}/aura-proxy', '-f', 'crates/aura-proxy/Dockerfile', '.']
+          images: ['gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy']
+          YAML
+          ) \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --quiet
+
+          gcloud run deploy aura-proxy \
+            --image "${IMAGE}" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 256Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --timeout 3600 \
+            --set-secrets="AURA_PROXY_AUTH_TOKEN=aura-proxy-auth-token:latest" \
+            --quiet
+
+      - name: Health check
+        run: |
+          URL=$(gcloud run services describe aura-proxy \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --format "value(status.url)")
+          curl -sf "${URL}/health" || (echo "Health check failed!" && exit 1)
+
+  deploy-consolidation:
+    name: Deploy Consolidation
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      needs.detect-changes.outputs.consolidation == 'true' ||
+      github.event.inputs.service == 'all' ||
+      github.event.inputs.service == 'consolidation'
+    environment:
+      name: ${{ github.ref == 'refs/heads/prod' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy aura-consolidation \
+            --source infrastructure/ \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --allow-unauthenticated \
+            --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
+            --set-env-vars="GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
+            --memory 256Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 3 \
+            --quiet
+
+      - name: Health check
+        run: |
+          URL=$(gcloud run services describe aura-consolidation \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --region "${{ vars.GCP_REGION }}" \
+            --format "value(status.url)")
+          curl -sf "${URL}/health" || (echo "Health check failed!" && exit 1)
