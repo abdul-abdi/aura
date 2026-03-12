@@ -7,6 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::config::GeminiConfig;
 use crate::protocol::*;
@@ -445,9 +446,26 @@ async fn connect_and_stream_inner(
 ) -> Result<bool> {
     let url = state.config.ws_url();
     tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
+
+    // Build an HTTP request so we can attach custom headers (proxy mode sends
+    // credentials as headers instead of query parameters).
+    let mut request = url
+        .parse::<tokio_tungstenite::tungstenite::http::Uri>()
+        .context("Invalid WebSocket URL")?
+        .into_client_request()
+        .context("Failed to build WebSocket request")?;
+    for (name, value) in state.config.ws_headers() {
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
+                .context("Invalid header name")?,
+            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
+                .context("Invalid header value")?,
+        );
+    }
+
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async(&url),
+        tokio_tungstenite::connect_async(request),
     )
     .await
     .context("WebSocket connection timed out (10s)")?

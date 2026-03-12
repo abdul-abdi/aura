@@ -190,31 +190,42 @@ impl GeminiConfig {
         }
     }
 
+    /// Build the WebSocket URL.
+    ///
+    /// - **Direct mode**: `wss://...googleapis.com/...?key=<API_KEY>` (Google requirement).
+    /// - **Proxy mode**: bare proxy URL — credentials are sent via HTTP headers
+    ///   (see [`ws_headers`]).
     pub fn ws_url(&self) -> String {
         if let Some(ref proxy) = self.proxy_url {
-            let sep = if proxy.contains('?') { '&' } else { '?' };
-            let mut url = format!("{proxy}{sep}api_key={}", self.api_key);
-            if let Some(ref token) = self.proxy_auth_token {
-                url.push_str("&auth_token=");
-                url.push_str(token);
-            }
-            url
+            proxy.clone()
         } else {
             format!("{WS_BASE}?key={}", self.api_key)
         }
     }
 
     pub fn ws_url_redacted(&self) -> String {
-        if let Some(ref proxy) = self.proxy_url {
-            let sep = if proxy.contains('?') { '&' } else { '?' };
-            let mut url = format!("{proxy}{sep}api_key=REDACTED");
-            if self.proxy_auth_token.is_some() {
-                url.push_str("&auth_token=REDACTED");
-            }
-            url
+        if self.proxy_url.is_some() {
+            // Proxy mode: URL contains no secrets
+            self.ws_url()
         } else {
             format!("{WS_BASE}?key=REDACTED")
         }
+    }
+
+    /// Return custom HTTP headers for the WebSocket upgrade request.
+    ///
+    /// In proxy mode, the API key and auth token are sent as headers instead of
+    /// query parameters so they are not logged by intermediaries.
+    /// In direct mode, returns an empty vec (credentials are in the URL per Google's API).
+    pub fn ws_headers(&self) -> Vec<(String, String)> {
+        if self.proxy_url.is_none() {
+            return Vec::new();
+        }
+        let mut headers = vec![("x-gemini-key".to_string(), self.api_key.clone())];
+        if let Some(ref token) = self.proxy_auth_token {
+            headers.push(("x-auth-token".to_string(), token.clone()));
+        }
+        headers
     }
 }
 
@@ -301,12 +312,41 @@ mod tests {
     }
 
     #[test]
-    fn test_proxy_url_overrides_direct_connection() {
+    fn test_proxy_url_no_query_params() {
         let mut config = GeminiConfig::from_env_inner("test-key-123");
         config.proxy_url = Some("wss://aura-proxy-xyz.run.app/ws".into());
         let url = config.ws_url();
-        assert!(url.starts_with("wss://aura-proxy-xyz.run.app/ws"));
-        assert!(url.contains("api_key=test-key-123"));
+        // Proxy URL should NOT contain API key in query params
+        assert_eq!(url, "wss://aura-proxy-xyz.run.app/ws");
+        assert!(!url.contains("api_key="));
+        assert!(!url.contains("auth_token="));
+    }
+
+    #[test]
+    fn test_ws_headers_proxy_mode() {
+        let mut config = GeminiConfig::from_env_inner("test-key-123");
+        config.proxy_url = Some("wss://proxy.example.com/ws".into());
+        config.proxy_auth_token = Some("secret-token".into());
+        let headers = config.ws_headers();
+        assert_eq!(headers.len(), 2);
+        assert!(headers.contains(&("x-gemini-key".to_string(), "test-key-123".to_string())));
+        assert!(headers.contains(&("x-auth-token".to_string(), "secret-token".to_string())));
+    }
+
+    #[test]
+    fn test_ws_headers_proxy_mode_no_auth_token() {
+        let mut config = GeminiConfig::from_env_inner("test-key-123");
+        config.proxy_url = Some("wss://proxy.example.com/ws".into());
+        let headers = config.ws_headers();
+        assert_eq!(headers.len(), 1);
+        assert!(headers.contains(&("x-gemini-key".to_string(), "test-key-123".to_string())));
+    }
+
+    #[test]
+    fn test_ws_headers_direct_mode_empty() {
+        let config = GeminiConfig::from_env_inner("test-key-123");
+        let headers = config.ws_headers();
+        assert!(headers.is_empty());
     }
 
     #[test]
@@ -343,13 +383,13 @@ mod tests {
     }
 
     #[test]
-    fn ws_url_redacted_hides_key_with_proxy() {
+    fn ws_url_redacted_proxy_is_clean_url() {
         let mut config = GeminiConfig::from_env_inner("secret-key-123");
         config.proxy_url = Some("wss://proxy.example.com/ws".into());
         let redacted = config.ws_url_redacted();
+        // Proxy mode: redacted URL is just the proxy URL (no secrets in URL)
+        assert_eq!(redacted, "wss://proxy.example.com/ws");
         assert!(!redacted.contains("secret-key-123"));
-        assert!(redacted.contains("REDACTED"));
-        assert!(redacted.contains("proxy.example.com"));
     }
 
     #[test]
