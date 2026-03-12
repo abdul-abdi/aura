@@ -10,7 +10,7 @@ use super::tool_helpers::{
 
 // Re-export helpers used by processor.rs via `tools::` path
 pub(crate) use super::tool_helpers::{
-    capture_post_state, is_state_changing_tool, truncate_tool_response, FrameDims,
+    FrameDims, capture_post_state, is_state_changing_tool, truncate_tool_response,
 };
 
 /// Maximum characters allowed in a single type_text tool call.

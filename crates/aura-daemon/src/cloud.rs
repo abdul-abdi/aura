@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use aura_memory::consolidate::ExtractedFact;
 use aura_memory::SessionMemory;
+use aura_memory::consolidate::ExtractedFact;
 
 /// Run a memory operation on a blocking thread to avoid holding the Mutex
 /// across await points or blocking the tokio runtime.

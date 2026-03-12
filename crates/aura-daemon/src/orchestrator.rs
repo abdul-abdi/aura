@@ -602,10 +602,9 @@ pub(crate) async fn run_reconnect_loop(
                 );
                 if poison_counter >= 2 {
                     tracing::warn!("Poison counter reached — clearing stale resumption handle");
-                    let _ = cloud::memory_op(&memory, |mem| {
-                        mem.set_setting("resumption_handle", "")
-                    })
-                    .await;
+                    let _ =
+                        cloud::memory_op(&memory, |mem| mem.set_setting("resumption_handle", ""))
+                            .await;
                     poison_counter = 0;
                     reconnect_counter = 0;
                 }
