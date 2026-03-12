@@ -166,7 +166,7 @@ async fn consolidate_via_cloud_run(
     });
 
     let resp = client
-        .post(&format!("{url}/consolidate"))
+        .post(format!("{url}/consolidate"))
         .bearer_auth(auth_token)
         .json(&body)
         .send()
@@ -185,7 +185,10 @@ async fn consolidate_via_cloud_run(
 }
 
 /// Call Gemini REST API directly to consolidate session messages.
-async fn consolidate_locally(api_key: &str, filtered: &[&Message]) -> Result<ConsolidationResponse> {
+async fn consolidate_locally(
+    api_key: &str,
+    filtered: &[&Message],
+) -> Result<ConsolidationResponse> {
     let prompt = build_consolidation_prompt(filtered);
     let url = format!("{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent");
 
