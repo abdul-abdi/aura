@@ -92,13 +92,21 @@ impl FirestoreClient {
         let url = format!("{}/facts", self.base_url());
         debug!("read_facts → GET {url}");
 
-        let resp: Value = self
+        let resp = self
             .client
             .get(&url)
             .bearer_auth(auth_token)
             .send()
             .await
-            .context("read_facts: request failed")?
+            .context("read_facts: request failed")?;
+
+        // Empty collection or non-existent path returns 404 — treat as empty
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            debug!("read_facts: 404 (collection not yet created), returning empty");
+            return Ok(Vec::new());
+        }
+
+        let resp: Value = resp
             .error_for_status()
             .context("read_facts: non-2xx response")?
             .json()
@@ -113,7 +121,13 @@ impl FirestoreClient {
 
         let facts = docs
             .iter()
-            .filter_map(|doc| firestore_doc_to_fact(doc).ok())
+            .filter_map(|doc| match firestore_doc_to_fact(doc) {
+                Ok(fact) => Some(fact),
+                Err(e) => {
+                    tracing::warn!("Failed to parse Firestore fact document: {e}");
+                    None
+                }
+            })
             .collect();
 
         Ok(facts)
@@ -154,8 +168,16 @@ pub fn firestore_doc_to_fact(doc: &Value) -> Result<FirestoreFact> {
     let session_id = string_field(fields, "session_id")?;
     let importance = fields
         .get("importance")
-        .and_then(|v| v.get("doubleValue"))
-        .and_then(|v| v.as_f64())
+        .and_then(|v| {
+            v.get("doubleValue")
+                .and_then(|d| d.as_f64())
+                .or_else(|| {
+                    // Firestore REST encodes integerValue as a string, e.g. {"integerValue": "1"}
+                    v.get("integerValue")
+                        .and_then(|i| i.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                })
+        })
         .unwrap_or(0.0);
 
     let entities = fields
@@ -192,15 +214,16 @@ fn string_field(fields: &Value, key: &str) -> Result<String> {
         .with_context(|| format!("document missing string field '{key}'"))
 }
 
-/// Deterministic document ID derived from session + content.
+/// Deterministic document ID derived from category + content using FNV-1a.
+/// FNV-1a is stable across binaries and Rust versions (unlike DefaultHasher).
 fn fact_doc_id(fact: &FirestoreFact) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut h = DefaultHasher::new();
-    fact.session_id.hash(&mut h);
-    fact.content.hash(&mut h);
-    format!("{}-{:x}", fact.session_id, h.finish())
+    let raw = format!("{}:{}", fact.category, fact.content);
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in raw.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +303,22 @@ mod tests {
         });
         let parsed = firestore_doc_to_fact(&doc).unwrap();
         assert_eq!(parsed.importance, 0.0);
+    }
+
+    #[test]
+    fn importance_parses_integer_value() {
+        // Firestore REST encodes integerValue as a string
+        let doc = serde_json::json!({
+            "fields": {
+                "category":   {"stringValue": "note"},
+                "content":    {"stringValue": "hello"},
+                "session_id": {"stringValue": "s4"},
+                "entities":   {"arrayValue": {"values": []}},
+                "importance": {"integerValue": "1"}
+            }
+        });
+        let parsed = firestore_doc_to_fact(&doc).unwrap();
+        assert_eq!(parsed.importance, 1.0);
     }
 
     #[test]

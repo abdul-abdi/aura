@@ -3,8 +3,6 @@
 //! POST /consolidate — extract facts from a session transcript and write to Firestore.
 //! GET  /health      — liveness probe.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -348,7 +346,7 @@ async fn write_to_firestore(
 
     // Write each fact.
     for fact in &result.facts {
-        let doc_id = fact_doc_id(session_id, &fact.content);
+        let doc_id = fact_doc_id(&fact.category, &fact.content);
         let url = format!("{base}/facts/{doc_id}");
         let body = fact_to_firestore_doc(fact, session_id);
 
@@ -391,11 +389,16 @@ async fn write_to_firestore(
     Ok(())
 }
 
-fn fact_doc_id(session_id: &str, content: &str) -> String {
-    let mut h = DefaultHasher::new();
-    session_id.hash(&mut h);
-    content.hash(&mut h);
-    format!("{session_id}-{:x}", h.finish())
+/// Deterministic document ID derived from category + content using FNV-1a.
+/// Matches the algorithm in aura-firestore/src/client.rs for cross-binary consistency.
+fn fact_doc_id(category: &str, content: &str) -> String {
+    let raw = format!("{category}:{content}");
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in raw.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
 }
 
 fn fact_to_firestore_doc(fact: &ExtractedFact, session_id: &str) -> Value {

@@ -108,6 +108,14 @@ pub async fn consolidate_session(
         });
     }
 
+    if cloud_run_url.is_some()
+        && (cloud_run_auth_token.is_none() || device_id.is_none() || session_id.is_none())
+    {
+        tracing::warn!(
+            "Cloud Run URL is configured but missing auth_token, device_id, or session_id — falling back to local consolidation"
+        );
+    }
+
     if let (Some(url), Some(token), Some(did), Some(sid)) =
         (cloud_run_url, cloud_run_auth_token, device_id, session_id)
     {

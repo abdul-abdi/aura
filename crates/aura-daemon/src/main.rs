@@ -418,19 +418,23 @@ async fn run_daemon(
         if let (Some(project_id), Some(device_id)) =
             (&gemini_config.firestore_project_id, &gemini_config.device_id)
         {
-            match load_firestore_facts(project_id, device_id, &gemini_config.api_key).await {
-                Ok(facts_context) if !facts_context.is_empty() => {
-                    gemini_config
-                        .system_prompt
-                        .push_str("\n\nMemory from past sessions:\n");
-                    gemini_config.system_prompt.push_str(&facts_context);
-                    tracing::info!(
-                        chars = facts_context.len(),
-                        "Injected Firestore facts into system prompt"
-                    );
+            if let Some(firebase_api_key) = &gemini_config.firebase_api_key {
+                match load_firestore_facts(project_id, device_id, firebase_api_key).await {
+                    Ok(facts_context) if !facts_context.is_empty() => {
+                        gemini_config
+                            .system_prompt
+                            .push_str("\n\nMemory from past sessions:\n");
+                        gemini_config.system_prompt.push_str(&facts_context);
+                        tracing::info!(
+                            chars = facts_context.len(),
+                            "Injected Firestore facts into system prompt"
+                        );
+                    }
+                    Ok(_) => tracing::debug!("No Firestore facts found for this device"),
+                    Err(e) => tracing::warn!("Failed to load Firestore facts: {e}"),
                 }
-                Ok(_) => tracing::debug!("No Firestore facts found for this device"),
-                Err(e) => tracing::warn!("Failed to load Firestore facts: {e}"),
+            } else {
+                tracing::debug!("Skipping Firestore facts load: firebase_api_key not configured");
             }
         }
     }
@@ -2544,9 +2548,9 @@ where
 async fn load_firestore_facts(
     project_id: &str,
     device_id: &str,
-    api_key: &str,
+    firebase_api_key: &str,
 ) -> anyhow::Result<String> {
-    let token = aura_firestore::auth::get_anonymous_token(api_key).await?;
+    let token = aura_firestore::auth::get_anonymous_token(firebase_api_key).await?;
     let client = aura_firestore::client::FirestoreClient::new(
         project_id.to_string(),
         device_id.to_string(),
