@@ -43,6 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
 use aura_daemon::bus::EventBus;
+use aura_daemon::context::{CloudConfig, DaemonContext, SharedFlags};
 use aura_daemon::event::AuraEvent;
 use aura_daemon::ipc;
 use aura_daemon::protocol::{DaemonEvent, DotColorName, Role, ToolRunStatus, UICommand};
@@ -712,35 +713,32 @@ async fn run_daemon(
     });
 
     // Spawn event processor (Gemini events -> tool handling + audio playback)
-    let proc_session = Arc::clone(&session);
-    let proc_bus = bus.clone();
-    let proc_cancel = cancel.clone();
-    let proc_speaking = Arc::clone(&is_speaking);
-    let proc_permission_error = Arc::clone(&has_permission_error);
-    let proc_ipc_tx = ipc_tx.clone();
     let is_interrupted = Arc::new(AtomicBool::new(false));
-    let processor_handle = tokio::spawn(async move {
-        if let Err(e) = run_processor(
-            proc_session,
-            proc_bus,
-            proc_cancel,
-            memory,
-            session_id,
-            menubar_tx,
-            proc_speaking,
-            is_interrupted,
-            proc_permission_error,
-            proc_ipc_tx,
-            player,
+    let ctx = DaemonContext {
+        session: Arc::clone(&session),
+        bus: bus.clone(),
+        cancel: cancel.clone(),
+        memory,
+        session_id,
+        menubar_tx,
+        ipc_tx: ipc_tx.clone(),
+        player,
+        cloud: CloudConfig {
             gemini_api_key,
-            gemini_cloud_run_url,
-            gemini_cloud_run_auth_token,
-            gemini_device_id,
-            gemini_firestore_project_id,
-            gemini_firebase_api_key,
-        )
-        .await
-        {
+            cloud_run_url: gemini_cloud_run_url,
+            cloud_run_auth_token: gemini_cloud_run_auth_token,
+            cloud_run_device_id: gemini_device_id,
+            firestore_project_id: gemini_firestore_project_id,
+            firebase_api_key: gemini_firebase_api_key,
+        },
+        flags: SharedFlags {
+            is_speaking: Arc::clone(&is_speaking),
+            is_interrupted: Arc::clone(&is_interrupted),
+            has_permission_error: Arc::clone(&has_permission_error),
+        },
+    };
+    let processor_handle = tokio::spawn(async move {
+        if let Err(e) = run_processor(ctx).await {
             tracing::error!("Processor error: {e}");
         }
     });
@@ -796,26 +794,32 @@ async fn run_daemon(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_processor(
-    session: Arc<GeminiLiveSession>,
-    bus: EventBus,
-    cancel: CancellationToken,
-    memory: Arc<Mutex<SessionMemory>>,
-    session_id: String,
-    menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
-    is_speaking: Arc<AtomicBool>,
-    is_interrupted: Arc<AtomicBool>,
-    has_permission_error: Arc<AtomicBool>,
-    ipc_tx: broadcast::Sender<DaemonEvent>,
-    player: Option<AudioPlayer>,
-    gemini_api_key: String,
-    cloud_run_url: Option<String>,
-    cloud_run_auth_token: Option<String>,
-    cloud_run_device_id: Option<String>,
-    firestore_project_id: Option<String>,
-    firebase_api_key: Option<String>,
-) -> Result<()> {
+async fn run_processor(ctx: DaemonContext) -> Result<()> {
+    let DaemonContext {
+        session,
+        bus,
+        cancel,
+        memory,
+        session_id,
+        menubar_tx,
+        ipc_tx,
+        player,
+        cloud,
+        flags,
+    } = ctx;
+    let SharedFlags {
+        is_speaking,
+        is_interrupted,
+        has_permission_error,
+    } = flags;
+    let CloudConfig {
+        gemini_api_key,
+        cloud_run_url,
+        cloud_run_auth_token,
+        cloud_run_device_id,
+        firestore_project_id,
+        firebase_api_key,
+    } = cloud;
     let mut events = session.subscribe();
 
     // Script executor for tool calls
@@ -2688,8 +2692,10 @@ async fn load_firestore_facts(
     firebase_api_key: &str,
 ) -> anyhow::Result<String> {
     let token = aura_firestore::auth::get_anonymous_token(firebase_api_key).await?;
-    let client =
-        aura_firestore::client::FirestoreClient::new(project_id.to_string(), device_id.to_string())?;
+    let client = aura_firestore::client::FirestoreClient::new(
+        project_id.to_string(),
+        device_id.to_string(),
+    )?;
     let facts = client.read_facts(&token).await?;
 
     if facts.is_empty() {

@@ -66,4 +66,3 @@ async fn test_daemon_processes_tool_executed_event() {
     bus.send(AuraEvent::Shutdown);
     let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
 }
-
