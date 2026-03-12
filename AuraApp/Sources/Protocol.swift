@@ -60,9 +60,20 @@ struct TranscriptUpdate: Decodable {
     let done: Bool
     let source: TranscriptSource
 
-    enum TranscriptSource: String, Decodable {
+    enum TranscriptSource: Decodable, Equatable {
         case voice
         case text
+        case unknown(String)
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let rawValue = try container.decode(String.self)
+            switch rawValue {
+            case "voice": self = .voice
+            case "text": self = .text
+            default: self = .unknown(rawValue)
+            }
+        }
     }
 }
 
