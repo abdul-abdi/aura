@@ -13,6 +13,7 @@ use axum::{
     response::Json,
     routing::{get, post},
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -364,10 +365,12 @@ async fn write_to_firestore(
 
     // Write session summary.
     let session_url = format!("{base}/sessions/{session_id}");
+    let now = Utc::now().to_rfc3339();
     let session_body = json!({
         "fields": {
             "summary":    {"stringValue": result.summary},
-            "session_id": {"stringValue": session_id}
+            "session_id": {"stringValue": session_id},
+            "created_at": {"timestampValue": now}
         }
     });
 
@@ -402,6 +405,7 @@ fn fact_doc_id(category: &str, content: &str) -> String {
 }
 
 fn fact_to_firestore_doc(fact: &ExtractedFact, session_id: &str) -> Value {
+    let now = Utc::now().to_rfc3339();
     let entities_array: Vec<Value> = fact
         .entities
         .iter()
@@ -414,7 +418,8 @@ fn fact_to_firestore_doc(fact: &ExtractedFact, session_id: &str) -> Value {
             "content":    {"stringValue": fact.content},
             "entities":   {"arrayValue": {"values": entities_array}},
             "importance": {"doubleValue": fact.importance},
-            "session_id": {"stringValue": session_id}
+            "session_id": {"stringValue": session_id},
+            "created_at": {"timestampValue": now}
         }
     })
 }

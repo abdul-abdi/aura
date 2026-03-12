@@ -138,6 +138,7 @@ version = "1.1.1"
 dependencies = [
  "anyhow",
  "aura-bridge",
+ "aura-firestore",
  "aura-gemini",
  "aura-input",
  "aura-memory",
@@ -167,6 +168,7 @@ name = "aura-firestore"
 version = "1.1.1"
 dependencies = [
  "anyhow",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",

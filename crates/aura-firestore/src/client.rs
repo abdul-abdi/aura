@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::debug;
+use chrono::Utc;
 
 /// A fact stored in Firestore under `users/{device_id}/facts`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -67,10 +68,12 @@ impl FirestoreClient {
         auth_token: &str,
     ) -> Result<()> {
         let url = format!("{}/sessions/{}", self.base_url(), session_id);
+        let now = Utc::now().to_rfc3339();
         let body = json!({
             "fields": {
                 "summary": {"stringValue": summary},
-                "session_id": {"stringValue": session_id}
+                "session_id": {"stringValue": session_id},
+                "created_at": {"timestampValue": now}
             }
         });
 
@@ -140,6 +143,7 @@ impl FirestoreClient {
 
 /// Convert a `FirestoreFact` into a Firestore REST document body.
 pub fn fact_to_firestore_doc(fact: &FirestoreFact) -> Value {
+    let now = Utc::now().to_rfc3339();
     let entities_array: Vec<Value> = fact
         .entities
         .iter()
@@ -152,7 +156,8 @@ pub fn fact_to_firestore_doc(fact: &FirestoreFact) -> Value {
             "content":    {"stringValue": fact.content},
             "entities":   {"arrayValue": {"values": entities_array}},
             "importance": {"doubleValue": fact.importance},
-            "session_id": {"stringValue": fact.session_id}
+            "session_id": {"stringValue": fact.session_id},
+            "created_at": {"timestampValue": now}
         }
     })
 }
