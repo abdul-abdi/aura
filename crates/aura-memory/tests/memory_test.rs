@@ -256,6 +256,48 @@ fn test_prune_cleans_up_messages_of_deleted_sessions() {
     );
 }
 
+// ---------- T13: FTS5 ranked search ----------
+
+#[test]
+fn fts_search_ranks_by_relevance() {
+    let (mem, _dir) = memory_in_tmpdir();
+    let sid = mem.start_session().unwrap();
+
+    mem.add_fact(
+        &sid,
+        "weather",
+        "The weather in Paris is sunny",
+        Some("Paris"),
+        0.8,
+    )
+    .unwrap();
+    mem.add_fact(
+        &sid,
+        "entertainment",
+        "Paris Hilton was on TV",
+        Some("Paris Hilton"),
+        0.3,
+    )
+    .unwrap();
+    mem.add_fact(
+        &sid,
+        "weather",
+        "The weather forecast for tomorrow",
+        None,
+        0.5,
+    )
+    .unwrap();
+
+    let results = mem.search_memory("weather Paris").unwrap();
+    assert!(!results.is_empty());
+    // First result should be the weather+Paris fact (matches both terms)
+    assert!(
+        results[0].content.contains("weather in Paris"),
+        "expected 'weather in Paris' to be first result, got: {:?}",
+        results[0].content
+    );
+}
+
 // ---------- T8: vacuum ----------
 
 #[test]
