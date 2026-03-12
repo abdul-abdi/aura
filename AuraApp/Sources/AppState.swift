@@ -169,8 +169,7 @@ final class AppState {
             isThinking = false
             // Merge consecutive assistant speech (streaming)
             if let lastIndex = events.indices.last,
-               case .assistantSpeech = events[lastIndex].kind,
-               !update.done {
+               case .assistantSpeech = events[lastIndex].kind {
                 events[lastIndex].text += update.text
             } else if !update.text.isEmpty {
                 let event = ActivityEvent(kind: .assistantSpeech, text: update.text)
@@ -218,12 +217,23 @@ final class AppState {
 
         case .completed, .failed:
             isThinking = false
-            // Build display text: tool name on first line, summary/output on second
             let resultLine = update.summary ?? update.output ?? ""
             let displayText = resultLine.isEmpty ? name : "\(name)\n\(resultLine)"
-            let event = ActivityEvent(kind: .toolCall(update.status), text: displayText)
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                events.append(event)
+
+            // Find the most recent .running tool event and update it in-place
+            if let idx = events.lastIndex(where: {
+                if case .toolCall(.running) = $0.kind { return true }
+                return false
+            }) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    events[idx] = ActivityEvent(kind: .toolCall(update.status), text: displayText)
+                }
+            } else {
+                // Fallback: no .running event found — append
+                let event = ActivityEvent(kind: .toolCall(update.status), text: displayText)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    events.append(event)
+                }
             }
         }
 
