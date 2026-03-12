@@ -275,7 +275,9 @@ fn main() -> Result<()> {
                                 SessionMode::Resume { handle: h }
                             }
                             _ => {
-                                tracing::info!("Starting fresh session (no handle or counter exceeded)");
+                                tracing::info!(
+                                    "Starting fresh session (no handle or counter exceeded)"
+                                );
                                 SessionMode::Fresh
                             }
                         }
@@ -415,9 +417,10 @@ async fn run_daemon(
     // On fresh session start, load facts from Firestore and inject into system prompt.
     // This is optional — daemon works fine without Firestore configured.
     if matches!(session_mode, SessionMode::Fresh) {
-        if let (Some(project_id), Some(device_id)) =
-            (&gemini_config.firestore_project_id, &gemini_config.device_id)
-        {
+        if let (Some(project_id), Some(device_id)) = (
+            &gemini_config.firestore_project_id,
+            &gemini_config.device_id,
+        ) {
             if let Some(firebase_api_key) = &gemini_config.firebase_api_key {
                 match load_firestore_facts(project_id, device_id, firebase_api_key).await {
                     Ok(facts_context) if !facts_context.is_empty() => {
@@ -1634,33 +1637,39 @@ async fn run_processor(
                                             if let (Some(project_id), Some(device_id), Some(fb_key)) =
                                                 (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
                                             {
-                                                let fs_client = aura_firestore::client::FirestoreClient::new(
+                                                match aura_firestore::client::FirestoreClient::new(
                                                     project_id.clone(),
                                                     device_id.clone(),
-                                                );
-                                                match aura_firestore::auth::get_anonymous_token(fb_key).await {
-                                                    Ok(token) => {
-                                                        if !response.summary.is_empty() {
-                                                            if let Err(e) = fs_client.write_session(&fs_sid, &response.summary, &token).await {
-                                                                tracing::warn!("Firestore session write failed: {e}");
+                                                ) {
+                                                    Ok(fs_client) => {
+                                                        match aura_firestore::auth::get_anonymous_token(fb_key).await {
+                                                            Ok(token) => {
+                                                                if !response.summary.is_empty() {
+                                                                    if let Err(e) = fs_client.write_session(&fs_sid, &response.summary, &token).await {
+                                                                        tracing::warn!("Firestore session write failed: {e}");
+                                                                    }
+                                                                }
+                                                                for fact in &response.facts {
+                                                                    let fs_fact = aura_firestore::client::FirestoreFact {
+                                                                        category: fact.category.clone(),
+                                                                        content: fact.content.clone(),
+                                                                        entities: fact.entities.clone(),
+                                                                        importance: fact.importance,
+                                                                        session_id: fs_sid.clone(),
+                                                                    };
+                                                                    if let Err(e) = fs_client.write_fact(&fs_fact, &token).await {
+                                                                        tracing::warn!("Firestore fact write failed: {e}");
+                                                                    }
+                                                                }
+                                                                tracing::info!("Local consolidation synced to Firestore");
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::warn!("Firebase auth for Firestore sync failed: {e}");
                                                             }
                                                         }
-                                                        for fact in &response.facts {
-                                                            let fs_fact = aura_firestore::client::FirestoreFact {
-                                                                category: fact.category.clone(),
-                                                                content: fact.content.clone(),
-                                                                entities: fact.entities.clone(),
-                                                                importance: fact.importance,
-                                                                session_id: fs_sid.clone(),
-                                                            };
-                                                            if let Err(e) = fs_client.write_fact(&fs_fact, &token).await {
-                                                                tracing::warn!("Firestore fact write failed: {e}");
-                                                            }
-                                                        }
-                                                        tracing::info!("Local consolidation synced to Firestore");
                                                     }
                                                     Err(e) => {
-                                                        tracing::warn!("Firebase auth for Firestore sync failed: {e}");
+                                                        tracing::warn!("Invalid device_id for Firestore sync: {e}");
                                                     }
                                                 }
                                             }
@@ -2491,7 +2500,9 @@ fn truncate_tool_response(response: &mut serde_json::Value) {
         }
         obj.insert(
             "truncated".to_string(),
-            serde_json::json!(format!("Response truncated from {serialized_len} chars to save context")),
+            serde_json::json!(format!(
+                "Response truncated from {serialized_len} chars to save context"
+            )),
         );
     }
 }
@@ -2520,12 +2531,24 @@ mod truncation_tests {
         truncate_tool_response(&mut response);
         let obj = response.as_object().unwrap();
         assert!(obj.contains_key("error"), "error field should be preserved");
-        assert!(obj.contains_key("stdout"), "stdout field should be preserved");
-        assert!(obj.contains_key("success"), "success field should be preserved");
+        assert!(
+            obj.contains_key("stdout"),
+            "stdout field should be preserved"
+        );
+        assert!(
+            obj.contains_key("success"),
+            "success field should be preserved"
+        );
         let error_len = obj["error"].as_str().unwrap().len();
         let stdout_len = obj["stdout"].as_str().unwrap().len();
-        assert!(error_len <= 520, "error should be truncated, got {error_len}");
-        assert!(stdout_len <= 520, "stdout should be truncated, got {stdout_len}");
+        assert!(
+            error_len <= 520,
+            "error should be truncated, got {error_len}"
+        );
+        assert!(
+            stdout_len <= 520,
+            "stdout should be truncated, got {stdout_len}"
+        );
     }
 
     #[test]
@@ -2665,10 +2688,8 @@ async fn load_firestore_facts(
     firebase_api_key: &str,
 ) -> anyhow::Result<String> {
     let token = aura_firestore::auth::get_anonymous_token(firebase_api_key).await?;
-    let client = aura_firestore::client::FirestoreClient::new(
-        project_id.to_string(),
-        device_id.to_string(),
-    );
+    let client =
+        aura_firestore::client::FirestoreClient::new(project_id.to_string(), device_id.to_string())?;
     let facts = client.read_facts(&token).await?;
 
     if facts.is_empty() {

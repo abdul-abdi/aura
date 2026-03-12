@@ -18,6 +18,23 @@ pub struct FirestoreFact {
     pub session_id: String,
 }
 
+/// Validate device_id is safe for use in Firestore URL paths.
+/// Allows alphanumeric chars, hyphens, and underscores only.
+pub fn validate_device_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 {
+        anyhow::bail!("device_id must be 1-128 characters, got {}", id.len());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "device_id must contain only alphanumeric characters, hyphens, and underscores"
+        );
+    }
+    Ok(())
+}
+
 /// Thin Firestore REST client scoped to a single device's namespace.
 pub struct FirestoreClient {
     project_id: String,
@@ -27,23 +44,29 @@ pub struct FirestoreClient {
 }
 
 impl FirestoreClient {
-    pub fn new(project_id: String, device_id: String) -> Self {
-        Self {
+    pub fn new(project_id: String, device_id: String) -> Result<Self> {
+        validate_device_id(&device_id)?;
+        Ok(Self {
             project_id,
             device_id,
             client: reqwest::Client::new(),
             auth_cache: None,
-        }
+        })
     }
 
     /// Create a client with a shared [`AuthCache`] for automatic token management.
-    pub fn with_auth(project_id: String, device_id: String, auth_cache: Arc<AuthCache>) -> Self {
-        Self {
+    pub fn with_auth(
+        project_id: String,
+        device_id: String,
+        auth_cache: Arc<AuthCache>,
+    ) -> Result<Self> {
+        validate_device_id(&device_id)?;
+        Ok(Self {
             project_id,
             device_id,
             client: reqwest::Client::new(),
             auth_cache: Some(auth_cache),
-        }
+        })
     }
 
     /// Get a valid auth token, either from the shared cache or requiring an explicit token.

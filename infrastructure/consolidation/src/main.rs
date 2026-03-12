@@ -32,6 +32,26 @@ const METADATA_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const MAX_PROMPT_CHARS: usize = 50_000;
 
+/// Validate device_id is safe for use in Firestore URL paths.
+/// Allows alphanumeric chars, hyphens, and underscores only.
+fn validate_device_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > 128 {
+        return Err(format!(
+            "device_id must be 1-128 characters, got {}",
+            id.len()
+        ));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "device_id must contain only alphanumeric characters, hyphens, and underscores".into(),
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -150,6 +170,12 @@ async fn consolidate(
     if !constant_time_eq(provided, &state.auth_token) {
         warn!("consolidate: unauthorized request");
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()));
+    }
+
+    // Validate device_id to prevent Firestore path traversal.
+    if let Err(e) = validate_device_id(&req.device_id) {
+        warn!("consolidate: invalid device_id: {e}");
+        return Err((StatusCode::BAD_REQUEST, format!("Invalid device_id: {e}")));
     }
 
     info!(
