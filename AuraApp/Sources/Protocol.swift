@@ -119,25 +119,27 @@ enum UICommand: Encodable {
     }
 }
 
-// MARK: - Message Model
+// MARK: - Activity Stream Model
 
-/// A single message displayed in the conversation view.
-struct ChatMessage: Identifiable {
+/// A single event in the activity stream.
+struct ActivityEvent: Identifiable {
     let id: UUID
-    let role: MessageRole
+    let kind: EventKind
     var text: String
     let timestamp: Date
 
-    init(role: MessageRole, text: String) {
+    init(kind: EventKind, text: String) {
         self.id = UUID()
-        self.role = role
+        self.kind = kind
         self.text = text
         self.timestamp = Date()
     }
 }
 
-enum MessageRole {
-    case user
-    case assistant
-    case tool(ToolRunStatus)
+enum EventKind: Equatable {
+    case userSpeech          // 🎤 voice transcript
+    case userText            // 💬 typed message
+    case assistantSpeech     // 🔊 what Aura said
+    case toolCall(ToolRunStatus)  // ⚡ tool execution
+    case turnSeparator       // ─ ─ visual break
 }

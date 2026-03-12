@@ -48,8 +48,13 @@ struct ContentView: View {
 
             Divider()
 
-            ConversationView(messages: appState.messages, connectionState: appState.connectionState, isThinking: appState.isThinking)
-                .frame(maxHeight: .infinity)
+            ConversationView(
+                events: appState.events,
+                connectionState: appState.connectionState,
+                isThinking: appState.isThinking,
+                onReconnect: { appState.requestReconnect() }
+            )
+            .frame(maxHeight: .infinity)
 
             TextInputView { text in
                 appState.sendText(text)

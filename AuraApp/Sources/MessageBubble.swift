@@ -1,87 +1,82 @@
 import SwiftUI
 
-/// A single message bubble in the conversation.
-/// Three visual styles: user (right, accent-tinted), assistant (left, subtle),
-/// and tool (full-width, monospaced with status icon).
-struct MessageBubble: View {
-    let message: ChatMessage
-
-    private static let accentColor = Color(red: 0.30, green: 0.88, blue: 0.52)
+/// A single row in the activity stream.
+/// Renders differently based on event kind: speech (icon + quoted text),
+/// tool calls (status icon + monospace name + result), or turn separator.
+struct ActivityRow: View {
+    let event: ActivityEvent
+    @State private var isExpanded = false
 
     var body: some View {
-        switch message.role {
-        case .user:
-            userBubble
-        case .assistant:
-            assistantBubble
-        case .tool(let status):
-            toolBubble(status: status)
+        switch event.kind {
+        case .userSpeech:
+            iconRow(symbol: "mic.fill", color: .primary, quoted: true)
+
+        case .userText:
+            iconRow(symbol: "text.bubble.fill", color: .primary, quoted: true)
+
+        case .assistantSpeech:
+            iconRow(symbol: "speaker.wave.2.fill", color: .primary, quoted: true)
+
+        case .toolCall(let status):
+            toolRow(status: status)
+
+        case .turnSeparator:
+            separatorRow
         }
     }
 
-    // MARK: - User bubble
-
-    private var userBubble: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Text(message.text)
-                .font(.system(size: 13))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    Self.accentColor.opacity(0.12),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-                .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
-        }
-    }
-
-    // MARK: - Assistant bubble
-
-    private var assistantBubble: some View {
-        HStack {
-            Text(message.text)
-                .font(.system(size: 13))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    Color.secondary.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-                .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-            Spacer(minLength: 0)
-        }
-    }
-
-    // MARK: - Tool bubble
-
-    private func toolBubble(status: ToolRunStatus) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: status.symbolName)
-                .font(.caption)
-                .foregroundStyle(status.color)
-
-            Text(message.text)
-                .font(.system(size: 11, design: .monospaced))
+    private func iconRow(symbol: String, color: Color, quoted: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .lineLimit(5)
+                .frame(width: 16)
+            Text(quoted ? "\"\(event.text)\"" : event.text)
+                .font(.system(size: 13))
+                .foregroundStyle(color)
                 .textSelection(.enabled)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .background(
-            Color.secondary.opacity(0.04),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-        )
-        .transition(.opacity)
+        .padding(.vertical, 2)
     }
 
-    private let maxBubbleWidth: CGFloat = 300
+    private func toolRow(status: ToolRunStatus) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: status.symbolName)
+                    .font(.system(size: 11))
+                    .foregroundStyle(status.color)
+                    .frame(width: 16)
+                Text(event.text.components(separatedBy: "\n").first ?? event.text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(status == .running ? Color.primary : .secondary)
+            }
+
+            // Result (second line onwards) — indented, dimmed
+            let lines = event.text.components(separatedBy: "\n").dropFirst()
+            if status != .running, let result = lines.first, !result.isEmpty {
+                HStack(spacing: 6) {
+                    Color.clear.frame(width: 16)
+                    Text(result)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(isExpanded ? nil : 1)
+                        .textSelection(.enabled)
+                }
+                .onTapGesture { isExpanded.toggle() }
+            }
+        }
+        .padding(.vertical, 1)
+    }
+
+    private var separatorRow: some View {
+        HStack {
+            Rectangle()
+                .fill(Color.secondary.opacity(0.15))
+                .frame(height: 0.5)
+        }
+        .padding(.vertical, 6)
+    }
 }
 
 // MARK: - ToolRunStatus styling
@@ -97,9 +92,9 @@ extension ToolRunStatus {
 
     var color: Color {
         switch self {
-        case .running: return Color(red: 1.0, green: 0.78, blue: 0.28) // Amber
-        case .completed: return Color(red: 0.30, green: 0.88, blue: 0.52) // Green
-        case .failed: return Color(red: 0.92, green: 0.28, blue: 0.28) // Red
+        case .running: return Color(red: 1.0, green: 0.78, blue: 0.28)
+        case .completed: return Color(red: 0.30, green: 0.88, blue: 0.52)
+        case .failed: return Color(red: 0.92, green: 0.28, blue: 0.28)
         }
     }
 }
