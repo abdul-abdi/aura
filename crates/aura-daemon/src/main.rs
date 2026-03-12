@@ -412,6 +412,29 @@ async fn run_daemon(
             .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
     }
 
+    // On fresh session start, load facts from Firestore and inject into system prompt.
+    // This is optional — daemon works fine without Firestore configured.
+    if matches!(session_mode, SessionMode::Fresh) {
+        if let (Some(project_id), Some(device_id)) =
+            (&gemini_config.firestore_project_id, &gemini_config.device_id)
+        {
+            match load_firestore_facts(project_id, device_id, &gemini_config.api_key).await {
+                Ok(facts_context) if !facts_context.is_empty() => {
+                    gemini_config
+                        .system_prompt
+                        .push_str("\n\nMemory from past sessions:\n");
+                    gemini_config.system_prompt.push_str(&facts_context);
+                    tracing::info!(
+                        chars = facts_context.len(),
+                        "Injected Firestore facts into system prompt"
+                    );
+                }
+                Ok(_) => tracing::debug!("No Firestore facts found for this device"),
+                Err(e) => tracing::warn!("Failed to load Firestore facts: {e}"),
+            }
+        }
+    }
+
     // Start IPC server for UI clients (SwiftUI panel)
     let mut ipc_cmd_rx = ipc::start_ipc_server(ipc_tx.clone(), cancel.clone());
 
@@ -446,8 +469,11 @@ async fn run_daemon(
         }
     };
 
-    // Save API key before gemini_config is moved into the session
+    // Save API key and Cloud Run fields before gemini_config is moved into the session
     let gemini_api_key = gemini_config.api_key.clone();
+    let gemini_cloud_run_url = gemini_config.cloud_run_url.clone();
+    let gemini_cloud_run_auth_token = gemini_config.cloud_run_auth_token.clone();
+    let gemini_device_id = gemini_config.device_id.clone();
 
     let session = GeminiLiveSession::connect(gemini_config, resumption_handle)
         .await
@@ -698,6 +724,9 @@ async fn run_daemon(
             proc_ipc_tx,
             player,
             gemini_api_key,
+            gemini_cloud_run_url,
+            gemini_cloud_run_auth_token,
+            gemini_device_id,
         )
         .await
         {
@@ -770,6 +799,9 @@ async fn run_processor(
     ipc_tx: broadcast::Sender<DaemonEvent>,
     player: Option<AudioPlayer>,
     gemini_api_key: String,
+    cloud_run_url: Option<String>,
+    cloud_run_auth_token: Option<String>,
+    cloud_run_device_id: Option<String>,
 ) -> Result<()> {
     let mut events = session.subscribe();
 
@@ -1536,7 +1568,14 @@ async fn run_processor(
                             }).await;
 
                             if let Some(messages) = messages {
-                                match aura_memory::consolidate::consolidate_session(&es_key, &messages).await {
+                                match aura_memory::consolidate::consolidate_session(
+                                    &es_key,
+                                    &messages,
+                                    cloud_run_url.as_deref(),
+                                    cloud_run_auth_token.as_deref(),
+                                    cloud_run_device_id.as_deref(),
+                                    Some(&es_sid),
+                                ).await {
                                     Ok(response) => {
                                         if !response.summary.is_empty() || !response.facts.is_empty() {
                                             let summary = response.summary.clone();
@@ -2498,6 +2537,31 @@ where
             None
         }
     }
+}
+
+/// Load facts from Firestore for a given device and format them as a context string.
+/// Returns an empty string when there are no facts or Firestore is unavailable.
+async fn load_firestore_facts(
+    project_id: &str,
+    device_id: &str,
+    api_key: &str,
+) -> anyhow::Result<String> {
+    let token = aura_firestore::auth::get_anonymous_token(api_key).await?;
+    let client = aura_firestore::client::FirestoreClient::new(
+        project_id.to_string(),
+        device_id.to_string(),
+    );
+    let facts = client.read_facts(&token).await?;
+
+    if facts.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut context = String::new();
+    for fact in &facts {
+        context.push_str(&format!("- [{}] {}\n", fact.category, fact.content));
+    }
+    Ok(context)
 }
 
 /// Compute root-mean-square energy of an audio buffer.

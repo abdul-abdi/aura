@@ -95,6 +95,10 @@ pub struct GeminiConfig {
     pub temperature: f64,
     pub proxy_url: Option<String>,
     pub proxy_auth_token: Option<String>,
+    pub firestore_project_id: Option<String>,
+    pub device_id: Option<String>,
+    pub cloud_run_url: Option<String>,
+    pub cloud_run_auth_token: Option<String>,
 }
 
 impl GeminiConfig {
@@ -116,6 +120,22 @@ impl GeminiConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| read_config_value("proxy_auth_token"));
+        config.firestore_project_id = std::env::var("AURA_FIRESTORE_PROJECT_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("firestore_project_id"));
+        config.device_id = std::env::var("AURA_DEVICE_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("device_id"));
+        config.cloud_run_url = std::env::var("AURA_CLOUD_RUN_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("cloud_run_url"));
+        config.cloud_run_auth_token = std::env::var("AURA_CLOUD_RUN_AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| read_config_value("cloud_run_auth_token"));
         Ok(config)
     }
 
@@ -128,6 +148,10 @@ impl GeminiConfig {
             temperature: 0.7,
             proxy_url: None,
             proxy_auth_token: None,
+            firestore_project_id: None,
+            device_id: None,
+            cloud_run_url: None,
+            cloud_run_auth_token: None,
         }
     }
 

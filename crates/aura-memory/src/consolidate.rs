@@ -91,9 +91,14 @@ pub fn build_consolidation_prompt(messages: &[&Message]) -> String {
 }
 
 /// Call Gemini REST API to consolidate a session's messages into structured facts.
+/// If a Cloud Run URL is provided, uses that instead of calling Gemini directly.
 pub async fn consolidate_session(
     api_key: &str,
     messages: &[Message],
+    cloud_run_url: Option<&str>,
+    cloud_run_auth_token: Option<&str>,
+    device_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<ConsolidationResponse> {
     let filtered = filter_messages_for_consolidation(messages);
     if filtered.is_empty() {
@@ -103,7 +108,77 @@ pub async fn consolidate_session(
         });
     }
 
-    let prompt = build_consolidation_prompt(&filtered);
+    if let (Some(url), Some(token), Some(did), Some(sid)) =
+        (cloud_run_url, cloud_run_auth_token, device_id, session_id)
+    {
+        match consolidate_via_cloud_run(url, token, did, sid, &filtered).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                tracing::warn!("Cloud Run consolidation failed, falling back to local: {e}");
+            }
+        }
+    }
+
+    // Fallback: call Gemini directly
+    consolidate_locally(api_key, &filtered).await
+}
+
+/// Call the Cloud Run consolidation service.
+async fn consolidate_via_cloud_run(
+    url: &str,
+    auth_token: &str,
+    device_id: &str,
+    session_id: &str,
+    messages: &[&Message],
+) -> Result<ConsolidationResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let msg_json: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "role": match m.role {
+                    MessageRole::User => "user",
+                    MessageRole::ToolCall => "tool_call",
+                    _ => "other",
+                },
+                "content": m.content,
+                "timestamp": m.timestamp,
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({
+        "device_id": device_id,
+        "session_id": session_id,
+        "messages": msg_json,
+    });
+
+    let resp = client
+        .post(&format!("{url}/consolidate"))
+        .bearer_auth(auth_token)
+        .json(&body)
+        .send()
+        .await
+        .context("Cloud Run consolidation request failed")?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Cloud Run returned {status}: {text}");
+    }
+
+    resp.json()
+        .await
+        .context("Failed to parse Cloud Run response")
+}
+
+/// Call Gemini REST API directly to consolidate session messages.
+async fn consolidate_locally(api_key: &str, filtered: &[&Message]) -> Result<ConsolidationResponse> {
+    let prompt = build_consolidation_prompt(filtered);
     let url = format!("{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent");
 
     let body = serde_json::json!({

@@ -820,6 +820,10 @@ mod tests {
             temperature: 0.9,
             proxy_url: None,
             proxy_auth_token: None,
+            firestore_project_id: None,
+            device_id: None,
+            cloud_run_url: None,
+            cloud_run_auth_token: None,
         };
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
@@ -839,6 +843,10 @@ mod tests {
             temperature: 0.9,
             proxy_url: None,
             proxy_auth_token: None,
+            firestore_project_id: None,
+            device_id: None,
+            cloud_run_url: None,
+            cloud_run_auth_token: None,
         };
         let msg = build_setup_message(&config, Some("tok_resume_123".into()));
         let json = serde_json::to_string(&msg).unwrap();
