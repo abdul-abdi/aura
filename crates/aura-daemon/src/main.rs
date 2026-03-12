@@ -478,6 +478,8 @@ async fn run_daemon(
     let gemini_cloud_run_url = gemini_config.cloud_run_url.clone();
     let gemini_cloud_run_auth_token = gemini_config.cloud_run_auth_token.clone();
     let gemini_device_id = gemini_config.device_id.clone();
+    let gemini_firestore_project_id = gemini_config.firestore_project_id.clone();
+    let gemini_firebase_api_key = gemini_config.firebase_api_key.clone();
 
     let session = GeminiLiveSession::connect(gemini_config, resumption_handle)
         .await
@@ -731,6 +733,8 @@ async fn run_daemon(
             gemini_cloud_run_url,
             gemini_cloud_run_auth_token,
             gemini_device_id,
+            gemini_firestore_project_id,
+            gemini_firebase_api_key,
         )
         .await
         {
@@ -806,6 +810,8 @@ async fn run_processor(
     cloud_run_url: Option<String>,
     cloud_run_auth_token: Option<String>,
     cloud_run_device_id: Option<String>,
+    firestore_project_id: Option<String>,
+    firebase_api_key: Option<String>,
 ) -> Result<()> {
     let mut events = session.subscribe();
 
@@ -1608,6 +1614,9 @@ async fn run_processor(
                                                 })
                                                 .collect();
 
+                                            // Clone es_sid before it's moved into memory_op closure
+                                            let fs_sid = es_sid.clone();
+
                                             memory_op(&memory, move |mem| {
                                                 if !summary.is_empty() {
                                                     mem.end_session(&es_sid, Some(&summary))?;
@@ -1620,6 +1629,41 @@ async fn run_processor(
                                                 Ok(())
                                             }).await;
                                             tracing::info!("Session consolidation complete");
+
+                                            // Sync facts to Firestore if config is available
+                                            if let (Some(project_id), Some(device_id), Some(fb_key)) =
+                                                (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
+                                            {
+                                                let fs_client = aura_firestore::client::FirestoreClient::new(
+                                                    project_id.clone(),
+                                                    device_id.clone(),
+                                                );
+                                                match aura_firestore::auth::get_anonymous_token(fb_key).await {
+                                                    Ok(token) => {
+                                                        if !response.summary.is_empty() {
+                                                            if let Err(e) = fs_client.write_session(&fs_sid, &response.summary, &token).await {
+                                                                tracing::warn!("Firestore session write failed: {e}");
+                                                            }
+                                                        }
+                                                        for fact in &response.facts {
+                                                            let fs_fact = aura_firestore::client::FirestoreFact {
+                                                                category: fact.category.clone(),
+                                                                content: fact.content.clone(),
+                                                                entities: fact.entities.clone(),
+                                                                importance: fact.importance,
+                                                                session_id: fs_sid.clone(),
+                                                            };
+                                                            if let Err(e) = fs_client.write_fact(&fs_fact, &token).await {
+                                                                tracing::warn!("Firestore fact write failed: {e}");
+                                                            }
+                                                        }
+                                                        tracing::info!("Local consolidation synced to Firestore");
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("Firebase auth for Firestore sync failed: {e}");
+                                                    }
+                                                }
+                                            }
                                         } else {
                                             // No facts extracted — just end session normally
                                             let sid = es_sid.clone();
