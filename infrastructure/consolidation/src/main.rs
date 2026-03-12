@@ -17,7 +17,6 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use futures::future::join_all;
 
@@ -140,7 +139,6 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/consolidate", post(consolidate))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
