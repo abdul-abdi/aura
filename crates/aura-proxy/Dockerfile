@@ -22,6 +22,7 @@ COPY crates/aura-gemini/Cargo.toml  crates/aura-gemini/Cargo.toml
 COPY crates/aura-input/Cargo.toml   crates/aura-input/Cargo.toml
 COPY crates/aura-memory/Cargo.toml  crates/aura-memory/Cargo.toml
 COPY crates/aura-menubar/Cargo.toml crates/aura-menubar/Cargo.toml
+COPY crates/aura-firestore/Cargo.toml crates/aura-firestore/Cargo.toml
 COPY crates/aura-proxy/Cargo.toml   crates/aura-proxy/Cargo.toml
 COPY crates/aura-screen/Cargo.toml  crates/aura-screen/Cargo.toml
 COPY crates/aura-voice/Cargo.toml   crates/aura-voice/Cargo.toml
@@ -31,7 +32,7 @@ COPY crates/aura-voice/Cargo.toml   crates/aura-voice/Cargo.toml
 # We only need aura-proxy's deps compiled; the other crates are not transitive
 # deps of aura-proxy so they won't be compiled regardless.
 RUN set -e; \
-    for lib_crate in aura-bridge aura-gemini aura-input aura-memory \
+    for lib_crate in aura-bridge aura-firestore aura-gemini aura-input aura-memory \
                      aura-menubar aura-screen aura-voice; do \
         mkdir -p "crates/${lib_crate}/src"; \
         printf '' > "crates/${lib_crate}/src/lib.rs"; \
