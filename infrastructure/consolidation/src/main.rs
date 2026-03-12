@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
+use futures::future::join_all;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -345,27 +346,35 @@ async fn write_to_firestore(
         state.gcp_project_id
     );
 
-    // Write each fact.
-    for fact in &result.facts {
+    // Write all facts concurrently.
+    let fact_futures: Vec<_> = result.facts.iter().map(|fact| {
         let doc_id = fact_doc_id(&fact.category, &fact.content);
         let url = format!("{base}/facts/{doc_id}");
         let body = fact_to_firestore_doc(fact, session_id);
+        let http = &state.http;
+        async move {
+            http.patch(&url)
+                .bearer_auth(gcp_token)
+                .json(&body)
+                .send()
+                .await
+                .context("write_fact: request failed")?
+                .error_for_status()
+                .context("write_fact: non-2xx response")?;
+            Ok::<_, anyhow::Error>(())
+        }
+    }).collect();
 
-        state
-            .http
-            .patch(&url)
-            .bearer_auth(gcp_token)
-            .json(&body)
-            .send()
-            .await
-            .context("write_fact: request failed")?
-            .error_for_status()
-            .context("write_fact: non-2xx response")?;
+    let results = join_all(fact_futures).await;
+    for (i, r) in results.into_iter().enumerate() {
+        if let Err(e) = r {
+            warn!("Failed to write fact {i}: {e:#}");
+        }
     }
 
     // Write session summary.
-    let session_url = format!("{base}/sessions/{session_id}");
     let now = Utc::now().to_rfc3339();
+    let session_url = format!("{base}/sessions/{session_id}");
     let session_body = json!({
         "fields": {
             "summary":    {"stringValue": result.summary},
