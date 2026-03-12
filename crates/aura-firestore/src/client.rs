@@ -178,7 +178,7 @@ pub fn firestore_doc_to_fact(doc: &Value) -> Result<FirestoreFact> {
                         .and_then(|s| s.parse::<f64>().ok())
                 })
         })
-        .unwrap_or(0.0);
+        .unwrap_or(0.5);
 
     let entities = fields
         .get("entities")
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn importance_defaults_to_zero_when_absent() {
+    fn importance_defaults_to_half_when_absent() {
         let doc = serde_json::json!({
             "fields": {
                 "category":   {"stringValue": "note"},
@@ -302,7 +302,7 @@ mod tests {
             }
         });
         let parsed = firestore_doc_to_fact(&doc).unwrap();
-        assert_eq!(parsed.importance, 0.0);
+        assert_eq!(parsed.importance, 0.5);
     }
 
     #[test]
