@@ -137,9 +137,7 @@ impl SessionMemory {
         // Backfill the FTS index from existing facts when the virtual table was
         // just created for the first time (i.e. upgrading an existing database).
         if !fts_existed {
-            conn.execute_batch(
-                "INSERT INTO facts_fts(facts_fts) VALUES('rebuild');",
-            )?;
+            conn.execute_batch("INSERT INTO facts_fts(facts_fts) VALUES('rebuild');")?;
         }
         Ok(Self { conn })
     }

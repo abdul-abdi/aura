@@ -554,12 +554,11 @@ pub(crate) async fn run_reconnect_loop(
 
         // Determine session mode: Resume if handle exists AND not poisoned.
         let session_mode = {
-            let handle: Option<String> = processor::memory_op(&memory, |mem| {
-                mem.get_setting("resumption_handle")
-            })
-            .await
-            .flatten()
-            .filter(|h| !h.is_empty());
+            let handle: Option<String> =
+                processor::memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
+                    .await
+                    .flatten()
+                    .filter(|h| !h.is_empty());
             match handle {
                 Some(h) if reconnect_counter < 3 => {
                     tracing::info!(reconnect_counter, "Resuming session with existing handle");
@@ -622,7 +621,9 @@ pub(crate) async fn run_reconnect_loop(
 
         // Wait for reconnect signal or auto-reconnect after 3s.
         let _ = menu_tx
-            .send(MenuBarMessage::SetColor(aura_menubar::status_item::DotColor::Gray))
+            .send(MenuBarMessage::SetColor(
+                aura_menubar::status_item::DotColor::Gray,
+            ))
             .await;
         let _ = menu_tx.send(MenuBarMessage::SetPulsing(false)).await;
         let _ = menu_tx
