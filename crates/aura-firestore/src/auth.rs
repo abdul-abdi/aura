@@ -67,7 +67,7 @@ impl AuthCache {
         };
 
         match maybe {
-            Some((token, refresh_tok, expires_at))
+            Some((token, _refresh_tok, expires_at))
                 if Instant::now() + EXPIRY_BUFFER < expires_at =>
             {
                 Ok(token)

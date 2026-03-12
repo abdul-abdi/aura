@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use aura_firestore::validate_device_id;
 use axum::{
     Router,
     extract::State,
@@ -417,6 +416,24 @@ fn fact_doc_id(category: &str, content: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{:016x}", hash)
+}
+
+/// Validate device_id to prevent Firestore path traversal.
+/// Canonical version lives in aura-firestore/src/client.rs — kept local here
+/// to avoid pulling the full crate (with workspace deps) into the Docker build.
+fn validate_device_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 {
+        anyhow::bail!("device_id must be 1-128 characters, got {}", id.len());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "device_id must contain only alphanumeric characters, hyphens, and underscores"
+        );
+    }
+    Ok(())
 }
 
 fn fact_to_firestore_doc(fact: &ExtractedFact, session_id: &str) -> Value {
