@@ -54,24 +54,57 @@ gcloud services enable \
     firestore.googleapis.com \
     run.googleapis.com \
     artifactregistry.googleapis.com \
-    cloudbuild.googleapis.com
+    cloudbuild.googleapis.com \
+    secretmanager.googleapis.com
 
 echo "==> Creating Firestore database (Native mode)..."
 gcloud firestore databases create --location="$REGION" 2>/dev/null || echo "    Firestore database already exists, skipping."
+
+echo "==> Storing secrets in Secret Manager..."
+
+# Gemini API key
+SECRET_NAME="gemini-api-key"
+if gcloud secrets describe "$SECRET_NAME" --project "$PROJECT_ID" --quiet &>/dev/null; then
+    printf '%s' "$GEMINI_API_KEY" | gcloud secrets versions add "$SECRET_NAME" \
+        --project "$PROJECT_ID" --data-file=-
+else
+    printf '%s' "$GEMINI_API_KEY" | gcloud secrets create "$SECRET_NAME" \
+        --project "$PROJECT_ID" --replication-policy automatic --data-file=-
+fi
+
+# Consolidation auth token
+SECRET_NAME="aura-consolidation-auth-token"
+if gcloud secrets describe "$SECRET_NAME" --project "$PROJECT_ID" --quiet &>/dev/null; then
+    printf '%s' "$AURA_AUTH_TOKEN" | gcloud secrets versions add "$SECRET_NAME" \
+        --project "$PROJECT_ID" --data-file=-
+else
+    printf '%s' "$AURA_AUTH_TOKEN" | gcloud secrets create "$SECRET_NAME" \
+        --project "$PROJECT_ID" --replication-policy automatic --data-file=-
+fi
+
+# Grant Cloud Run service account access to secrets
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+for secret in gemini-api-key aura-consolidation-auth-token; do
+    gcloud secrets add-iam-policy-binding "$secret" \
+        --project "$PROJECT_ID" \
+        --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+        --role="roles/secretmanager.secretAccessor" \
+        --quiet
+done
 
 echo "==> Building and deploying Cloud Run service..."
 gcloud run deploy "$SERVICE_NAME" \
     --source infrastructure/ \
     --region "$REGION" \
     --allow-unauthenticated \
-    --set-env-vars "GEMINI_API_KEY=${GEMINI_API_KEY},AURA_AUTH_TOKEN=${AURA_AUTH_TOKEN},GCP_PROJECT_ID=$PROJECT_ID" \
+    --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
+    --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID" \
     --memory 256Mi \
     --cpu 1 \
     --min-instances 0 \
     --max-instances 3
 
 echo "==> Granting Firestore IAM permissions to Cloud Run service account..."
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
     --role="roles/datastore.user" \
