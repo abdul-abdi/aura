@@ -1,10 +1,12 @@
 //! Firestore REST client for reading/writing facts and session summaries.
 
+use crate::auth::AuthCache;
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tracing::debug;
-use chrono::Utc;
 
 /// A fact stored in Firestore under `users/{device_id}/facts`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,6 +23,7 @@ pub struct FirestoreClient {
     project_id: String,
     device_id: String,
     client: reqwest::Client,
+    auth_cache: Option<Arc<AuthCache>>,
 }
 
 impl FirestoreClient {
@@ -29,6 +32,25 @@ impl FirestoreClient {
             project_id,
             device_id,
             client: reqwest::Client::new(),
+            auth_cache: None,
+        }
+    }
+
+    /// Create a client with a shared [`AuthCache`] for automatic token management.
+    pub fn with_auth(project_id: String, device_id: String, auth_cache: Arc<AuthCache>) -> Self {
+        Self {
+            project_id,
+            device_id,
+            client: reqwest::Client::new(),
+            auth_cache: Some(auth_cache),
+        }
+    }
+
+    /// Get a valid auth token, either from the shared cache or requiring an explicit token.
+    pub async fn get_token(&self) -> Result<String> {
+        match &self.auth_cache {
+            Some(cache) => cache.get_token().await,
+            None => anyhow::bail!("no AuthCache configured; pass an explicit auth_token instead"),
         }
     }
 
@@ -164,9 +186,7 @@ pub fn fact_to_firestore_doc(fact: &FirestoreFact) -> Value {
 
 /// Parse a Firestore REST document into a `FirestoreFact`.
 pub fn firestore_doc_to_fact(doc: &Value) -> Result<FirestoreFact> {
-    let fields = doc
-        .get("fields")
-        .context("document missing 'fields' key")?;
+    let fields = doc.get("fields").context("document missing 'fields' key")?;
 
     let category = string_field(fields, "category")?;
     let content = string_field(fields, "content")?;
@@ -174,14 +194,12 @@ pub fn firestore_doc_to_fact(doc: &Value) -> Result<FirestoreFact> {
     let importance = fields
         .get("importance")
         .and_then(|v| {
-            v.get("doubleValue")
-                .and_then(|d| d.as_f64())
-                .or_else(|| {
-                    // Firestore REST encodes integerValue as a string, e.g. {"integerValue": "1"}
-                    v.get("integerValue")
-                        .and_then(|i| i.as_str())
-                        .and_then(|s| s.parse::<f64>().ok())
-                })
+            v.get("doubleValue").and_then(|d| d.as_f64()).or_else(|| {
+                // Firestore REST encodes integerValue as a string, e.g. {"integerValue": "1"}
+                v.get("integerValue")
+                    .and_then(|i| i.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+            })
         })
         .unwrap_or(0.5);
 
@@ -192,7 +210,11 @@ pub fn firestore_doc_to_fact(doc: &Value) -> Result<FirestoreFact> {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|e| e.get("stringValue").and_then(|s| s.as_str()).map(String::from))
+                .filter_map(|e| {
+                    e.get("stringValue")
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -292,7 +314,8 @@ mod tests {
 
     #[test]
     fn missing_fields_key_returns_err() {
-        let doc = serde_json::json!({"name": "projects/x/databases/(default)/documents/users/d/facts/f"});
+        let doc =
+            serde_json::json!({"name": "projects/x/databases/(default)/documents/users/d/facts/f"});
         assert!(firestore_doc_to_fact(&doc).is_err());
     }
 
