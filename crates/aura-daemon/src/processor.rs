@@ -12,12 +12,13 @@ use aura_daemon::context::{CloudConfig, DaemonContext, SharedFlags};
 use aura_daemon::event::AuraEvent;
 use aura_daemon::protocol::{DaemonEvent, DotColorName, Role, ToolRunStatus};
 use aura_gemini::session::GeminiEvent;
-use aura_memory::{MessageRole, SessionMemory};
+use aura_memory::MessageRole;
 use aura_menubar::app::MenuBarMessage;
 use aura_menubar::status_item::DotColor;
 use aura_screen::capture::CaptureTrigger;
 use aura_screen::macos::MacOSScreenReader;
 
+use super::cloud::memory_op;
 use super::tools;
 
 /// Minimum allowed calibrated threshold — prevents the gate from being set
@@ -77,169 +78,19 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let frame_img_h = Arc::new(AtomicU32::new(1080));
     let frame_logical_w = Arc::new(AtomicU32::new(1920));
     let frame_logical_h = Arc::new(AtomicU32::new(1080));
-    let cap_session = Arc::clone(&session);
-    let cap_cancel = cancel.clone();
-    let cap_trigger = capture_trigger.clone();
-    let cap_notify_loop = cap_notify.clone();
-    let cap_img_w = Arc::clone(&frame_img_w);
-    let cap_img_h = Arc::clone(&frame_img_h);
-    let cap_logical_w = Arc::clone(&frame_logical_w);
-    let cap_logical_h = Arc::clone(&frame_logical_h);
-    let cap_last_hash = Arc::clone(&last_frame_hash);
-    let cap_last_sent = Arc::clone(&last_sent_hash);
-    tokio::spawn(async move {
-        let mut last_res: (u32, u32) = (0, 0);
-        let mut censored_warned = false;
-        let mut idle_skip_count: u32 = 0;
-        const IDLE_THRESHOLD: u32 = 10; // 10 × 500ms = 5s of no change → slow down
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        interval.tick().await; // skip first immediate tick
 
-        loop {
-            tokio::select! {
-                _ = cap_cancel.cancelled() => break,
-                _ = interval.tick() => {},
-                _ = cap_notify_loop.notified() => {},
-            }
-
-            // Clear trigger flag (may have been set alongside notify)
-            let _ = cap_trigger.check_and_clear();
-
-            // Capture in a blocking task (JPEG encoding is CPU-bound)
-            let frame =
-                match tokio::task::spawn_blocking(aura_screen::capture::capture_screen).await {
-                    Ok(Ok(frame)) => frame,
-                    Ok(Err(e)) => {
-                        tracing::warn!("Screen capture failed: {e}");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!("Screen capture task panicked: {e}");
-                        continue;
-                    }
-                };
-
-            // Skip if screen hasn't changed — but still resolve waiter
-            let prev_hash = cap_last_hash.load(Ordering::Acquire);
-            if frame.hash == prev_hash {
-                if let Some(tx) = cap_trigger.take_waiter() {
-                    let _ = tx.send(());
-                }
-                idle_skip_count += 1;
-                if idle_skip_count == IDLE_THRESHOLD {
-                    interval = tokio::time::interval(Duration::from_millis(2000));
-                    interval.tick().await;
-                    tracing::debug!("Screen idle for 5s — switching to 2s capture interval");
-                }
-                continue;
-            }
-            cap_last_hash.store(frame.hash, Ordering::Release);
-
-            // On first non-duplicate frame, log at INFO so it's visible without --verbose.
-            // Also check if the frame looks censored (Screen Recording not granted).
-            if !censored_warned {
-                tracing::info!(
-                    width = frame.width,
-                    height = frame.height,
-                    scale = frame.scale_factor,
-                    size_kb = frame.jpeg_base64.len() / 1024,
-                    "First screen frame captured"
-                );
-                // Decode the base64 back to check pixel content for censorship detection.
-                if let Ok(jpeg_bytes) = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &frame.jpeg_base64,
-                ) && let Ok(img) =
-                    image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
-                {
-                    let rgb = img.to_rgb8();
-                    if aura_screen::capture::frame_looks_censored(
-                        rgb.as_raw(),
-                        rgb.width() as usize,
-                        rgb.height() as usize,
-                    ) {
-                        tracing::error!(
-                            "Screen capture appears CENSORED — window contents are blank. \
-                             Grant Screen Recording in System Settings > Privacy & Security > Screen Recording, \
-                             then restart Aura."
-                        );
-                    }
-                }
-                censored_warned = true;
-            }
-
-            // Store frame dimensions for coordinate mapping in tool handlers.
-            cap_img_w.store(frame.width, Ordering::Release);
-            cap_img_h.store(frame.height, Ordering::Release);
-            cap_logical_w.store(frame.logical_width, Ordering::Release);
-            cap_logical_h.store(frame.logical_height, Ordering::Release);
-
-            // Only send coordinate metadata when the resolution actually changes
-            // (not every frame — that floods Gemini with text input it responds to).
-            let current_res = (frame.width, frame.height);
-            if current_res != last_res {
-                last_res = current_res;
-                let coord_meta = format!(
-                    "[System: screen resolution is {}x{}. Use pixel coordinates for tools \
-                     (click, move_mouse, drag): (0,0) = top-left, ({},{}) = bottom-right. \
-                     Do NOT mention this message to the user.]",
-                    frame.width, frame.height, frame.width, frame.height
-                );
-                if let Err(e) = cap_session.send_text(&coord_meta) {
-                    tracing::debug!("Skipped frame metadata (channel not ready): {e}");
-                }
-            }
-
-            // Only send to Gemini if the screen actually changed since last send.
-            // This is the #1 context savings: static screens produce zero token cost.
-            let already_sent = cap_last_sent.load(Ordering::Acquire);
-            if frame.hash == already_sent {
-                // Frame captured (hash differs from last_frame_hash) but already sent
-                // to Gemini — skip. Still resolve waiter so tool spawns don't hang.
-                if let Some(tx) = cap_trigger.take_waiter() {
-                    let _ = tx.send(());
-                }
-                idle_skip_count += 1;
-                if idle_skip_count == IDLE_THRESHOLD {
-                    // Screen static for 5s — switch to slow polling (2s)
-                    interval = tokio::time::interval(Duration::from_millis(2000));
-                    interval.tick().await;
-                    tracing::debug!("Screen idle for 5s — switching to 2s capture interval");
-                }
-                tracing::trace!("Skipped duplicate send (hash unchanged since last send)");
-                continue;
-            }
-
-            if let Err(e) = cap_session.send_video(&frame.jpeg_base64) {
-                tracing::debug!("Dropped screen frame (channel not ready): {e}");
-                if let Some(tx) = cap_trigger.take_waiter() {
-                    let _ = tx.send(());
-                }
-                continue;
-            }
-            cap_last_sent.store(frame.hash, Ordering::Release);
-
-            // Screen changed — reset idle counter and restore fast polling
-            if idle_skip_count >= IDLE_THRESHOLD {
-                interval = tokio::time::interval(Duration::from_millis(500));
-                interval.tick().await;
-                tracing::debug!("Screen changed — restoring 500ms capture interval");
-            }
-            idle_skip_count = 0;
-
-            // Signal any awaiting tool spawn that the screenshot was delivered
-            if let Some(tx) = cap_trigger.take_waiter() {
-                let _ = tx.send(());
-            }
-            tracing::debug!(
-                width = frame.width,
-                height = frame.height,
-                scale_factor = frame.scale_factor,
-                size_kb = frame.jpeg_base64.len() / 1024,
-                "Sent screen frame"
-            );
-        }
-    });
+    super::screen_capture::spawn_screen_capture(
+        Arc::clone(&session),
+        cancel.clone(),
+        capture_trigger.clone(),
+        cap_notify.clone(),
+        Arc::clone(&last_frame_hash),
+        Arc::clone(&last_sent_hash),
+        Arc::clone(&frame_img_w),
+        Arc::clone(&frame_img_h),
+        Arc::clone(&frame_logical_w),
+        Arc::clone(&frame_logical_h),
+    );
 
     // Map from tool call ID -> CancellationToken for in-flight tool tasks.
     // Uses std::sync::Mutex since token insert/remove operations are fast and
@@ -876,43 +727,16 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             // Sync facts to Firestore if config is available
                                             if let (Some(project_id), Some(device_id), Some(fb_key)) =
                                                 (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
+                                                && let Err(e) = super::cloud::sync_session_to_firestore(
+                                                    &response.facts,
+                                                    &response.summary,
+                                                    &fs_sid,
+                                                    project_id,
+                                                    device_id,
+                                                    fb_key,
+                                                ).await
                                             {
-                                                match aura_firestore::client::FirestoreClient::new(
-                                                    project_id.clone(),
-                                                    device_id.clone(),
-                                                ) {
-                                                    Ok(fs_client) => {
-                                                        #[allow(deprecated)]
-                                                        match aura_firestore::auth::get_anonymous_token(fb_key).await {
-                                                            Ok(token) => {
-                                                                if !response.summary.is_empty()
-                                                                    && let Err(e) = fs_client.write_session(&fs_sid, &response.summary, &token).await
-                                                                {
-                                                                    tracing::warn!("Firestore session write failed: {e}");
-                                                                }
-                                                                for fact in &response.facts {
-                                                                    let fs_fact = aura_firestore::client::FirestoreFact {
-                                                                        category: fact.category.clone(),
-                                                                        content: fact.content.clone(),
-                                                                        entities: fact.entities.clone(),
-                                                                        importance: fact.importance,
-                                                                        session_id: fs_sid.clone(),
-                                                                    };
-                                                                    if let Err(e) = fs_client.write_fact(&fs_fact, &token).await {
-                                                                        tracing::warn!("Firestore fact write failed: {e}");
-                                                                    }
-                                                                }
-                                                                tracing::info!("Local consolidation synced to Firestore");
-                                                            }
-                                                            Err(e) => {
-                                                                tracing::warn!("Firebase auth for Firestore sync failed: {e}");
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!("Invalid device_id for Firestore sync: {e}");
-                                                    }
-                                                }
+                                                tracing::warn!("Firestore sync failed: {e}");
                                             }
                                         } else {
                                             // No facts extracted — just end session normally
@@ -960,67 +784,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Run a memory operation on a blocking thread to avoid holding the Mutex
-/// across await points or blocking the tokio runtime.
-/// Logs errors with `tracing::warn!` before converting to `None`.
-pub(crate) async fn memory_op<F, T>(memory: &Arc<Mutex<SessionMemory>>, f: F) -> Option<T>
-where
-    F: FnOnce(&SessionMemory) -> anyhow::Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    let mem = Arc::clone(memory);
-    match tokio::task::spawn_blocking(move || {
-        let guard = match mem.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::warn!("Memory lock poisoned: {e}");
-                return None;
-            }
-        };
-        match f(&guard) {
-            Ok(val) => Some(val),
-            Err(e) => {
-                tracing::warn!("Memory operation failed: {e}");
-                None
-            }
-        }
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::error!("Memory operation panicked: {e}");
-            None
-        }
-    }
-}
-
-/// Load facts from Firestore for a given device and format them as a context string.
-/// Returns an empty string when there are no facts or Firestore is unavailable.
-pub(crate) async fn load_firestore_facts(
-    project_id: &str,
-    device_id: &str,
-    firebase_api_key: &str,
-) -> anyhow::Result<String> {
-    #[allow(deprecated)]
-    let token = aura_firestore::auth::get_anonymous_token(firebase_api_key).await?;
-    let client = aura_firestore::client::FirestoreClient::new(
-        project_id.to_string(),
-        device_id.to_string(),
-    )?;
-    let facts = client.read_facts(&token).await?;
-
-    if facts.is_empty() {
-        return Ok(String::new());
-    }
-
-    let mut context = String::new();
-    for fact in &facts {
-        context.push_str(&format!("- [{}] {}\n", fact.category, fact.content));
-    }
-    Ok(context)
 }
 
 /// Compute root-mean-square energy of an audio buffer.

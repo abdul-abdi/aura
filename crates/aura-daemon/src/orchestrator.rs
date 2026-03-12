@@ -19,6 +19,7 @@ use aura_menubar::status_item::DotColor;
 use aura_voice::audio::AudioCapture;
 use aura_voice::playback::AudioPlayer;
 
+use crate::cloud;
 use crate::processor;
 
 /// Default RMS energy threshold for mic gating while Aura is speaking.
@@ -95,7 +96,7 @@ pub(crate) async fn run_daemon(
         )
     {
         if let Some(firebase_api_key) = &gemini_config.firebase_api_key {
-            match processor::load_firestore_facts(project_id, device_id, firebase_api_key).await {
+            match cloud::load_firestore_facts(project_id, device_id, firebase_api_key).await {
                 Ok(facts_context) if !facts_context.is_empty() => {
                     gemini_config
                         .system_prompt
@@ -555,7 +556,7 @@ pub(crate) async fn run_reconnect_loop(
         // Determine session mode: Resume if handle exists AND not poisoned.
         let session_mode = {
             let handle: Option<String> =
-                processor::memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
+                cloud::memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
                     .await
                     .flatten()
                     .filter(|h| !h.is_empty());
@@ -601,7 +602,7 @@ pub(crate) async fn run_reconnect_loop(
                 );
                 if poison_counter >= 2 {
                     tracing::warn!("Poison counter reached — clearing stale resumption handle");
-                    let _ = processor::memory_op(&memory, |mem| {
+                    let _ = cloud::memory_op(&memory, |mem| {
                         mem.set_setting("resumption_handle", "")
                     })
                     .await;
