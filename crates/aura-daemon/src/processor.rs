@@ -71,6 +71,9 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let last_frame_hash = Arc::new(AtomicU64::new(0));
     let last_sent_hash = Arc::new(AtomicU64::new(0));
     let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let state_change_mutex = Arc::new(tokio::sync::Mutex::new(()));
+    let held_keys: Arc<std::sync::Mutex<std::collections::HashSet<u16>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
     // Updated by the capture loop after each successful capture.
@@ -301,6 +304,77 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             continue;  // Skip the background tool spawn
                         }
 
+                        // save_memory stays inline — persists facts immediately
+                        if name == "save_memory" {
+                            let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("context");
+                            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+                            const VALID_CATEGORIES: &[&str] = &["preference", "habit", "entity", "task", "context"];
+
+                            if content.is_empty() {
+                                let response = serde_json::json!({"success": false, "error": "content is required"});
+                                if let Err(e) = session.send_tool_response(id, name, response).await {
+                                    tracing::error!("Failed to send save_memory response: {e}");
+                                }
+                                continue;
+                            }
+
+                            if !VALID_CATEGORIES.contains(&category) {
+                                let response = serde_json::json!({
+                                    "success": false,
+                                    "error": format!("Invalid category '{}'. Must be one of: {}", category, VALID_CATEGORIES.join(", "))
+                                });
+                                if let Err(e) = session.send_tool_response(id, name, response).await {
+                                    tracing::error!("Failed to send save_memory response: {e}");
+                                }
+                                continue;
+                            }
+
+                            let response = {
+                                let cat = category.to_string();
+                                let cont = content.to_string();
+                                let sid = session_id.clone();
+
+                                match memory_op(&memory, move |mem| {
+                                    mem.add_fact(&sid, &cat, &cont, None, 0.7)
+                                }).await {
+                                    Some(()) => {
+                                        serde_json::json!({
+                                            "success": true,
+                                            "saved": { "category": category, "content_length": content.len() }
+                                        })
+                                    }
+                                    None => serde_json::json!({"success": false, "error": "Failed to save fact"}),
+                                }
+                            };
+
+                            let tool_success = response.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                            bus.send(AuraEvent::ToolExecuted {
+                                name: name.clone(),
+                                success: tool_success,
+                                output: response.to_string(),
+                            });
+                            let _ = ipc_tx.send(DaemonEvent::ToolStatus {
+                                name: name.clone(),
+                                status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
+                                output: Some(response.to_string()),
+                                summary: None,
+                            });
+
+                            {
+                                let tr_sid = session_id.clone();
+                                let tr_content = response.to_string();
+                                memory_op(&memory, move |mem| {
+                                    mem.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
+                                }).await;
+                            }
+
+                            if let Err(e) = session.send_tool_response(id, name, response).await {
+                                tracing::error!("Failed to send save_memory tool response: {e}");
+                            }
+                            continue;  // Skip the background tool spawn
+                        }
+
                         // All other tools: spawn in background so audio keeps flowing
                         let tool_session = Arc::clone(&session);
                         let tool_bus = bus.clone();
@@ -312,10 +386,12 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         let tool_capture_trigger = capture_trigger.clone();
                         let tool_cap_notify = cap_notify.clone();
                         let tool_semaphore = Arc::clone(&tool_semaphore);
+                        let tool_state_mutex = state_change_mutex.clone();
                         let tool_tokens = Arc::clone(&active_tool_tokens);
                         let tool_inflight = Arc::clone(&tools_in_flight);
                         let tool_permission_error = Arc::clone(&has_permission_error);
                         let tool_ipc_tx = ipc_tx.clone();
+                        let tool_held_keys = Arc::clone(&held_keys);
                         let tool_last_hash = Arc::clone(&last_frame_hash);
                         let tool_dims = tools::FrameDims {
                             img_w: frame_img_w.load(Ordering::Acquire),
@@ -333,13 +409,22 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         }
 
                         tokio::spawn(async move {
-                            let _permit = match tool_semaphore.acquire().await {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    tracing::error!("Tool semaphore closed");
-                                    return;
-                                }
-                            };
+                            // State-changing tools run sequentially; others use the semaphore
+                            let _state_guard;
+                            let _permit;
+                            if tools::is_state_changing_tool(&name) {
+                                _state_guard = Some(tool_state_mutex.lock().await);
+                                _permit = None;
+                            } else {
+                                _state_guard = None;
+                                _permit = Some(match tool_semaphore.acquire().await {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        tracing::error!("Tool semaphore closed");
+                                        return;
+                                    }
+                                });
+                            }
 
                             // Increment tools-in-flight counter AFTER acquiring semaphore.
                             // This prevents counter leak when semaphore is closed.
@@ -356,7 +441,16 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
 
                             let pre_hash = if tools::is_state_changing_tool(&name) {
-                                Some(tool_last_hash.load(Ordering::Acquire))
+                                // Allow tools to opt out of verification (e.g. run_applescript with verify: false)
+                                let verify = args
+                                    .get("verify")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                if verify {
+                                    Some(tool_last_hash.load(Ordering::Acquire))
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             };
@@ -377,6 +471,23 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 guard.remove(&id);
                             } else {
                                 tracing::error!("active_tool_tokens lock poisoned on remove");
+                            }
+
+                            // Track held keys for key_state tool to enable auto-release on disconnect
+                            if name == "key_state"
+                                && response.get("success").and_then(|v| v.as_bool()).unwrap_or(false)
+                            {
+                                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                                let key_name = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(kc) = aura_input::keyboard::keycode_from_name(key_name)
+                                    && let Ok(mut keys) = tool_held_keys.lock()
+                                {
+                                    match action {
+                                        "down" => { keys.insert(kc); }
+                                        "up" => { keys.remove(&kc); }
+                                        _ => {}
+                                    }
+                                }
                             }
 
                             // For state-changing tools: verify screen actually changed before reporting success
@@ -448,6 +559,35 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             "screenshot_delivered".to_string(),
                                             serde_json::Value::Bool(verified),
                                         );
+                                        // Enrich right-click post_state with context menu items
+                                        let is_right_click = name == "click"
+                                            && args.get("button").and_then(|v| v.as_str())
+                                                == Some("right");
+                                        if is_right_click && verified {
+                                            // Brief delay for context menu to appear in AX tree
+                                            tokio::time::sleep(Duration::from_millis(100)).await;
+                                            let menu_items = tokio::task::spawn_blocking(
+                                                aura_screen::accessibility::get_menu_items,
+                                            )
+                                            .await
+                                            .unwrap_or_default();
+                                            if !menu_items.is_empty() {
+                                                let items_json: Vec<serde_json::Value> =
+                                                    menu_items
+                                                        .iter()
+                                                        .map(|el| {
+                                                            serde_json::json!({
+                                                                "label": el.label,
+                                                                "enabled": el.enabled,
+                                                            })
+                                                        })
+                                                        .collect();
+                                                ps_obj.insert(
+                                                    "menu_items".to_string(),
+                                                    serde_json::json!(items_json),
+                                                );
+                                            }
+                                        }
                                     }
                                     obj.insert("post_state".to_string(), ps);
                                 }
@@ -656,6 +796,17 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                     }
                     Ok(GeminiEvent::Disconnected) => {
                         tracing::info!("Gemini session disconnected");
+
+                        // Release all held keys to prevent system-wide stuck modifiers
+                        let keys_to_release: Vec<u16> = held_keys
+                            .lock()
+                            .map(|mut g| g.drain().collect())
+                            .unwrap_or_default();
+                        for kc in keys_to_release {
+                            if let Err(e) = aura_input::keyboard::key_up(kc) {
+                                tracing::warn!(keycode = kc, "Failed to release held key on disconnect: {e}");
+                            }
+                        }
 
                         if let Some(ref tx) = menubar_tx {
                             let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;

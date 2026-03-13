@@ -22,6 +22,7 @@ pub struct UIElement {
     pub bounds: Option<ElementBounds>,
     pub enabled: bool,
     pub focused: bool,
+    pub parent_label: Option<String>,
 }
 
 impl UIElement {
@@ -165,6 +166,7 @@ mod tests {
             bounds: Some(make_bounds(10.0, 20.0, 100.0, 40.0)),
             enabled: true,
             focused: false,
+            parent_label: None,
         };
         let s = el.summary();
         assert!(
@@ -188,6 +190,7 @@ mod tests {
             bounds: None,
             enabled: true,
             focused: false,
+            parent_label: None,
         };
         let s = el.summary();
         assert!(!s.contains("\"\""), "no empty quotes when label is None");
@@ -203,6 +206,7 @@ mod tests {
             bounds: None,
             enabled: false,
             focused: true,
+            parent_label: None,
         };
         let s = el.summary();
         assert!(s.contains("focused"), "focused flag should appear");
@@ -222,6 +226,7 @@ mod tests {
                 bounds: None,
                 enabled: true,
                 focused: false,
+                parent_label: None,
             },
             UIElement {
                 role: "AXButton".to_string(),
@@ -230,6 +235,7 @@ mod tests {
                 bounds: None,
                 enabled: true,
                 focused: false,
+                parent_label: None,
             },
         ];
         let ctx = ScreenContext::empty().with_ui_elements(elements);

@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::store::{Message, MessageRole};
 
-const CONSOLIDATION_MODEL: &str = "gemini-2.0-flash-lite";
+const CONSOLIDATION_MODEL: &str = "gemini-2.5-flash-lite";
 const GEMINI_REST_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /// Maximum characters in the consolidation prompt (≈12K tokens).

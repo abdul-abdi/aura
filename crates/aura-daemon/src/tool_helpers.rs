@@ -119,19 +119,33 @@ pub(crate) fn click_element_inner(
         "AXPress failed, trying PID-targeted click"
     );
 
-    let bounds = match &target.bounds {
-        Some(b) => b,
-        None => {
-            return serde_json::json!({
-                "success": false,
-                "error": "Element found but has no bounds (may be offscreen or hidden)",
-                "element": {
-                    "role": target.role,
-                    "label": target.label,
-                },
-            });
+    // If the element has no bounds it may be offscreen — try AXScrollToVisible first.
+    let scrolled_target: aura_screen::context::UIElement;
+    let effective_target: &aura_screen::context::UIElement;
+    if target.bounds.is_some() {
+        effective_target = &target;
+    } else {
+        tracing::debug!("Element has no bounds — attempting AXScrollToVisible");
+        match aura_screen::accessibility::scroll_to_visible_and_get_element(label, role, index) {
+            Some(refreshed) if refreshed.bounds.is_some() => {
+                scrolled_target = refreshed;
+                effective_target = &scrolled_target;
+            }
+            _ => {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "Element found but has no bounds (offscreen or hidden). \
+                              AXScrollToVisible was attempted but the element remains \
+                              invisible. Try scrolling the element into view manually.",
+                    "element": {
+                        "role": target.role,
+                        "label": target.label,
+                    },
+                });
+            }
         }
-    };
+    }
+    let bounds = effective_target.bounds.as_ref().unwrap();
 
     // AX bounds are already in logical screen coordinates — no FrameDims conversion needed
     let (center_x, center_y) = bounds.center();
@@ -144,13 +158,13 @@ pub(crate) fn click_element_inner(
 
     // Try 2: PID-targeted click
     if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-        if aura_input::mouse::click_pid(center_x, center_y, "left", 1, pid).is_ok() {
+        if aura_input::mouse::click_pid(center_x, center_y, "left", 1, &[], pid).is_ok() {
             return serde_json::json!({
                 "success": true,
                 "method": "pid_click",
                 "element": {
-                    "role": target.role,
-                    "label": target.label,
+                    "role": effective_target.role,
+                    "label": effective_target.label,
                 },
                 "clicked_at": {
                     "x": center_x,
@@ -162,13 +176,13 @@ pub(crate) fn click_element_inner(
     }
 
     // Try 3: HID click fallback
-    match aura_input::mouse::click(center_x, center_y, "left", 1) {
+    match aura_input::mouse::click(center_x, center_y, "left", 1, &[]) {
         Ok(()) => serde_json::json!({
             "success": true,
             "method": "hid_click",
             "element": {
-                "role": target.role,
-                "label": target.label,
+                "role": effective_target.role,
+                "label": effective_target.label,
             },
             "clicked_at": {
                 "x": center_x,
@@ -257,6 +271,26 @@ pub(crate) fn truncate_tool_response(response: &mut serde_json::Value) {
             .get("stdout")
             .and_then(|v| v.as_str())
             .map(|s| truncate_str(s, 500));
+        let warning = obj
+            .get("warning")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, 200));
+        let post_state = obj.get("post_state").cloned().map(|mut ps| {
+            // Trim focused_element details if too large
+            if let Some(fe) = ps.get_mut("focused_element") {
+                let truncated = fe
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| v.len() > 200)
+                    .map(|v| truncate_str(v, 200));
+                if let Some(t) = truncated {
+                    fe.as_object_mut()
+                        .unwrap()
+                        .insert("value".to_string(), serde_json::Value::String(t));
+                }
+            }
+            ps
+        });
         obj.clear();
         if let Some(s) = success {
             obj.insert("success".to_string(), s);
@@ -270,6 +304,12 @@ pub(crate) fn truncate_tool_response(response: &mut serde_json::Value) {
         if let Some(o) = stdout {
             obj.insert("stdout".to_string(), serde_json::Value::String(o));
         }
+        if let Some(w) = warning {
+            obj.insert("warning".to_string(), serde_json::Value::String(w));
+        }
+        if let Some(ps) = post_state {
+            obj.insert("post_state".to_string(), ps);
+        }
         obj.insert(
             "truncated".to_string(),
             serde_json::json!(format!(
@@ -281,10 +321,25 @@ pub(crate) fn truncate_tool_response(response: &mut serde_json::Value) {
 
 pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        format!("{}...[truncated]", &s[..max_chars])
+        return s.to_string();
     }
+    let mut end = max_chars.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated]", &s[..end])
+}
+
+/// Parse optional modifier keys from tool args JSON.
+pub(crate) fn parse_modifiers(args: &serde_json::Value) -> Vec<String> {
+    args.get("modifiers")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Returns true if the tool changes screen state and should get post_state enrichment
@@ -301,6 +356,8 @@ pub(crate) fn is_state_changing_tool(name: &str) -> bool {
             | "click_element"
             | "activate_app"
             | "click_menu_item"
+            | "context_menu_click"
+            | "run_applescript"
     )
 }
 
@@ -372,6 +429,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_applescript_is_state_changing() {
+        assert!(is_state_changing_tool("run_applescript"));
+    }
 
     #[test]
     fn truncate_preserves_error_and_stdout() {
@@ -447,5 +509,38 @@ mod tests {
         assert!(script.contains("tell process \"MyApp\""));
         assert!(script.contains("menu item \"Save\""));
         assert!(script.contains("menu bar item \"File\""));
+    }
+
+    #[test]
+    fn truncate_preserves_post_state_and_warning() {
+        let large_output = "x".repeat(10_000);
+        let mut response = serde_json::json!({
+            "success": true,
+            "verified": false,
+            "warning": "screen_unchanged_but_element_focused",
+            "stdout": large_output,
+            "post_state": {
+                "frontmost_app": "Safari",
+                "focused_element": {
+                    "role": "AXTextField",
+                    "label": "Address and Search",
+                },
+                "screenshot_delivered": false,
+            }
+        });
+        truncate_tool_response(&mut response);
+        let obj = response.as_object().unwrap();
+        assert!(
+            obj.contains_key("post_state"),
+            "post_state must survive truncation"
+        );
+        assert!(
+            obj.contains_key("warning"),
+            "warning must survive truncation"
+        );
+        assert_eq!(
+            obj["post_state"]["frontmost_app"].as_str().unwrap(),
+            "Safari"
+        );
     }
 }

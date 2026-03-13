@@ -23,6 +23,11 @@ const AX_ERROR_SUCCESS: i32 = 0;
 const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
 
+/// Interactive roles whose children should be collected (bounded, 1 level, max 10).
+const RECURSE_INTO_ROLES: &[&str] = &["AXPopUpButton", "AXComboBox", "AXTabGroup", "AXMenuBar"];
+
+const MAX_CHILDREN_PER_INTERACTIVE: usize = 10;
+
 pub static INTERACTIVE_ROLES: &[&str] = &[
     "AXButton",
     "AXTextField",
@@ -286,13 +291,58 @@ fn walk_element(
         };
 
         elements.push(UIElement {
-            role,
-            label,
-            value,
-            bounds,
+            role: role.clone(),
+            label: label.clone(),
+            value: value.clone(),
+            bounds: bounds.clone(),
             enabled,
             focused,
+            parent_label: None,
         });
+
+        // Bounded 1-level recursion into container roles to expose children
+        // (dropdown options, tab labels, combo box items, menu bar items).
+        if RECURSE_INTO_ROLES.contains(&role.as_str()) {
+            let parent_label_for_children = label.clone();
+            let children = get_ax_children(element);
+            let mut child_count = 0;
+            for child in &children {
+                if child_count >= MAX_CHILDREN_PER_INTERACTIVE || elements.len() >= MAX_ELEMENTS {
+                    break;
+                }
+                if let Some(child_role) = get_ax_string(*child, "AXRole") {
+                    let child_label = get_ax_string(*child, "AXTitle")
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            get_ax_string(*child, "AXDescription").filter(|s| !s.is_empty())
+                        });
+                    let child_value = get_ax_string(*child, "AXValue").filter(|s| !s.is_empty());
+                    let child_enabled = get_ax_bool(*child, "AXEnabled");
+                    let child_bounds = match (get_ax_position(*child), get_ax_size(*child)) {
+                        (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                        }),
+                        _ => None,
+                    };
+                    elements.push(UIElement {
+                        role: child_role,
+                        label: child_label,
+                        value: child_value,
+                        bounds: child_bounds,
+                        enabled: child_enabled,
+                        focused: false,
+                        parent_label: parent_label_for_children.clone(),
+                    });
+                    child_count += 1;
+                }
+            }
+            for child in &children {
+                unsafe { CFRelease(*child) };
+            }
+        }
     } else {
         // Not interactive — recurse into children.
         let children = get_ax_children(element);
@@ -376,6 +426,7 @@ pub fn get_focused_element() -> Option<UIElement> {
         bounds,
         enabled,
         focused,
+        parent_label: None,
     })
 }
 
@@ -560,6 +611,7 @@ fn find_element_single_pass(
                 bounds,
                 enabled,
                 focused,
+                parent_label: None,
             },
         ));
     }
@@ -612,6 +664,31 @@ pub(crate) fn find_ax_raw_nth(
 }
 
 // ── Public AX write functions ─────────────────────────────────────────────────
+
+/// Attempt to scroll an element into view using the AXScrollToVisible action.
+/// Returns `true` if the action was accepted by the accessibility server.
+pub(crate) fn ax_scroll_to_visible(element_ref: &CfRef) -> bool {
+    let action_key = cf_string_from_str("AXScrollToVisible");
+    let ret = unsafe { AXUIElementPerformAction(element_ref.as_raw(), action_key.as_raw()) };
+    ret == AX_ERROR_SUCCESS
+}
+
+/// Find the Nth element matching label/role, scroll it into view, then return
+/// the updated `UIElement` (with refreshed bounds). Returns `None` if the
+/// element cannot be found or still has no bounds after scrolling.
+pub fn scroll_to_visible_and_get_element(
+    label: Option<&str>,
+    role: Option<&str>,
+    index: usize,
+) -> Option<UIElement> {
+    let (raw_ref, _el) = find_ax_raw_nth(label, role, index)?;
+    ax_scroll_to_visible(&raw_ref);
+    // Give the scroll animation time to settle before re-querying bounds.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Re-query the element to pick up updated position/size after scrolling.
+    let (_raw2, el) = find_ax_raw_nth(label, role, index)?;
+    Some(el)
+}
 
 /// Perform an AX action (e.g. "AXPress") on the element matching `label`/`role`.
 pub fn ax_perform_action(label: Option<&str>, role: Option<&str>, action: &str) -> AXActionResult {
@@ -719,6 +796,70 @@ pub fn ax_set_focused(label: Option<&str>, role: Option<&str>) -> AXActionResult
     }
 }
 
+/// Collect AXMenuItem elements from the frontmost app's AX tree.
+pub fn get_menu_items() -> Vec<UIElement> {
+    let pid = match crate::macos::get_frontmost_pid() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Vec::new();
+    }
+    let app_ref = CfRef::new(app);
+    let mut elements = Vec::new();
+    let start = std::time::Instant::now();
+    collect_menu_items(app_ref.as_raw(), 0, &mut elements, &start);
+    elements
+}
+
+fn collect_menu_items(
+    element: CFTypeRef,
+    depth: usize,
+    elements: &mut Vec<UIElement>,
+    start_time: &std::time::Instant,
+) {
+    if depth > 8 || elements.len() >= 30 || start_time.elapsed().as_millis() >= 500 {
+        return;
+    }
+    let role = match get_ax_string(element, "AXRole") {
+        Some(r) => r,
+        None => return,
+    };
+    if role == "AXMenuItem" {
+        let label = get_ax_string(element, "AXTitle")
+            .filter(|s| !s.is_empty())
+            .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
+        let enabled = get_ax_bool(element, "AXEnabled");
+        let bounds = match (get_ax_position(element), get_ax_size(element)) {
+            (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            }),
+            _ => None,
+        };
+        elements.push(UIElement {
+            role,
+            label,
+            value: None,
+            bounds,
+            enabled,
+            focused: false,
+            parent_label: None,
+        });
+        return;
+    }
+    let children = get_ax_children(element);
+    for child in &children {
+        collect_menu_items(*child, depth + 1, elements, start_time);
+    }
+    for child in &children {
+        unsafe { CFRelease(*child) };
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -742,6 +883,7 @@ mod tests {
             }),
             enabled: true,
             focused: false,
+            parent_label: None,
         }
     }
 

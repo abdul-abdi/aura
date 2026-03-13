@@ -6,7 +6,7 @@ use serde_json::json;
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
 /// Returns a `Vec<Tool>` with:
-/// - 13 function declarations for macOS automation and computer control
+/// - 17 function declarations for macOS automation and computer control
 /// - Google Search grounding (current events, weather, facts, etc.)
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![
@@ -38,6 +38,10 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             "timeout_secs": {
                                 "type": "integer",
                                 "description": "Max execution time in seconds. Default: 30"
+                            },
+                            "verify": {
+                                "type": "boolean",
+                                "description": "Whether to verify screen changed after execution. Default true. Set false for read-only queries that don't modify the screen."
                             }
                         },
                         "required": ["script"]
@@ -100,7 +104,12 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             "x": { "type": "number", "description": "X coordinate" },
                             "y": { "type": "number", "description": "Y coordinate" },
                             "button": { "type": "string", "enum": ["left", "right"], "description": "Mouse button. Default: left" },
-                            "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" }
+                            "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" },
+                            "modifiers": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                                "description": "Modifier keys to hold during click. Use for Cmd+click (multi-select, new tab), Shift+click (range select)."
+                            }
                         },
                         "required": ["x", "y"]
                     }),
@@ -167,7 +176,8 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                 FunctionDeclaration {
                     name: "drag".into(),
                     description: "Click and drag from one point to another. Used for moving \
-                        windows, selecting text, dragging files, etc. \
+                        windows, selecting text, dragging files, etc. Interpolates intermediate \
+                        points for reliable drag operations. \
                         Invoke this tool only after you have identified the start and end \
                         coordinates from screen context."
                         .into(),
@@ -177,7 +187,12 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             "from_x": { "type": "number", "description": "Start X coordinate" },
                             "from_y": { "type": "number", "description": "Start Y coordinate" },
                             "to_x": { "type": "number", "description": "End X coordinate" },
-                            "to_y": { "type": "number", "description": "End Y coordinate" }
+                            "to_y": { "type": "number", "description": "End Y coordinate" },
+                            "modifiers": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                                "description": "Modifier keys to hold during drag."
+                            }
                         },
                         "required": ["from_x", "from_y", "to_x", "to_y"]
                     }),
@@ -276,6 +291,84 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },
+                FunctionDeclaration {
+                    name: "write_clipboard".into(),
+                    description: "Write text to the system clipboard. Use with Cmd+V to paste. \
+                        Useful for large text blocks or special characters that are hard to type. \
+                        Invoke this tool only after you have the text to place on the clipboard."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Text to place on the clipboard" }
+                        },
+                        "required": ["text"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "save_memory".into(),
+                    description: "Save a fact to persistent memory for recall in future sessions. \
+                        Use for user preferences, learned workflows, and app-specific knowledge. \
+                        Don't save transient observations. \
+                        Invoke this tool only after you have identified something worth remembering."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "enum": ["preference", "habit", "entity", "task", "context"],
+                                "description": "Category of the fact"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "The fact to remember"
+                            }
+                        },
+                        "required": ["category", "content"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "key_state".into(),
+                    description: "Hold or release a key. Use before drag to hold Shift/Option \
+                        during drag. Always release keys after use. \
+                        Invoke this tool only after you know which key to hold or release."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Key name (e.g., 'shift', 'a', 'cmd')" },
+                            "action": { "type": "string", "enum": ["down", "up"], "description": "'down' to hold, 'up' to release" },
+                            "modifiers": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                                "description": "Additional modifier keys"
+                            }
+                        },
+                        "required": ["key", "action"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "context_menu_click".into(),
+                    description: "Right-click at coordinates and click a menu item by label. \
+                        Atomic — no timing gap. Use instead of separate right-click + click \
+                        for context menus. \
+                        Invoke this tool only after you know the coordinates and menu item label."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "number", "description": "X pixel coordinate for right-click" },
+                            "y": { "type": "number", "description": "Y pixel coordinate for right-click" },
+                            "item_label": { "type": "string", "description": "Label of the menu item to click (case-insensitive substring match)" }
+                        },
+                        "required": ["x", "y", "item_label"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
             ]),
             google_search: None,
             code_execution: None,
@@ -298,7 +391,7 @@ mod tests {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 2, "Function declarations + Google Search");
         let decls = tools[0].function_declarations.as_ref().unwrap();
-        assert_eq!(decls.len(), 13, "Should have 13 function declarations");
+        assert_eq!(decls.len(), 17, "Should have 17 function declarations");
     }
 
     #[test]
@@ -322,6 +415,10 @@ mod tests {
                 "click_element",
                 "activate_app",
                 "click_menu_item",
+                "write_clipboard",
+                "save_memory",
+                "key_state",
+                "context_menu_click",
             ]
         );
     }
@@ -340,13 +437,17 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 13);
+        assert_eq!(decls.len(), 17);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
         assert_eq!(decls[3]["name"], "move_mouse");
         assert_eq!(decls[8]["name"], "drag");
         assert_eq!(decls[9]["name"], "recall_memory");
+        assert_eq!(decls[13]["name"], "write_clipboard");
+        assert_eq!(decls[14]["name"], "save_memory");
+        assert_eq!(decls[15]["name"], "key_state");
+        assert_eq!(decls[16]["name"], "context_menu_click");
         // Google Search
         assert!(value[1]["googleSearch"].is_object());
     }

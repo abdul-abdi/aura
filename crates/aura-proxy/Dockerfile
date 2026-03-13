@@ -46,7 +46,7 @@ RUN set -e; \
     printf 'fn main() {}\n' > crates/aura-proxy/src/main.rs
 
 # Build dependencies only — cached until Cargo.toml/Cargo.lock changes.
-RUN cargo build --release -p aura-proxy
+RUN cargo build --release --locked -p aura-proxy
 
 # ── Copy real proxy source and do the final build ────────────────────────────
 # Remove stub artifacts so Cargo sees the sources as changed.

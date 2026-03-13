@@ -7,23 +7,25 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   release:
     name: Build and Release
     runs-on: macos-15
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Cache Cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -40,13 +42,13 @@ jobs:
       # objc/cocoa crates emit ~30 `unexpected_cfg` warnings on every build —
       # these are upstream noise. Allow that lint so clippy exits cleanly.
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings -A unexpected_cfgs
+        run: cargo clippy --workspace --locked -- -D warnings -A unexpected_cfgs
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Build Rust daemon (release)
-        run: cargo build --release -p aura-daemon
+        run: cargo build --release --locked -p aura-daemon
 
       - name: Bundle Aura.app
         run: bash scripts/bundle.sh --strict
@@ -54,13 +56,26 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not extract version from Cargo.toml"
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for duplicate release tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if git tag -l "v${VERSION}" | grep -q .; then
+            echo "::error::Tag v${VERSION} already exists. Bump the version in Cargo.toml before releasing."
+            exit 1
+          fi
 
       - name: Create DMG
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           DMG_DIR=$(mktemp -d)
+          trap 'rm -rf "$DMG_DIR"' EXIT
           cp -r target/release/Aura.app "$DMG_DIR/Aura.app"
           ln -s /Applications "$DMG_DIR/Applications"
           hdiutil create \
@@ -69,7 +84,6 @@ jobs:
             -ov \
             -format UDZO \
             "target/release/Aura-${VERSION}.dmg"
-          rm -rf "$DMG_DIR"
 
       - name: Fetch tags for release notes
         run: git fetch --tags
@@ -82,7 +96,7 @@ jobs:
           echo "$NOTES" > /tmp/release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: Aura v${{ steps.version.outputs.version }}
@@ -92,7 +106,7 @@ jobs:
       # After GitHub Release creation, trigger cloud deploy
       - name: Deploy cloud services
         if: success()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             await github.rest.actions.createWorkflowDispatch({

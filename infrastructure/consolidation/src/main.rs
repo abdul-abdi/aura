@@ -8,28 +8,33 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
 };
 use chrono::Utc;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
-use futures::future::join_all;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const CONSOLIDATION_MODEL: &str = "gemini-2.0-flash-lite";
+const DEFAULT_CONSOLIDATION_MODEL: &str = "gemini-2.5-flash-lite";
 const GEMINI_REST_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const FIRESTORE_BASE: &str = "https://firestore.googleapis.com/v1/projects";
 const METADATA_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const MAX_PROMPT_CHARS: usize = 50_000;
+/// Maximum request body size (1 MiB).
+const MAX_BODY_BYTES: usize = 1_024 * 1_024;
+/// Maximum concurrent consolidation requests.
+const MAX_CONCURRENT_REQUESTS: usize = 10;
 
 // ---------------------------------------------------------------------------
 // App state
@@ -39,7 +44,9 @@ struct AppState {
     gemini_api_key: String,
     auth_token: String,
     gcp_project_id: String,
+    consolidation_model: String,
     http: reqwest::Client,
+    semaphore: Semaphore,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,8 +97,7 @@ struct ConsolidationResult {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -101,6 +107,8 @@ async fn main() -> Result<()> {
         std::env::var("AURA_AUTH_TOKEN").context("AURA_AUTH_TOKEN env var is required")?;
     let gcp_project_id =
         std::env::var("GCP_PROJECT_ID").context("GCP_PROJECT_ID env var is required")?;
+    let consolidation_model = std::env::var("CONSOLIDATION_MODEL")
+        .unwrap_or_else(|_| DEFAULT_CONSOLIDATION_MODEL.to_string());
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -110,15 +118,18 @@ async fn main() -> Result<()> {
         gemini_api_key,
         auth_token,
         gcp_project_id,
+        consolidation_model,
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .context("Failed to build HTTP client")?,
+        semaphore: Semaphore::new(MAX_CONCURRENT_REQUESTS),
     });
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/consolidate", post(consolidate))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -143,6 +154,15 @@ async fn consolidate(
     headers: HeaderMap,
     Json(req): Json<ConsolidateRequest>,
 ) -> Result<Json<ConsolidationResult>, (StatusCode, String)> {
+    // Rate limit: reject if too many concurrent requests.
+    let _permit = state.semaphore.try_acquire().map_err(|_| {
+        warn!("consolidate: rate limited (max {MAX_CONCURRENT_REQUESTS} concurrent)");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many concurrent requests".to_string(),
+        )
+    })?;
+
     // Auth check (constant-time via SHA-256 comparison).
     let provided = extract_bearer(&headers).unwrap_or_default();
     if !constant_time_eq(provided, &state.auth_token) {
@@ -150,10 +170,14 @@ async fn consolidate(
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()));
     }
 
-    // Validate device_id to prevent Firestore path traversal.
+    // Validate device_id and session_id to prevent Firestore path traversal.
     validate_device_id(&req.device_id).map_err(|e| {
         warn!("consolidate: invalid device_id: {e}");
         (StatusCode::BAD_REQUEST, format!("Invalid device_id: {e}"))
+    })?;
+    validate_document_id(&req.session_id).map_err(|e| {
+        warn!("consolidate: invalid session_id: {e}");
+        (StatusCode::BAD_REQUEST, format!("Invalid session_id: {e}"))
     })?;
 
     info!(
@@ -164,24 +188,17 @@ async fn consolidate(
     );
 
     // Build prompt and call Gemini.
-    let result = call_gemini(&state, &req.messages)
-        .await
-        .map_err(|e| {
-            error!("Gemini call failed: {e:#}");
-            (StatusCode::BAD_GATEWAY, format!("Gemini error: {e}"))
-        })?;
+    let result = call_gemini(&state, &req.messages).await.map_err(|e| {
+        error!("Gemini call failed: {e:#}");
+        (StatusCode::BAD_GATEWAY, "Upstream model error".to_string())
+    })?;
 
     // Obtain GCP access token and write to Firestore.
     match get_gcp_token(&state.http).await {
         Ok(gcp_token) => {
-            if let Err(e) = write_to_firestore(
-                &state,
-                &gcp_token,
-                &req.device_id,
-                &req.session_id,
-                &result,
-            )
-            .await
+            if let Err(e) =
+                write_to_firestore(&state, &gcp_token, &req.device_id, &req.session_id, &result)
+                    .await
             {
                 // Non-fatal — log and continue so the caller still gets facts.
                 error!("Firestore write failed: {e:#}");
@@ -241,7 +258,11 @@ fn build_prompt(messages: &[Message]) -> String {
             r == "user" || r == "tool_call"
         })
         .map(|m| {
-            let label = if m.role == "user" { "USER" } else { "TOOL_CALL" };
+            let label = if m.role == "user" {
+                "USER"
+            } else {
+                "TOOL_CALL"
+            };
             format!("[{label}] {}", m.content)
         })
         .collect();
@@ -272,7 +293,10 @@ fn build_prompt(messages: &[Message]) -> String {
 
 async fn call_gemini(state: &AppState, messages: &[Message]) -> Result<ConsolidationResult> {
     let prompt = build_prompt(messages);
-    let url = format!("{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent");
+    let url = format!(
+        "{GEMINI_REST_URL}/{}:generateContent",
+        state.consolidation_model
+    );
 
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -352,23 +376,27 @@ async fn write_to_firestore(
     );
 
     // Write all facts concurrently.
-    let fact_futures: Vec<_> = result.facts.iter().map(|fact| {
-        let doc_id = fact_doc_id(&fact.category, &fact.content);
-        let url = format!("{base}/facts/{doc_id}");
-        let body = fact_to_firestore_doc(fact, session_id);
-        let http = &state.http;
-        async move {
-            http.patch(&url)
-                .bearer_auth(gcp_token)
-                .json(&body)
-                .send()
-                .await
-                .context("write_fact: request failed")?
-                .error_for_status()
-                .context("write_fact: non-2xx response")?;
-            Ok::<_, anyhow::Error>(())
-        }
-    }).collect();
+    let fact_futures: Vec<_> = result
+        .facts
+        .iter()
+        .map(|fact| {
+            let doc_id = fact_doc_id(&fact.category, &fact.content);
+            let url = format!("{base}/facts/{doc_id}");
+            let body = fact_to_firestore_doc(fact, session_id);
+            let http = &state.http;
+            async move {
+                http.patch(&url)
+                    .bearer_auth(gcp_token)
+                    .json(&body)
+                    .send()
+                    .await
+                    .context("write_fact: request failed")?
+                    .error_for_status()
+                    .context("write_fact: non-2xx response")?;
+                Ok::<_, anyhow::Error>(())
+            }
+        })
+        .collect();
 
     let results = join_all(fact_futures).await;
     for (i, r) in results.into_iter().enumerate() {
@@ -416,6 +444,23 @@ fn fact_doc_id(category: &str, content: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{:016x}", hash)
+}
+
+/// Validate a string is safe for use as a Firestore document ID in URL paths.
+/// Allows alphanumeric chars, hyphens, and underscores only. Max 128 chars.
+fn validate_document_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 {
+        anyhow::bail!("document ID must be 1-128 characters, got {}", id.len());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "document ID must contain only alphanumeric characters, hyphens, and underscores"
+        );
+    }
+    Ok(())
 }
 
 /// Validate device_id to prevent Firestore path traversal.

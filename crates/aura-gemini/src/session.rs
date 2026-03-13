@@ -79,7 +79,7 @@ impl GeminiLiveSession {
         initial_resumption_handle: Option<String>,
     ) -> Result<Self> {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
-        let (video_tx, video_rx) = mpsc::channel::<String>(8);
+        let (video_tx, video_rx) = mpsc::channel::<String>(32);
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
         let (text_tx, text_rx) = mpsc::channel::<String>(16);

@@ -162,6 +162,18 @@ fn get_clipboard() -> Option<String> {
     }
 }
 
+/// Write text to the system clipboard via pbcopy.
+pub fn set_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

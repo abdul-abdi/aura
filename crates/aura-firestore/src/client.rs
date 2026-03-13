@@ -18,6 +18,23 @@ pub struct FirestoreFact {
     pub session_id: String,
 }
 
+/// Validate a string is safe for use as a Firestore document ID in URL paths.
+/// Allows alphanumeric chars, hyphens, and underscores only. Max 128 chars.
+pub fn validate_document_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 {
+        anyhow::bail!("document ID must be 1-128 characters, got {}", id.len());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "document ID must contain only alphanumeric characters, hyphens, and underscores"
+        );
+    }
+    Ok(())
+}
+
 /// Validate device_id is safe for use in Firestore URL paths.
 /// Allows alphanumeric chars, hyphens, and underscores only.
 pub fn validate_device_id(id: &str) -> Result<()> {
@@ -46,10 +63,14 @@ pub struct FirestoreClient {
 impl FirestoreClient {
     pub fn new(project_id: String, device_id: String) -> Result<Self> {
         validate_device_id(&device_id)?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("Failed to build HTTP client")?;
         Ok(Self {
             project_id,
             device_id,
-            client: reqwest::Client::new(),
+            client,
             auth_cache: None,
         })
     }
@@ -61,10 +82,14 @@ impl FirestoreClient {
         auth_cache: Arc<AuthCache>,
     ) -> Result<Self> {
         validate_device_id(&device_id)?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("Failed to build HTTP client")?;
         Ok(Self {
             project_id,
             device_id,
-            client: reqwest::Client::new(),
+            client,
             auth_cache: Some(auth_cache),
         })
     }
@@ -112,6 +137,7 @@ impl FirestoreClient {
         summary: &str,
         auth_token: &str,
     ) -> Result<()> {
+        validate_document_id(session_id).context("invalid session_id for Firestore path")?;
         let url = format!("{}/sessions/{}", self.base_url(), session_id);
         let now = Utc::now().to_rfc3339();
         let body = json!({
@@ -376,6 +402,26 @@ mod tests {
     fn fact_doc_id_is_deterministic() {
         let fact = sample_fact();
         assert_eq!(fact_doc_id(&fact), fact_doc_id(&fact));
+    }
+
+    #[test]
+    fn validate_document_id_accepts_valid_ids() {
+        assert!(validate_document_id("abc-123_def").is_ok());
+        assert!(validate_document_id("a").is_ok());
+        assert!(validate_document_id(&"x".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn validate_document_id_rejects_path_traversal() {
+        assert!(validate_document_id("../../evil").is_err());
+        assert!(validate_document_id("foo/bar").is_err());
+        assert!(validate_document_id("a b c").is_err());
+    }
+
+    #[test]
+    fn validate_document_id_rejects_empty_and_oversized() {
+        assert!(validate_document_id("").is_err());
+        assert!(validate_document_id(&"x".repeat(129)).is_err());
     }
 
     #[test]
