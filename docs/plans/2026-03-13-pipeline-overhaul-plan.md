@@ -1023,7 +1023,7 @@ git commit -m "chore: format after pipeline overhaul"
 
 ## Phase 2: Closing the Remaining Gaps
 
-Tasks 10-15 address capabilities that Phases 1-5 alone don't provide: retry logic for missed clicks, bounding box validation, visual element labeling (SoM), password field workarounds, and system prompt coherence.
+Tasks 10-16 address capabilities that Phases 1-5 alone don't provide: retry logic for missed clicks, bounding box validation, visual element labeling (SoM), password field workarounds, system prompt coherence, and adaptive frame resolution for precision targeting.
 
 ---
 
@@ -1970,7 +1970,155 @@ fields. Completes the prompt alignment for the full pipeline overhaul."
 
 ---
 
-### Task 16: Integration Verification (Phase 2)
+### Task 16: Adaptive Frame Resolution for Precision Targeting
+
+**Files:**
+- Modify: `crates/aura-screen/src/capture.rs` (add high-res capture mode)
+- Modify: `crates/aura-daemon/src/screen_capture.rs` (no changes — streaming stays at 1920px Q80)
+- Modify: `crates/aura-daemon/src/processor.rs` (use high-res for tool-triggered captures)
+
+**Context:** All frames are currently downscaled to 1920px and JPEG-compressed at quality 80 — both for passive 2 FPS streaming and for on-demand captures (get_screen_context, SoM annotation, tool verification). This loses detail on small UI elements: a 24px toolbar icon on a 5K Retina display becomes a blurry ~9px blob at 1920px Q80. Streaming frames need to stay small (token economics), but on-demand frames are rare (5-15 per task) and benefit from higher resolution. Solution: add a `high_res` capture mode that caps at 2560px and uses JPEG quality 92, used only for on-demand paths.
+
+**Step 1: Write the failing test**
+
+Add to `crates/aura-screen/src/capture.rs` test module:
+
+```rust
+#[test]
+fn high_res_constants_are_larger_than_streaming() {
+    assert!(ONDEMAND_MAX_WIDTH > MAX_WIDTH, "On-demand should be higher res than streaming");
+    assert!(ONDEMAND_JPEG_QUALITY > JPEG_QUALITY, "On-demand should be higher quality than streaming");
+    assert!(ONDEMAND_MAX_WIDTH <= 2560, "On-demand should not exceed 2560px — Gemini likely downscales beyond this");
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p aura-screen high_res_constants`
+Expected: FAIL — constants don't exist
+
+**Step 3: Add on-demand capture constants and function**
+
+Add to `crates/aura-screen/src/capture.rs` after the existing constants (line 12):
+
+```rust
+/// Maximum width for on-demand high-res captures (get_screen_context, SoM, tool verification).
+/// 2560px is the sweet spot: 33% more detail than 1920px for small element targeting,
+/// without the diminishing returns of full 5K native resolution.
+const ONDEMAND_MAX_WIDTH: u32 = 2560;
+
+/// JPEG quality for on-demand captures. 92 gives crisp text without excessive size.
+/// A 2560px Q92 frame is ~400-500KB vs ~200KB for 1920px Q80 streaming frames.
+const ONDEMAND_JPEG_QUALITY: u8 = 92;
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test -p aura-screen high_res_constants`
+Expected: PASS
+
+**Step 5: Refactor capture_screen to accept quality parameters**
+
+Extract the core capture logic into an internal function:
+
+```rust
+/// Internal capture with configurable resolution and quality.
+fn capture_screen_with_params(max_width: u32, jpeg_quality: u8) -> Result<CapturedFrame> {
+    let display_id = active_display_id().unwrap_or(CGDisplay::main().id);
+    let display = CGDisplay::new(display_id);
+    let cg_image = CGDisplay::image(&display)
+        .context("Failed to capture screen — is Screen Recording permission granted?")?;
+
+    // ... existing capture logic from capture_screen() ...
+    // Replace MAX_WIDTH with max_width parameter
+    // Replace JPEG_QUALITY with jpeg_quality parameter
+
+    let (final_rgb, final_w, final_h) = if width as u32 > max_width {
+        let scale = max_width as f64 / width as f64;
+        let new_h = (height as f64 * scale) as u32;
+        let img = image::RgbImage::from_raw(width as u32, height as u32, rgb)
+            .context("Failed to create image buffer")?;
+        let resized = image::imageops::resize(
+            &img,
+            max_width,
+            new_h,
+            image::imageops::FilterType::Triangle,
+        );
+        let w = resized.width();
+        let h = resized.height();
+        (resized.into_raw(), w, h)
+    } else {
+        (rgb, width as u32, height as u32)
+    };
+
+    let mut jpeg_buf = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, jpeg_quality);
+    // ... rest of encoding ...
+}
+
+/// Capture screen at streaming quality (1920px, Q80). Used by the 2 FPS capture loop.
+pub fn capture_screen() -> Result<CapturedFrame> {
+    capture_screen_with_params(MAX_WIDTH, JPEG_QUALITY)
+}
+
+/// Capture screen at high resolution (2560px, Q92). Used for on-demand captures:
+/// get_screen_context, SoM annotation, tool-triggered verification frames.
+/// Costs ~2× more tokens per frame but provides 33% more detail for coordinate targeting.
+pub fn capture_screen_high_res() -> Result<CapturedFrame> {
+    capture_screen_with_params(ONDEMAND_MAX_WIDTH, ONDEMAND_JPEG_QUALITY)
+}
+```
+
+**Step 6: Write test for high-res capture function**
+
+Add to test module:
+
+```rust
+#[test]
+fn capture_screen_high_res_exists() {
+    // Just verify the function signature compiles — actual capture requires
+    // Screen Recording permission and will fail in CI.
+    let _fn_ptr: fn() -> Result<CapturedFrame> = capture_screen_high_res;
+}
+```
+
+**Step 7: Use high-res capture for tool-triggered frames**
+
+In `crates/aura-daemon/src/screen_capture.rs`, no changes needed — the streaming loop continues calling `capture_screen()` at 1920px Q80.
+
+In `crates/aura-daemon/src/processor.rs`, update the tool-triggered capture path to use high-res. Find the `spawn_blocking(aura_screen::capture::capture_screen)` call in the verification block and change it:
+
+```rust
+// Before (tool-triggered capture uses same resolution as streaming):
+let frame = tokio::task::spawn_blocking(aura_screen::capture::capture_screen).await;
+
+// After (tool-triggered capture uses high-res for better verification):
+let frame = tokio::task::spawn_blocking(aura_screen::capture::capture_screen_high_res).await;
+```
+
+Also update the `get_screen_context` tool handler to use high-res capture if it captures a fresh frame.
+
+**Step 8: Run full test suite**
+
+Run: `cargo test -p aura-screen && cargo test -p aura-daemon`
+Expected: All tests pass
+
+**Step 9: Commit**
+
+```bash
+git add crates/aura-screen/src/capture.rs crates/aura-daemon/src/processor.rs
+git commit -m "feat: adaptive frame resolution — high-res for on-demand captures
+
+Streaming frames stay at 1920px Q80 (2 FPS, token-efficient).
+On-demand frames (tool verification, get_screen_context, SoM) now
+capture at 2560px Q92 — 33% more detail for coordinate targeting
+with ~2× cost per frame, but only 5-15 frames per task vs 120+/min
+for streaming. Net token increase is negligible."
+```
+
+---
+
+### Task 17: Integration Verification (Phase 2)
 
 **Files:** None (verification only)
 
