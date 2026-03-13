@@ -83,6 +83,7 @@ unsafe extern "C" {
         value: CFTypeRef,
     ) -> i32;
     fn AXUIElementPerformAction(element: CFTypeRef, action: CFTypeRef) -> i32;
+    fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
 }
 
 // ── RAII wrapper for CFTypeRef ───────────────────────────────────────────────
@@ -410,6 +411,7 @@ pub fn get_focused_app_elements() -> Vec<UIElement> {
     if app_element.is_null() {
         return Vec::new();
     }
+    unsafe { AXUIElementSetMessagingTimeout(app_element, 1.0) };
     let app_ref = CfRef::new(app_element);
 
     // ── Phase 1: fast density probe ──────────────────────────────────────────
