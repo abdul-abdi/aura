@@ -24,6 +24,9 @@ const CLICK_COUNT_MAX: u32 = 3;
 /// Maximum absolute scroll amount in either axis.
 const SCROLL_MAX: i32 = 1000;
 
+/// Maximum timeout allowed for a single run_applescript call.
+const MAX_APPLESCRIPT_TIMEOUT_SECS: u64 = 120;
+
 pub(crate) async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
@@ -68,7 +71,8 @@ pub(crate) async fn execute_tool(
             let timeout = args
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(30);
+                .unwrap_or(30)
+                .min(MAX_APPLESCRIPT_TIMEOUT_SECS);
             let result = executor.run(script, language, timeout).await;
 
             // Detect Automation denial from osascript stderr (covers cases where
@@ -200,8 +204,14 @@ pub(crate) async fn execute_tool(
             .await
         }
         "click" => {
-            let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let raw_x = match args.get("x").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return serde_json::json!({"error": "missing required parameter: x"}),
+            };
+            let raw_y = match args.get("y").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return serde_json::json!({"error": "missing required parameter: y"}),
+            };
             let x = dims.to_logical_x(raw_x);
             let y = dims.to_logical_y(raw_y);
             let button = args
