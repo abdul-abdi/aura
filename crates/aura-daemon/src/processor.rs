@@ -22,8 +22,10 @@ use super::cloud::memory_op;
 use super::tools;
 
 /// Minimum allowed calibrated threshold — prevents the gate from being set
-/// so low that any noise triggers a barge-in.
-pub(crate) const CALIBRATION_THRESHOLD_MIN: f32 = 0.02;
+/// so low that speaker bleed-through triggers a false barge-in.
+/// Set above the typical speaker-to-mic bleed range (0.005-0.03 RMS at
+/// moderate volume) so that only direct speech passes through.
+pub(crate) const CALIBRATION_THRESHOLD_MIN: f32 = 0.05;
 
 /// Maximum allowed calibrated threshold — prevents the gate from being set
 /// so high that real speech is suppressed.
@@ -74,6 +76,21 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let state_change_mutex = Arc::new(tokio::sync::Mutex::new(()));
     let held_keys: Arc<std::sync::Mutex<std::collections::HashSet<u16>>> =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+    // Startup cleanup: release all modifier keys in case a previous
+    // daemon run was killed without releasing them (e.g. SIGKILL, panic).
+    for &kc in &[
+        56_u16, // kVK_Shift (left)
+        60,     // kVK_RightShift
+        59,     // kVK_Control (left)
+        62,     // kVK_RightControl
+        58,     // kVK_Option (left)
+        61,     // kVK_RightOption
+        55,     // kVK_Command (left)
+        54,     // kVK_RightCommand
+    ] {
+        let _ = aura_input::keyboard::key_up(kc);
+    }
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
     // Updated by the capture loop after each successful capture.
@@ -823,6 +840,31 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             message: "Disconnected".into(),
                         });
 
+                        // Wait for in-flight tool tasks to finish before consolidation
+                        // so their results are included in fact extraction.
+                        {
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                            let mut warned = false;
+                            loop {
+                                let remaining = tools_in_flight.load(Ordering::Acquire);
+                                if remaining == 0 {
+                                    break;
+                                }
+                                if tokio::time::Instant::now() >= deadline {
+                                    tracing::warn!(
+                                        remaining,
+                                        "Timed out waiting for in-flight tools, proceeding with consolidation"
+                                    );
+                                    break;
+                                }
+                                if !warned {
+                                    tracing::info!(remaining, "Waiting for in-flight tools to complete before consolidation");
+                                    warned = true;
+                                }
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                            }
+                        }
+
                         // Run end-of-session consolidation (extracts facts + sets summary)
                         {
                             let es_sid = session_id.clone();
@@ -887,7 +929,12 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                                     fb_key,
                                                 ).await
                                             {
-                                                tracing::warn!("Firestore sync failed: {e}");
+                                                tracing::warn!("Firestore sync failed, queuing for retry: {e}");
+                                                super::cloud::queue_pending_sync(
+                                                    &response.facts,
+                                                    &response.summary,
+                                                    &fs_sid,
+                                                );
                                             }
                                         } else {
                                             // No facts extracted — just end session normally
@@ -986,19 +1033,19 @@ mod tests {
 
     #[test]
     fn test_calibrate_moderate_ambient_noise() {
-        // Mean=0.01, stddev=0.005 → threshold = 0.01 + 0.015 = 0.025
+        // Mean=0.03, stddev=0.01 → threshold = 0.03 + 0.03 = 0.06
         let mut samples = Vec::with_capacity(100);
         for _ in 0..50 {
-            samples.push(0.005);
+            samples.push(0.02);
         }
         for _ in 0..50 {
-            samples.push(0.015);
+            samples.push(0.04);
         }
         let threshold = calibrate_barge_in_threshold(&samples);
-        // mean = 0.01, stddev = 0.005, expected = 0.025
+        // mean = 0.03, stddev = 0.01, expected = 0.06
         assert!(threshold > CALIBRATION_THRESHOLD_MIN);
         assert!(threshold < CALIBRATION_THRESHOLD_MAX);
-        assert!((threshold - 0.025).abs() < 1e-5);
+        assert!((threshold - 0.06).abs() < 1e-4);
     }
 
     #[test]

@@ -25,8 +25,8 @@ use crate::processor;
 /// Default RMS energy threshold for mic gating while Aura is speaking.
 /// Used as the initial value before adaptive calibration completes.
 /// Direct speech into the mic is typically 0.05-0.3 RMS; speaker bleed-through
-/// from laptop speakers is usually 0.005-0.02.
-const BARGE_IN_ENERGY_THRESHOLD_DEFAULT: f32 = 0.04;
+/// from laptop speakers is usually 0.005-0.03 (up to 0.05 at high volume).
+const BARGE_IN_ENERGY_THRESHOLD_DEFAULT: f32 = 0.05;
 
 /// Number of initial audio chunks to collect for ambient noise calibration.
 /// At ~5ms per chunk this is roughly 500ms of audio.
@@ -35,6 +35,17 @@ const CALIBRATION_CHUNK_COUNT: usize = 100;
 /// Bounded mic bridge channel capacity — prevents unbounded memory growth
 /// during backpressure from the Gemini WebSocket.
 const MIC_BRIDGE_CAPACITY: usize = 256;
+
+/// Multiplier applied to the barge-in threshold while audio is actively
+/// playing.  Speaker bleed-through on MacBook hardware can reach 0.03-0.05
+/// RMS at high volume, so we inflate the threshold to avoid false triggers.
+const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.8;
+
+/// Number of consecutive audio chunks that must exceed the barge-in energy
+/// threshold before we forward audio during playback.  Prevents transient
+/// loud passages in the AI's speech from triggering a false barge-in.
+/// At ~5 ms per chunk, 3 chunks ≈ 15 ms of sustained speech.
+const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 3;
 
 /// Destructive action guardrail injected into the system prompt.
 pub(crate) const DESTRUCTIVE_ACTION_GUARDRAIL: &str = "\n\nSafety — Destructive Actions:\
@@ -113,6 +124,15 @@ pub(crate) async fn run_daemon(
         } else {
             tracing::debug!("Skipping Firestore facts load: firebase_api_key not configured");
         }
+    }
+
+    // Flush any pending Firestore syncs from previous sessions that failed.
+    if let (Some(project_id), Some(device_id)) = (
+        &gemini_config.firestore_project_id,
+        &gemini_config.device_id,
+    ) && let Some(firebase_api_key) = &gemini_config.firebase_api_key
+    {
+        cloud::flush_pending_syncs(project_id, device_id, firebase_api_key).await;
     }
 
     // Start IPC server for UI clients (SwiftUI panel)
@@ -275,10 +295,10 @@ pub(crate) async fn run_daemon(
     }
 
     // Bridge std::sync::mpsc -> tokio -> session.send_audio()
-    // Fully mutes the mic while Aura is playing back audio to prevent the AI
-    // from hearing its own voice through the MacBook speakers.  A 300 ms
-    // post-playback guard absorbs room reverb after the speaker goes quiet.
-    // Barge-in can be re-enabled later with proper AEC.
+    // During playback, mic audio is energy-gated rather than fully muted:
+    // direct user speech (0.05-0.3 RMS) passes through while speaker
+    // bleed-through (0.005-0.03 RMS) is filtered out, enabling barge-in.
+    // A 300 ms post-playback reverb guard uses the same energy gating.
     let audio_session = Arc::clone(&session);
     let audio_cancel = cancel.clone();
     let bridge_shutdown = Arc::clone(&mic_shutdown);
@@ -318,6 +338,8 @@ pub(crate) async fn run_daemon(
         let mut prev_playing = false;
         // How long to keep muting after playback ends (absorbs room reverb).
         const POST_PLAYBACK_MUTE_MS: u128 = 300;
+        // Consecutive frames above threshold during playback (prevents transients).
+        let mut barge_in_streak: u32 = 0;
 
         loop {
             tokio::select! {
@@ -341,38 +363,65 @@ pub(crate) async fn run_daemon(
                         }
                     }
 
-                    // Full mic mute during playback to prevent audio feedback loop.
-                    // On MacBook hardware the speakers are close enough to the mic
-                    // that the AI's own voice easily exceeds any energy threshold.
-                    // Barge-in can be re-enabled later with proper AEC.
+                    // --- Barge-in: energy-gated mic during playback ---
+                    // Forward audio to Gemini only when RMS energy exceeds the
+                    // calibrated threshold, filtering out speaker bleed-through
+                    // while allowing direct user speech to trigger interruption.
                     let currently_playing = bridge_audio_playing.load(Ordering::Acquire);
                     let gemini_speaking = bridge_speaking.load(Ordering::Acquire);
 
                     // Detect transition: playing → stopped.  Arm the reverb guard.
                     if prev_playing && !currently_playing {
                         playback_stopped_at = Some(std::time::Instant::now());
-                        tracing::debug!("Playback stopped — entering post-playback mute guard");
+                        barge_in_streak = 0;
+                        tracing::debug!("Playback stopped — entering post-playback reverb guard");
                     }
                     prev_playing = currently_playing;
 
                     if currently_playing {
-                        continue; // Fully mute mic while speaker is active
-                    }
-
-                    if gemini_speaking {
+                        // Energy-gate with inflated threshold: the multiplier
+                        // accounts for speaker bleed at high system volume.
+                        let energy = processor::rms_energy(&samples);
+                        let base = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
+                        let threshold = base * PLAYBACK_THRESHOLD_MULTIPLIER;
+                        if energy < threshold {
+                            barge_in_streak = 0;
+                            continue; // Below threshold — likely speaker echo
+                        }
+                        // Require sustained speech across consecutive frames
+                        // to avoid transient spikes from loud AI passages.
+                        barge_in_streak = barge_in_streak.saturating_add(1);
+                        if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
+                            continue; // Not enough consecutive frames yet
+                        }
+                        if barge_in_streak == BARGE_IN_CONSECUTIVE_FRAMES {
+                            tracing::info!(
+                                energy,
+                                threshold,
+                                "Barge-in: sustained user speech detected during playback"
+                            );
+                        }
+                        // Don't reset streak — keep forwarding all above-threshold
+                        // frames so Gemini receives continuous audio for VAD.
+                    } else if gemini_speaking {
                         // Gemini is still sending audio data but the pre-buffer
                         // hasn't flushed to the hardware yet (~80 ms window).
-                        // Mute to be safe.
+                        // Mute to prevent premature interruption before the
+                        // user hears anything.
                         continue;
-                    }
-
-                    // Post-playback reverb guard: keep muting for 300 ms after the
-                    // speaker goes silent to absorb room echo.
-                    if let Some(stopped_at) = playback_stopped_at {
-                        if stopped_at.elapsed().as_millis() < POST_PLAYBACK_MUTE_MS {
-                            continue; // Still within reverb-guard window
+                    } else if let Some(stopped_at) = playback_stopped_at {
+                        // Post-playback reverb guard: energy-gate for 300 ms
+                        // after the speaker stops to absorb room echo.
+                        let in_reverb_window = stopped_at.elapsed().as_millis() < POST_PLAYBACK_MUTE_MS;
+                        if in_reverb_window {
+                            let energy = processor::rms_energy(&samples);
+                            let threshold = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
+                            if energy < threshold {
+                                continue; // Reverb guard: below threshold
+                            }
+                            tracing::debug!(energy, threshold, "Speech during reverb guard — forwarding");
                         }
-                        playback_stopped_at = None; // Guard expired — allow mic through
+                        playback_stopped_at = None;
                     }
 
                     if let Err(e) = audio_session.send_audio(&samples) {
