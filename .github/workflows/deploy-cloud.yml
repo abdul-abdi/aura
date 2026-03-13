@@ -99,9 +99,12 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
+          # gcloud run deploy --source expects Dockerfile at source root.
+          # Proxy Dockerfile lives in crates/aura-proxy/ but needs the full
+          # workspace as build context, so copy it to root for the deploy.
+          cp crates/aura-proxy/Dockerfile Dockerfile
           gcloud run deploy aura-proxy-${{ env.ENV_SUFFIX }} \
             --source . \
-            --dockerfile crates/aura-proxy/Dockerfile \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --allow-unauthenticated \
