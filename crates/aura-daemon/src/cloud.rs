@@ -132,11 +132,7 @@ fn pending_sync_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Queue a failed Firestore sync for later retry.
-pub(crate) fn queue_pending_sync(
-    facts: &[ExtractedFact],
-    summary: &str,
-    session_id: &str,
-) {
+pub(crate) fn queue_pending_sync(facts: &[ExtractedFact], summary: &str, session_id: &str) {
     let Some(dir) = pending_sync_dir() else {
         tracing::warn!("Cannot determine data directory for pending sync queue");
         return;
@@ -173,11 +169,7 @@ pub(crate) fn queue_pending_sync(
 
 /// Attempt to flush all pending Firestore syncs. Called at daemon startup
 /// after a successful Firestore connection is confirmed.
-pub(crate) async fn flush_pending_syncs(
-    project_id: &str,
-    device_id: &str,
-    firebase_api_key: &str,
-) {
+pub(crate) async fn flush_pending_syncs(project_id: &str, device_id: &str, firebase_api_key: &str) {
     let Some(dir) = pending_sync_dir() else {
         return;
     };
@@ -232,7 +224,9 @@ pub(crate) async fn flush_pending_syncs(
                         let _ = std::fs::remove_file(&path); // Remove corrupt file
                     }
                 },
-                Err(e) => tracing::warn!(path = %path.display(), "Failed to read pending sync: {e}"),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), "Failed to read pending sync: {e}")
+                }
             }
         }
     }

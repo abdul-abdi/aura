@@ -794,7 +794,7 @@ fn encode_audio_message(pcm: &[f32]) -> RealtimeAudioMessage {
 
 /// Convert 16-bit LE PCM bytes to f32 PCM [-1.0, 1.0].
 fn pcm_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         tracing::debug!(
             len = bytes.len(),
             "Odd-length audio payload, trailing byte will be skipped"

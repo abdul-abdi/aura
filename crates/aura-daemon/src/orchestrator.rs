@@ -130,10 +130,9 @@ pub(crate) async fn run_daemon(
     if let (Some(project_id), Some(device_id)) = (
         &gemini_config.firestore_project_id,
         &gemini_config.device_id,
-    ) {
-        if let Some(firebase_api_key) = &gemini_config.firebase_api_key {
-            cloud::flush_pending_syncs(project_id, device_id, firebase_api_key).await;
-        }
+    ) && let Some(firebase_api_key) = &gemini_config.firebase_api_key
+    {
+        cloud::flush_pending_syncs(project_id, device_id, firebase_api_key).await;
     }
 
     // Start IPC server for UI clients (SwiftUI panel)

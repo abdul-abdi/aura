@@ -920,8 +920,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             // Sync facts to Firestore if config is available
                                             if let (Some(project_id), Some(device_id), Some(fb_key)) =
                                                 (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
-                                            {
-                                                if let Err(e) = super::cloud::sync_session_to_firestore(
+                                                && let Err(e) = super::cloud::sync_session_to_firestore(
                                                     &response.facts,
                                                     &response.summary,
                                                     &fs_sid,
@@ -929,14 +928,13 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                                     device_id,
                                                     fb_key,
                                                 ).await
-                                                {
-                                                    tracing::warn!("Firestore sync failed, queuing for retry: {e}");
-                                                    super::cloud::queue_pending_sync(
-                                                        &response.facts,
-                                                        &response.summary,
-                                                        &fs_sid,
-                                                    );
-                                                }
+                                            {
+                                                tracing::warn!("Firestore sync failed, queuing for retry: {e}");
+                                                super::cloud::queue_pending_sync(
+                                                    &response.facts,
+                                                    &response.summary,
+                                                    &fs_sid,
+                                                );
                                             }
                                         } else {
                                             // No facts extracted — just end session normally
