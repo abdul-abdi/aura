@@ -121,6 +121,37 @@ pub fn press_key_pid(key: CGKeyCode, modifiers: &[&str], pid: i32) -> Result<()>
     Ok(())
 }
 
+/// Press a key down without releasing. Caller must call key_up later.
+pub fn key_down(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
+    let source = event_source()?;
+    let mut flags = CGEventFlags::empty();
+    for m in modifiers {
+        match *m {
+            "cmd" | "command" => flags |= CGEventFlags::CGEventFlagCommand,
+            "shift" => flags |= CGEventFlags::CGEventFlagShift,
+            "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
+            "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
+            _ => {}
+        }
+    }
+    let down = CGEvent::new_keyboard_event(source, key, true)
+        .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
+    down.set_flags(flags);
+    down.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
+/// Release a previously held key.
+pub fn key_up(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
+    let source = event_source()?;
+    let _ = modifiers;
+    let up = CGEvent::new_keyboard_event(source, key, false)
+        .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+    up.set_flags(CGEventFlags::CGEventFlagNull);
+    up.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
 /// Map common key names to macOS virtual keycodes.
 pub fn keycode_from_name(name: &str) -> Option<CGKeyCode> {
     match name.to_lowercase().as_str() {
@@ -201,6 +232,11 @@ pub fn keycode_from_name(name: &str) -> Option<CGKeyCode> {
         "." | "period" => Some(47),
         "/" | "slash" => Some(44),
         "`" | "grave" => Some(50),
+        // Modifier keys
+        "shift" => Some(56),
+        "cmd" | "command" => Some(55),
+        "alt" | "option" => Some(58),
+        "ctrl" | "control" => Some(59),
         _ => None,
     }
 }
@@ -432,8 +468,33 @@ mod tests {
         assert_eq!(keycode_from_name("unknown"), None);
         assert_eq!(keycode_from_name(""), None);
         assert_eq!(keycode_from_name("f13"), None);
-        assert_eq!(keycode_from_name("ctrl"), None);
-        assert_eq!(keycode_from_name("shift"), None);
-        assert_eq!(keycode_from_name("cmd"), None);
+    }
+
+    // --- Modifier keys ---
+
+    #[test]
+    fn keycode_modifier_keys() {
+        assert_eq!(keycode_from_name("shift"), Some(56));
+        assert_eq!(keycode_from_name("Shift"), Some(56));
+        assert_eq!(keycode_from_name("cmd"), Some(55));
+        assert_eq!(keycode_from_name("command"), Some(55));
+        assert_eq!(keycode_from_name("alt"), Some(58));
+        assert_eq!(keycode_from_name("option"), Some(58));
+        assert_eq!(keycode_from_name("ctrl"), Some(59));
+        assert_eq!(keycode_from_name("control"), Some(59));
+    }
+
+    // --- key_down / key_up ---
+
+    #[test]
+    fn key_down_creates_event_without_panic() {
+        let result = key_down(56, &[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn key_up_creates_event_without_panic() {
+        let result = key_up(56, &[]);
+        assert!(result.is_ok());
     }
 }

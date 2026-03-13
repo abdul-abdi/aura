@@ -6,7 +6,7 @@ use serde_json::json;
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
 /// Returns a `Vec<Tool>` with:
-/// - 14 function declarations for macOS automation and computer control
+/// - 17 function declarations for macOS automation and computer control
 /// - Google Search grounding (current events, weather, facts, etc.)
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![
@@ -307,6 +307,30 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     behavior: Some("NON_BLOCKING".into()),
                 },
                 FunctionDeclaration {
+                    name: "save_memory".into(),
+                    description: "Save a fact to persistent memory for recall in future sessions. \
+                        Use for user preferences, learned workflows, and app-specific knowledge. \
+                        Don't save transient observations. \
+                        Invoke this tool only after you have identified something worth remembering."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "enum": ["preference", "habit", "entity", "task", "context"],
+                                "description": "Category of the fact"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "The fact to remember"
+                            }
+                        },
+                        "required": ["category", "content"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
                     name: "key_state".into(),
                     description: "Hold or release a key. Use before drag to hold Shift/Option \
                         during drag. Always release keys after use. \
@@ -324,6 +348,24 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             }
                         },
                         "required": ["key", "action"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "context_menu_click".into(),
+                    description: "Right-click at coordinates and click a menu item by label. \
+                        Atomic — no timing gap. Use instead of separate right-click + click \
+                        for context menus. \
+                        Invoke this tool only after you know the coordinates and menu item label."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "number", "description": "X pixel coordinate for right-click" },
+                            "y": { "type": "number", "description": "Y pixel coordinate for right-click" },
+                            "item_label": { "type": "string", "description": "Label of the menu item to click (case-insensitive substring match)" }
+                        },
+                        "required": ["x", "y", "item_label"]
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },
@@ -349,7 +391,7 @@ mod tests {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 2, "Function declarations + Google Search");
         let decls = tools[0].function_declarations.as_ref().unwrap();
-        assert_eq!(decls.len(), 15, "Should have 15 function declarations");
+        assert_eq!(decls.len(), 17, "Should have 17 function declarations");
     }
 
     #[test]
@@ -374,7 +416,9 @@ mod tests {
                 "activate_app",
                 "click_menu_item",
                 "write_clipboard",
+                "save_memory",
                 "key_state",
+                "context_menu_click",
             ]
         );
     }
@@ -393,7 +437,7 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 15);
+        assert_eq!(decls.len(), 17);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
@@ -401,7 +445,9 @@ mod tests {
         assert_eq!(decls[8]["name"], "drag");
         assert_eq!(decls[9]["name"], "recall_memory");
         assert_eq!(decls[13]["name"], "write_clipboard");
-        assert_eq!(decls[14]["name"], "key_state");
+        assert_eq!(decls[14]["name"], "save_memory");
+        assert_eq!(decls[15]["name"], "key_state");
+        assert_eq!(decls[16]["name"], "context_menu_click");
         // Google Search
         assert!(value[1]["googleSearch"].is_object());
     }

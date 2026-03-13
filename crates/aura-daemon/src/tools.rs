@@ -539,10 +539,9 @@ pub(crate) async fn execute_tool(
             let mut found_item = None;
             for _ in 0..10 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let items =
-                    tokio::task::spawn_blocking(aura_screen::accessibility::get_menu_items)
-                        .await
-                        .unwrap_or_default();
+                let items = tokio::task::spawn_blocking(aura_screen::accessibility::get_menu_items)
+                    .await
+                    .unwrap_or_default();
                 let label_lower = item_label.to_lowercase();
                 if let Some(item) = items.into_iter().find(|el| {
                     el.label

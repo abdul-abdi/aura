@@ -302,6 +302,58 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             continue;  // Skip the background tool spawn
                         }
 
+                        // save_memory stays inline — persists facts immediately
+                        if name == "save_memory" {
+                            let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("context");
+                            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+                            let response = if content.is_empty() {
+                                serde_json::json!({"success": false, "error": "content is required"})
+                            } else {
+                                let cat = category.to_string();
+                                let cont = content.to_string();
+                                let sid = session_id.clone();
+
+                                match memory_op(&memory, move |mem| {
+                                    mem.add_fact(&sid, &cat, &cont, None, 0.7)
+                                }).await {
+                                    Some(()) => {
+                                        serde_json::json!({
+                                            "success": true,
+                                            "saved": { "category": category, "content_length": content.len() }
+                                        })
+                                    }
+                                    None => serde_json::json!({"success": false, "error": "Failed to save fact"}),
+                                }
+                            };
+
+                            let tool_success = response.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                            bus.send(AuraEvent::ToolExecuted {
+                                name: name.clone(),
+                                success: tool_success,
+                                output: response.to_string(),
+                            });
+                            let _ = ipc_tx.send(DaemonEvent::ToolStatus {
+                                name: name.clone(),
+                                status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
+                                output: Some(response.to_string()),
+                                summary: None,
+                            });
+
+                            {
+                                let tr_sid = session_id.clone();
+                                let tr_content = response.to_string();
+                                memory_op(&memory, move |mem| {
+                                    mem.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
+                                }).await;
+                            }
+
+                            if let Err(e) = session.send_tool_response(id, name, response).await {
+                                tracing::error!("Failed to send save_memory tool response: {e}");
+                            }
+                            continue;  // Skip the background tool spawn
+                        }
+
                         // All other tools: spawn in background so audio keeps flowing
                         let tool_session = Arc::clone(&session);
                         let tool_bus = bus.clone();
