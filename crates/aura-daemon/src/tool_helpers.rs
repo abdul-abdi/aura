@@ -79,8 +79,11 @@ pub(crate) fn click_element_inner(
             if all_elements.is_empty() {
                 return serde_json::json!({
                     "success": false,
-                    "error": "No interactive UI elements found. The app may not expose accessibility data, \
-                              or Accessibility permission may not be fully granted.",
+                    "error": "No interactive UI elements found.",
+                    "hint": "use_coordinates",
+                    "suggestion": "This app may not expose accessibility data. Use the 'click' tool \
+                                    with pixel coordinates based on what you see in the screenshot instead. \
+                                    Estimate the center of the target element visually.",
                 });
             }
 
@@ -103,9 +106,17 @@ pub(crate) fn click_element_inner(
                 return serde_json::json!({
                     "success": false,
                     "error": format!(
-                        "No element matching label={:?} role={:?}. Available elements: {}",
-                        label, role, alternatives.join(", ")
+                        "No element matching label={:?} role={:?}.",
+                        label, role
                     ),
+                    "available_elements": alternatives,
+                    "hint": if alternatives.len() <= 3 { "sparse_ax_tree" } else { "element_not_found" },
+                    "suggestion": if alternatives.len() <= 3 {
+                        "This app has very few accessibility elements. Try using the 'click' tool \
+                         with pixel coordinates from the screenshot instead."
+                    } else {
+                        "The element wasn't found. Check the available_elements list for the correct label/role."
+                    },
                 });
             }
 
@@ -556,6 +567,20 @@ mod tests {
         assert!(script.contains("tell process \"MyApp\""));
         assert!(script.contains("menu item \"Save\""));
         assert!(script.contains("menu bar item \"File\""));
+    }
+
+    #[test]
+    fn click_element_empty_tree_suggests_coordinate_fallback() {
+        let response = serde_json::json!({
+            "success": false,
+            "error": "No interactive UI elements found.",
+            "hint": "use_coordinates",
+            "suggestion": "This app may not expose accessibility data. Use the 'click' tool \
+                            with pixel coordinates based on what you see in the screenshot instead. \
+                            Estimate the center of the target element visually.",
+        });
+        assert_eq!(response["hint"], "use_coordinates");
+        assert!(response["suggestion"].as_str().unwrap().contains("click"));
     }
 
     #[test]
