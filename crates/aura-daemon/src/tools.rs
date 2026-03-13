@@ -176,6 +176,8 @@ pub(crate) async fn execute_tool(
                 "pre_click_move",
             )
             .await;
+            // Brief delay to let apps register hover state before clicking
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             let btn = button.clone();
             run_with_pid_fallback(
                 move |pid| aura_input::mouse::click_pid(x, y, &btn, count, pid),

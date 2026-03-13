@@ -257,6 +257,26 @@ pub(crate) fn truncate_tool_response(response: &mut serde_json::Value) {
             .get("stdout")
             .and_then(|v| v.as_str())
             .map(|s| truncate_str(s, 500));
+        let warning = obj
+            .get("warning")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, 200));
+        let post_state = obj.get("post_state").cloned().map(|mut ps| {
+            // Trim focused_element details if too large
+            if let Some(fe) = ps.get_mut("focused_element") {
+                let truncated = fe
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| v.len() > 200)
+                    .map(|v| truncate_str(v, 200));
+                if let Some(t) = truncated {
+                    fe.as_object_mut()
+                        .unwrap()
+                        .insert("value".to_string(), serde_json::Value::String(t));
+                }
+            }
+            ps
+        });
         obj.clear();
         if let Some(s) = success {
             obj.insert("success".to_string(), s);
@@ -269,6 +289,12 @@ pub(crate) fn truncate_tool_response(response: &mut serde_json::Value) {
         }
         if let Some(o) = stdout {
             obj.insert("stdout".to_string(), serde_json::Value::String(o));
+        }
+        if let Some(w) = warning {
+            obj.insert("warning".to_string(), serde_json::Value::String(w));
+        }
+        if let Some(ps) = post_state {
+            obj.insert("post_state".to_string(), ps);
         }
         obj.insert(
             "truncated".to_string(),
@@ -301,6 +327,7 @@ pub(crate) fn is_state_changing_tool(name: &str) -> bool {
             | "click_element"
             | "activate_app"
             | "click_menu_item"
+            | "run_applescript"
     )
 }
 
@@ -372,6 +399,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_applescript_is_state_changing() {
+        assert!(is_state_changing_tool("run_applescript"));
+    }
 
     #[test]
     fn truncate_preserves_error_and_stdout() {
@@ -447,5 +479,38 @@ mod tests {
         assert!(script.contains("tell process \"MyApp\""));
         assert!(script.contains("menu item \"Save\""));
         assert!(script.contains("menu bar item \"File\""));
+    }
+
+    #[test]
+    fn truncate_preserves_post_state_and_warning() {
+        let large_output = "x".repeat(10_000);
+        let mut response = serde_json::json!({
+            "success": true,
+            "verified": false,
+            "warning": "screen_unchanged_but_element_focused",
+            "stdout": large_output,
+            "post_state": {
+                "frontmost_app": "Safari",
+                "focused_element": {
+                    "role": "AXTextField",
+                    "label": "Address and Search",
+                },
+                "screenshot_delivered": false,
+            }
+        });
+        truncate_tool_response(&mut response);
+        let obj = response.as_object().unwrap();
+        assert!(
+            obj.contains_key("post_state"),
+            "post_state must survive truncation"
+        );
+        assert!(
+            obj.contains_key("warning"),
+            "warning must survive truncation"
+        );
+        assert_eq!(
+            obj["post_state"]["frontmost_app"].as_str().unwrap(),
+            "Safari"
+        );
     }
 }

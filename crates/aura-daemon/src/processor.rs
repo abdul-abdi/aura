@@ -71,6 +71,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let last_frame_hash = Arc::new(AtomicU64::new(0));
     let last_sent_hash = Arc::new(AtomicU64::new(0));
     let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
+    let state_change_mutex = Arc::new(tokio::sync::Mutex::new(()));
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
     // Updated by the capture loop after each successful capture.
@@ -312,6 +313,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         let tool_capture_trigger = capture_trigger.clone();
                         let tool_cap_notify = cap_notify.clone();
                         let tool_semaphore = Arc::clone(&tool_semaphore);
+                        let tool_state_mutex = state_change_mutex.clone();
                         let tool_tokens = Arc::clone(&active_tool_tokens);
                         let tool_inflight = Arc::clone(&tools_in_flight);
                         let tool_permission_error = Arc::clone(&has_permission_error);
@@ -333,13 +335,22 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         }
 
                         tokio::spawn(async move {
-                            let _permit = match tool_semaphore.acquire().await {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    tracing::error!("Tool semaphore closed");
-                                    return;
-                                }
-                            };
+                            // State-changing tools run sequentially; others use the semaphore
+                            let _state_guard;
+                            let _permit;
+                            if tools::is_state_changing_tool(&name) {
+                                _state_guard = Some(tool_state_mutex.lock().await);
+                                _permit = None;
+                            } else {
+                                _state_guard = None;
+                                _permit = Some(match tool_semaphore.acquire().await {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        tracing::error!("Tool semaphore closed");
+                                        return;
+                                    }
+                                });
+                            }
 
                             // Increment tools-in-flight counter AFTER acquiring semaphore.
                             // This prevents counter leak when semaphore is closed.
@@ -356,7 +367,16 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
 
                             let pre_hash = if tools::is_state_changing_tool(&name) {
-                                Some(tool_last_hash.load(Ordering::Acquire))
+                                // Allow tools to opt out of verification (e.g. run_applescript with verify: false)
+                                let verify = args
+                                    .get("verify")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                if verify {
+                                    Some(tool_last_hash.load(Ordering::Acquire))
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             };

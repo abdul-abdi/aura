@@ -38,6 +38,10 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             "timeout_secs": {
                                 "type": "integer",
                                 "description": "Max execution time in seconds. Default: 30"
+                            },
+                            "verify": {
+                                "type": "boolean",
+                                "description": "Whether to verify screen changed after execution. Default true. Set false for read-only queries that don't modify the screen."
                             }
                         },
                         "required": ["script"]
