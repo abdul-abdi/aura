@@ -206,7 +206,10 @@ mod tests {
         let s = el.summary();
         assert!(!s.contains("\"\""), "no empty quotes when label is None");
         assert!(s.contains("textfield"), "role without AX prefix");
-        assert!(s.contains("value=\"hello\""), "value should appear in summary");
+        assert!(
+            s.contains("value=\"hello\""),
+            "value should appear in summary"
+        );
     }
 
     #[test]
@@ -221,7 +224,10 @@ mod tests {
             parent_label: None,
         };
         let s = el.summary();
-        assert!(s.contains("value=\"rust lang\""), "value should appear when different from label");
+        assert!(
+            s.contains("value=\"rust lang\""),
+            "value should appear when different from label"
+        );
     }
 
     #[test]
@@ -237,7 +243,11 @@ mod tests {
         };
         let s = el.summary();
         // value should not appear twice when it duplicates the label
-        assert_eq!(s.matches("Save").count(), 1, "value should not duplicate label");
+        assert_eq!(
+            s.matches("Save").count(),
+            1,
+            "value should not duplicate label"
+        );
     }
 
     #[test]
@@ -254,10 +264,19 @@ mod tests {
         };
         let s = el.summary();
         assert!(s.contains("value=\""), "value should appear");
-        assert!(s.contains("...\""), "long value should be truncated with ellipsis");
+        assert!(
+            s.contains("...\""),
+            "long value should be truncated with ellipsis"
+        );
         // the truncated portion should be exactly 100 'a' chars
-        assert!(s.contains(&"a".repeat(100)), "first 100 chars should be present");
-        assert!(!s.contains(&"a".repeat(101)), "101st char should not be present");
+        assert!(
+            s.contains(&"a".repeat(100)),
+            "first 100 chars should be present"
+        );
+        assert!(
+            !s.contains(&"a".repeat(101)),
+            "101st char should not be present"
+        );
     }
 
     #[test]
@@ -272,7 +291,10 @@ mod tests {
             parent_label: None,
         };
         let s = el.summary();
-        assert!(!s.contains("value="), "empty value should not appear in summary");
+        assert!(
+            !s.contains("value="),
+            "empty value should not appear in summary"
+        );
     }
 
     #[test]

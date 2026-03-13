@@ -437,8 +437,17 @@ pub(crate) async fn execute_tool(
         }
         "activate_app" => {
             const BLOCKED_APPS: &[&str] = &[
-                "terminal", "iterm", "iterm2", "kitty", "alacritty", "warp",
-                "hyper", "tabby", "rio", "wezterm", "ghostty",
+                "terminal",
+                "iterm",
+                "iterm2",
+                "kitty",
+                "alacritty",
+                "warp",
+                "hyper",
+                "tabby",
+                "rio",
+                "wezterm",
+                "ghostty",
             ];
 
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -450,7 +459,10 @@ pub(crate) async fn execute_tool(
             }
 
             let name_lower = name.to_lowercase();
-            if BLOCKED_APPS.iter().any(|b| name_lower == *b || name_lower.contains(b)) {
+            if BLOCKED_APPS
+                .iter()
+                .any(|b| name_lower == *b || name_lower.contains(b))
+            {
                 return serde_json::json!({
                     "error": "blocked_app",
                     "message": "Cannot activate terminal apps for safety — Aura could accidentally execute commands. Ask the user to switch to it manually."
