@@ -100,7 +100,10 @@ pub(crate) async fn execute_tool(
                 Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
                 Err(e) => return serde_json::json!({ "success": false, "error": format!("{e}") }),
             };
-            // Capture high-res frame and run SoM overlay for visual element targeting
+            // Capture high-res frame and run SoM overlay for visual element targeting.
+            // SoM runs on the 2560px high-res capture for better edge detection, but
+            // the mark coordinates must be scaled to the streaming-frame space (1920px)
+            // that Gemini uses for click(x,y) calls.
             if let Ok(Ok(frame)) =
                 tokio::task::spawn_blocking(aura_screen::capture::capture_screen_high_res).await
                 && let Ok(jpeg_bytes) =
@@ -109,17 +112,25 @@ pub(crate) async fn execute_tool(
                     aura_screen::capture::annotate_with_som(&jpeg_bytes)
                 && !marks.is_empty()
             {
-                // Note: _annotated_b64 (the overlay image) is intentionally discarded.
-                // Gemini tool responses are JSON text — inline images aren't supported.
-                // The mark coordinates below give Gemini enough to target clicks precisely.
+                // Scale from high-res (2560px) to streaming-frame space (dims.img_w, typically 1920px).
+                // This ensures Gemini can pass mark coordinates directly to click(x, y).
+                let scale_x = dims.img_w as f64 / frame.width.max(1) as f64;
+                let scale_y = dims.img_h as f64 / frame.height.max(1) as f64;
                 let marks_json: Vec<serde_json::Value> = marks
                     .iter()
                     .map(|m| {
+                        let cx = ((m.x + m.width / 2) as f64 * scale_x) as u32;
+                        let cy = ((m.y + m.height / 2) as f64 * scale_y) as u32;
                         serde_json::json!({
                             "mark": m.id,
-                            "center_x": m.x + m.width / 2,
-                            "center_y": m.y + m.height / 2,
-                            "bounds": { "x": m.x, "y": m.y, "w": m.width, "h": m.height },
+                            "center_x": cx,
+                            "center_y": cy,
+                            "bounds": {
+                                "x": (m.x as f64 * scale_x) as u32,
+                                "y": (m.y as f64 * scale_y) as u32,
+                                "w": (m.width as f64 * scale_x) as u32,
+                                "h": (m.height as f64 * scale_y) as u32,
+                            },
                         })
                     })
                     .collect();
