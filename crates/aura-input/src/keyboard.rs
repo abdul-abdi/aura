@@ -51,7 +51,7 @@ pub fn press_key(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
             _ => {
                 return Err(anyhow::anyhow!(
                     "Unknown modifier '{m}'. Valid modifiers: cmd, shift, alt, option, ctrl, control"
-                ))
+                ));
             }
         }
     }
@@ -112,7 +112,7 @@ pub fn press_key_pid(key: CGKeyCode, modifiers: &[&str], pid: i32) -> Result<()>
             _ => {
                 return Err(anyhow::anyhow!(
                     "Unknown modifier '{m}'. Valid modifiers: cmd, shift, alt, option, ctrl, control"
-                ))
+                ));
             }
         }
     }

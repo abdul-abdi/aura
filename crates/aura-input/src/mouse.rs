@@ -379,7 +379,10 @@ mod tests {
         let result = click(f64::NAN, 100.0, "left", 2, &[]);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Invalid coordinates"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("Invalid coordinates"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

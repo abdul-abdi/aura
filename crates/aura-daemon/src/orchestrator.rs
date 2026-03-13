@@ -465,22 +465,23 @@ pub(crate) async fn run_daemon(
                     }
 
                     // VAD gate for non-playback audio
-                    if !currently_playing && playback_stopped_at.is_none() {
-                        if let Some(ref mut v) = vad {
-                            vad_accumulator.extend_from_slice(&samples);
-                            let mut any_speech = false;
-                            while vad_accumulator.len() >= aura_voice::vad::VAD_FRAME_SIZE {
-                                let frame_f32: Vec<f32> = vad_accumulator.drain(..aura_voice::vad::VAD_FRAME_SIZE).collect();
-                                let frame_i16: Vec<i16> = frame_f32.iter()
-                                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                                    .collect();
-                                if v.0.is_speech(&frame_i16) {
-                                    any_speech = true;
-                                }
+                    if !currently_playing
+                        && playback_stopped_at.is_none()
+                        && let Some(ref mut v) = vad
+                    {
+                        vad_accumulator.extend_from_slice(&samples);
+                        let mut any_speech = false;
+                        while vad_accumulator.len() >= aura_voice::vad::VAD_FRAME_SIZE {
+                            let frame_f32: Vec<f32> = vad_accumulator.drain(..aura_voice::vad::VAD_FRAME_SIZE).collect();
+                            let frame_i16: Vec<i16> = frame_f32.iter()
+                                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                                .collect();
+                            if v.0.is_speech(&frame_i16) {
+                                any_speech = true;
                             }
-                            if !any_speech {
-                                continue; // Not speech — don't send to Gemini
-                            }
+                        }
+                        if !any_speech {
+                            continue; // Not speech — don't send to Gemini
                         }
                     }
 
