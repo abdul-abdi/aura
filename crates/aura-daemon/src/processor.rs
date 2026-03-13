@@ -513,14 +513,14 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                             if let Some(pre) = pre_hash {
                                 // Brief delay to let UI settle after the input action
-                                tokio::time::sleep(Duration::from_millis(150)).await;
+                                tokio::time::sleep(tools::settle_delay_for_tool(&name)).await;
 
-                                // Poll for screen hash change: 200ms intervals, 2s timeout, 10 checks max
+                                // Poll for screen hash change: 50ms intervals, 1s timeout, 20 checks max
                                 let mut screen_changed = false;
-                                for _ in 0..10 {
+                                for _ in 0..20 {
                                     let rx = tool_capture_trigger.trigger_and_wait();
                                     tool_cap_notify.notify_one();
-                                    let _ = tokio::time::timeout(Duration::from_millis(200), rx).await;
+                                    let _ = tokio::time::timeout(Duration::from_millis(50), rx).await;
 
                                     let current_hash = tool_last_hash.load(Ordering::Acquire);
                                     if current_hash != pre {
@@ -531,7 +531,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                                 verified = screen_changed;
                                 if !screen_changed {
-                                    verification_reason = Some("screen_unchanged_after_2s");
+                                    verification_reason = Some("screen_unchanged_after_1s");
                                     tracing::warn!(tool = %name, "Screen unchanged after action — verification failed");
                                 }
 

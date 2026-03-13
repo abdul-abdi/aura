@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Frame dimension snapshot used to map image-pixel coordinates to logical macOS points.
 #[derive(Clone, Copy)]
 pub(crate) struct FrameDims {
@@ -22,6 +24,19 @@ impl FrameDims {
             return y;
         }
         y * (self.logical_h as f64 / self.img_h as f64)
+    }
+}
+
+/// Per-tool-type settle delay before polling for screen changes.
+/// Keyboard actions are near-instant; app activation and scripts need more time.
+pub(crate) fn settle_delay_for_tool(name: &str) -> Duration {
+    match name {
+        "type_text" | "press_key" | "move_mouse" => Duration::from_millis(30),
+        "scroll" | "drag" => Duration::from_millis(50),
+        "click" | "click_element" | "context_menu_click" => Duration::from_millis(100),
+        "activate_app" | "click_menu_item" => Duration::from_millis(150),
+        "run_applescript" => Duration::from_millis(200),
+        _ => Duration::from_millis(150), // conservative default
     }
 }
 
@@ -429,6 +444,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_adaptive_settle_delay() {
+        assert_eq!(
+            settle_delay_for_tool("type_text"),
+            Duration::from_millis(30)
+        );
+        assert_eq!(
+            settle_delay_for_tool("press_key"),
+            Duration::from_millis(30)
+        );
+        assert_eq!(settle_delay_for_tool("click"), Duration::from_millis(100));
+        assert_eq!(
+            settle_delay_for_tool("click_element"),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            settle_delay_for_tool("activate_app"),
+            Duration::from_millis(150)
+        );
+        assert_eq!(
+            settle_delay_for_tool("click_menu_item"),
+            Duration::from_millis(150)
+        );
+        assert_eq!(
+            settle_delay_for_tool("run_applescript"),
+            Duration::from_millis(200)
+        );
+        assert_eq!(settle_delay_for_tool("scroll"), Duration::from_millis(50));
+        assert_eq!(settle_delay_for_tool("drag"), Duration::from_millis(50));
+    }
 
     #[test]
     fn run_applescript_is_state_changing() {
