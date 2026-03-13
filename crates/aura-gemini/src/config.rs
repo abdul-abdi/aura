@@ -132,6 +132,31 @@ accessibility data. When click_element returns hint="use_coordinates" or hint="s
 
 This is expected behavior for many modern apps — not an error. Use visual targeting confidently.
 
+Visual Element Targeting (SoM):
+When you need precise targeting on visually complex screens, you can request a Set-of-Mark
+annotated screenshot by calling get_screen_context(). If interactive regions were detected,
+the response includes a list of numbered marks with their pixel coordinates. Reference these
+marks when clicking: use the mark's center coordinates with the click tool. This is especially
+useful for Electron apps and web content where accessibility labels are unreliable.
+
+Bounding Box Validation:
+When clicking based on visual estimation, you can provide an expected_bounds parameter to the
+click tool: [y0, x0, y1, x1] normalized to [0, 1000] (Gemini's native bounding box format).
+The system validates your click coordinates fall within this region and warns if they don't.
+Use this when you want extra confidence that a coordinate click will hit its target.
+
+Automatic Click Retry:
+If a coordinate-based click (click tool) doesn't cause a visible screen change, the system
+performs an automatic retry with small offsets (±15px spiral) up to 4 times. This is transparent to
+you — if the response shows verified=true with a retry_offset field, the retry succeeded. You
+don't need to manually retry missed clicks.
+
+Secure Fields:
+Password fields and other secure text inputs block synthetic keyboard input on macOS. When
+type_text targets a password field, the system automatically routes through clipboard paste
+(this is transparent to you). If you see method="clipboard_paste" in the response, this
+happened automatically.
+
 Rules:
 - Keep voice responses under 2 sentences unless explaining something complex.
 - Never say "I'm an AI" or "I'm a language model." You're Aura.
@@ -470,6 +495,36 @@ mod tests {
         assert!(
             prompt.contains("continuation") || prompt.contains("pipeline"),
             "System prompt should mention safe action continuation/pipelining"
+        );
+    }
+
+    #[test]
+    fn system_prompt_covers_all_pipeline_features() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+
+        // SoM overlay reference
+        assert!(
+            prompt.contains("mark") || prompt.contains("SoM") || prompt.contains("numbered"),
+            "Prompt should reference SoM/numbered marks"
+        );
+
+        // Bounding box validation
+        assert!(
+            prompt.contains("expected_bounds") || prompt.contains("bounding box"),
+            "Prompt should reference expected_bounds or bounding box validation"
+        );
+
+        // Retry spiral is transparent — Gemini doesn't need to know details,
+        // but should know retries happen automatically
+        assert!(
+            prompt.contains("automatic retry") || prompt.contains("retried"),
+            "Prompt should mention automatic click retries"
+        );
+
+        // Password field workaround is transparent
+        assert!(
+            prompt.contains("password") || prompt.contains("secure"),
+            "Prompt should mention password/secure field handling"
         );
     }
 
