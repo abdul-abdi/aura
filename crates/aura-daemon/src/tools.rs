@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
 use aura_screen::macos::MacOSScreenReader;
+use base64::Engine;
 
 use super::is_automation_denied;
 use super::tool_helpers::{
@@ -10,7 +11,8 @@ use super::tool_helpers::{
 
 // Re-export helpers used by processor.rs via `tools::` path
 pub(crate) use super::tool_helpers::{
-    FrameDims, capture_post_state, is_state_changing_tool, truncate_tool_response,
+    FrameDims, MAX_CLICK_RETRIES, SPIRAL_RADIUS, capture_post_state, is_state_changing_tool,
+    point_in_denormalized_bounds, settle_delay_for_tool, spiral_offsets, truncate_tool_response,
 };
 
 /// Maximum characters allowed in a single type_text tool call.
@@ -92,10 +94,56 @@ pub(crate) async fn execute_tool(
                 "stderr": result.stderr,
             })
         }
-        "get_screen_context" => match screen_reader.capture_context() {
-            Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
-            Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-        },
+        "get_screen_context" => {
+            let ctx = screen_reader.capture_context();
+            let mut response = match ctx {
+                Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
+                Err(e) => return serde_json::json!({ "success": false, "error": format!("{e}") }),
+            };
+            // Capture high-res frame and run SoM overlay for visual element targeting.
+            // SoM runs on the 2560px high-res capture for better edge detection, but
+            // the mark coordinates must be scaled to the streaming-frame space (1920px)
+            // that Gemini uses for click(x,y) calls.
+            if let Ok(Ok(frame)) =
+                tokio::task::spawn_blocking(aura_screen::capture::capture_screen_high_res).await
+                && let Ok(jpeg_bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(&frame.jpeg_base64)
+                && let Some((_annotated_b64, marks)) =
+                    aura_screen::capture::annotate_with_som(&jpeg_bytes)
+                && !marks.is_empty()
+            {
+                // Scale from high-res (2560px) to streaming-frame space (dims.img_w, typically 1920px).
+                // This ensures Gemini can pass mark coordinates directly to click(x, y).
+                let scale_x = dims.img_w as f64 / frame.width.max(1) as f64;
+                let scale_y = dims.img_h as f64 / frame.height.max(1) as f64;
+                let marks_json: Vec<serde_json::Value> = marks
+                    .iter()
+                    .map(|m| {
+                        let cx = ((m.x + m.width / 2) as f64 * scale_x) as u32;
+                        let cy = ((m.y + m.height / 2) as f64 * scale_y) as u32;
+                        serde_json::json!({
+                            "mark": m.id,
+                            "center_x": cx,
+                            "center_y": cy,
+                            "bounds": {
+                                "x": (m.x as f64 * scale_x) as u32,
+                                "y": (m.y as f64 * scale_y) as u32,
+                                "w": (m.width as f64 * scale_x) as u32,
+                                "h": (m.height as f64 * scale_y) as u32,
+                            },
+                        })
+                    })
+                    .collect();
+                if let Some(obj) = response.as_object_mut() {
+                    obj.insert("visual_marks".to_string(), serde_json::json!(marks_json));
+                    obj.insert(
+                        "visual_marks_note".to_string(),
+                        "Numbered marks detected on screen. Use center_x/center_y with click tool for precise targeting.".into(),
+                    );
+                }
+            }
+            response
+        }
         // All input tools (mouse/keyboard) require Accessibility permission.
         // CGEvent.post() silently drops events without it — check before executing
         // so Gemini gets an honest failure instead of a fake success.
@@ -212,6 +260,56 @@ pub(crate) async fn execute_tool(
             } else {
                 text
             };
+
+            // Detect password fields and route through clipboard paste instead of synthetic keys
+            let is_secure =
+                tokio::task::spawn_blocking(aura_screen::accessibility::is_focused_element_secure)
+                    .await
+                    .unwrap_or(false);
+
+            if is_secure {
+                tracing::info!("Secure text field detected — routing through clipboard paste");
+                // Save current clipboard so we can restore it after pasting
+                let prev_clipboard = aura_screen::macos::get_clipboard();
+                if let Err(e) = aura_screen::macos::set_clipboard(&text) {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to write to clipboard for secure field: {e}"),
+                    });
+                }
+                // Paste with Cmd+V
+                let paste_result = run_input_blocking(
+                    || {
+                        aura_input::keyboard::press_key(
+                            aura_input::keyboard::keycode_from_name("v").unwrap(),
+                            &["cmd"],
+                        )
+                    },
+                    "clipboard_paste",
+                )
+                .await;
+                // Restore previous clipboard after brief delay for paste to land
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Some(ref prev) = prev_clipboard {
+                    let _ = aura_screen::macos::set_clipboard(prev);
+                } else {
+                    // Clipboard was empty before — clear the password from clipboard
+                    let _ = aura_screen::macos::set_clipboard("");
+                }
+                if paste_result
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    return serde_json::json!({
+                        "success": true,
+                        "method": "clipboard_paste",
+                        "reason": "secure_text_field",
+                        "note": "Used clipboard paste because the focused field blocks synthetic keyboard input (password field).",
+                    });
+                }
+                return paste_result;
+            }
 
             // If label/role provided, focus the target element first via AX
             let label = args.get("label").and_then(|v| v.as_str()).map(String::from);

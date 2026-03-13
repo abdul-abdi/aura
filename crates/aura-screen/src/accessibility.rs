@@ -19,6 +19,11 @@ pub const MAX_ELEMENTS: usize = 50;
 pub const MAX_DEPTH: usize = 5;
 pub const TIMEOUT_MS: u128 = 500;
 
+/// Depth limit for the fast density probe in `get_focused_app_elements`.
+pub const PROBE_MAX_DEPTH: usize = 3;
+/// Timeout in milliseconds for the fast density probe.
+pub const PROBE_TIMEOUT_MS: u128 = 200;
+
 const AX_ERROR_SUCCESS: i32 = 0;
 const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
@@ -247,21 +252,44 @@ fn get_ax_children(element: CFTypeRef) -> Vec<CFTypeRef> {
     children
 }
 
+// ── Adaptive limits ───────────────────────────────────────────────────────────
+
+/// Return `(max_elements, max_depth)` based on the number of interactive
+/// elements found during the fast density probe.
+///
+/// | probe_count | max_elements | max_depth | description        |
+/// |-------------|-------------|-----------|-------------------|
+/// | >= 20       | 150         | 7         | Rich/dense tree    |
+/// | >= 5        | 80          | 5         | Moderate density   |
+/// | < 5         | 50          | 3         | Sparse/broken tree |
+fn adaptive_limits(probe_count: usize) -> (usize, usize) {
+    if probe_count >= 20 {
+        (150, 7)
+    } else if probe_count >= 5 {
+        (80, 5)
+    } else {
+        (50, 3)
+    }
+}
+
 // ── Tree walker ───────────────────────────────────────────────────────────────
 
-fn walk_element(
+fn walk_element_with_limits(
     element: CFTypeRef,
     depth: usize,
     elements: &mut Vec<UIElement>,
     start_time: &Instant,
+    max_elements: usize,
+    max_depth: usize,
+    timeout_ms: u128,
 ) {
-    if depth > MAX_DEPTH {
+    if depth > max_depth {
         return;
     }
-    if elements.len() >= MAX_ELEMENTS {
+    if elements.len() >= max_elements {
         return;
     }
-    if start_time.elapsed().as_millis() >= TIMEOUT_MS {
+    if start_time.elapsed().as_millis() >= timeout_ms {
         return;
     }
 
@@ -307,7 +335,7 @@ fn walk_element(
             let children = get_ax_children(element);
             let mut child_count = 0;
             for child in &children {
-                if child_count >= MAX_CHILDREN_PER_INTERACTIVE || elements.len() >= MAX_ELEMENTS {
+                if child_count >= MAX_CHILDREN_PER_INTERACTIVE || elements.len() >= max_elements {
                     break;
                 }
                 if let Some(child_role) = get_ax_string(*child, "AXRole") {
@@ -347,7 +375,15 @@ fn walk_element(
         // Not interactive — recurse into children.
         let children = get_ax_children(element);
         for child in children {
-            walk_element(child, depth + 1, elements, start_time);
+            walk_element_with_limits(
+                child,
+                depth + 1,
+                elements,
+                start_time,
+                max_elements,
+                max_depth,
+                timeout_ms,
+            );
             // Release the retain we added in get_ax_children.
             unsafe { CFRelease(child) };
         }
@@ -358,6 +394,12 @@ fn walk_element(
 
 /// Walk the accessibility tree of the frontmost application and return
 /// all interactive elements found within limits.
+///
+/// Uses a two-phase strategy:
+/// 1. Fast probe at depth `PROBE_MAX_DEPTH` with `PROBE_TIMEOUT_MS` to count
+///    interactive elements and gauge tree density.
+/// 2. If the tree is rich enough to warrant a deeper walk, perform a second
+///    walk using `adaptive_limits` to tune `max_elements` and `max_depth`.
 pub fn get_focused_app_elements() -> Vec<UIElement> {
     let pid = match crate::macos::get_frontmost_pid() {
         Some(p) => p,
@@ -370,9 +412,41 @@ pub fn get_focused_app_elements() -> Vec<UIElement> {
     }
     let app_ref = CfRef::new(app_element);
 
-    let mut elements = Vec::new();
+    // ── Phase 1: fast density probe ──────────────────────────────────────────
+    let mut probe_elements: Vec<UIElement> = Vec::new();
+    let probe_start = Instant::now();
+    walk_element_with_limits(
+        app_ref.as_raw(),
+        0,
+        &mut probe_elements,
+        &probe_start,
+        MAX_ELEMENTS,
+        PROBE_MAX_DEPTH,
+        PROBE_TIMEOUT_MS,
+    );
+    let probe_count = probe_elements.len();
+
+    // Determine adaptive limits for the full walk.
+    let (adaptive_max_elements, adaptive_max_depth) = adaptive_limits(probe_count);
+
+    // If the probe already hit the element cap or the adaptive depth is no
+    // deeper than the probe depth, the probe result is sufficient — return it.
+    if probe_count >= MAX_ELEMENTS || adaptive_max_depth <= PROBE_MAX_DEPTH {
+        return probe_elements;
+    }
+
+    // ── Phase 2: deeper adaptive walk ────────────────────────────────────────
+    let mut elements: Vec<UIElement> = Vec::new();
     let start_time = Instant::now();
-    walk_element(app_ref.as_raw(), 0, &mut elements, &start_time);
+    walk_element_with_limits(
+        app_ref.as_raw(),
+        0,
+        &mut elements,
+        &start_time,
+        adaptive_max_elements,
+        adaptive_max_depth,
+        TIMEOUT_MS,
+    );
     elements
 }
 
@@ -796,6 +870,43 @@ pub fn ax_set_focused(label: Option<&str>, role: Option<&str>) -> AXActionResult
     }
 }
 
+/// Check if a subrole indicates a secure (password) text field.
+/// macOS blocks synthetic keyboard input to these fields via SecureEventInput.
+pub fn is_secure_text_subrole(subrole: &str) -> bool {
+    subrole == "AXSecureTextField"
+}
+
+/// Check if the currently focused element is a secure text field.
+/// Returns true if the focused element's subrole is AXSecureTextField.
+pub fn is_focused_element_secure() -> bool {
+    let pid = match crate::macos::get_frontmost_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return false;
+    }
+    let app_ref = CfRef::new(app);
+
+    // Get the raw AXUIElement ref for the focused element
+    let attr_key = cf_string_from_str("AXFocusedUIElement");
+    let mut focused: CFTypeRef = std::ptr::null();
+    let err =
+        unsafe { AXUIElementCopyAttributeValue(app_ref.as_raw(), attr_key.as_raw(), &mut focused) };
+    if err != AX_ERROR_SUCCESS || focused.is_null() {
+        return false;
+    }
+    let focused_ref = CfRef::new(focused);
+
+    // Get the subrole of the focused element
+    match get_ax_string(focused_ref.as_raw(), "AXSubrole") {
+        Some(subrole) => is_secure_text_subrole(&subrole),
+        None => false,
+    }
+}
+
 /// Collect AXMenuItem elements from the frontmost app's AX tree.
 pub fn get_menu_items() -> Vec<UIElement> {
     let pid = match crate::macos::get_frontmost_pid() {
@@ -1034,6 +1145,21 @@ mod tests {
         assert_eq!(focused.unwrap().role, "AXTextField");
     }
 
+    // ── adaptive_limits tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn adaptive_limits_scale_with_density() {
+        let (max_el, max_dep) = adaptive_limits(25);
+        assert_eq!(max_el, 150);
+        assert_eq!(max_dep, 7);
+        let (max_el, max_dep) = adaptive_limits(10);
+        assert_eq!(max_el, 80);
+        assert_eq!(max_dep, 5);
+        let (max_el, max_dep) = adaptive_limits(3);
+        assert_eq!(max_el, 50);
+        assert_eq!(max_dep, 3);
+    }
+
     // ── AX write no-match error path tests ────────────────────────────────────
 
     #[test]
@@ -1056,5 +1182,13 @@ mod tests {
         let result = ax_set_focused(Some("NonExistentField99"), Some("AXTextField"));
         assert!(!result.success);
         assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn is_secure_field_detects_password_subroles() {
+        assert!(is_secure_text_subrole("AXSecureTextField"));
+        assert!(!is_secure_text_subrole("AXTextField"));
+        assert!(!is_secure_text_subrole("AXTextArea"));
+        assert!(!is_secure_text_subrole(""));
     }
 }

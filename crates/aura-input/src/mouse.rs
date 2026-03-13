@@ -61,32 +61,45 @@ pub fn click(x: f64, y: f64, button: &str, click_count: u32, modifiers: &[&str])
         ),
     };
 
-    let down = CGEvent::new_mouse_event(source.clone(), down_type, point, cg_button)
-        .map_err(|_| anyhow::anyhow!("Failed to create mouse down event"))?;
-    down.set_integer_value_field(
-        core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
-        click_count as i64,
-    );
-
-    let up = CGEvent::new_mouse_event(source.clone(), up_type, point, cg_button)
-        .map_err(|_| anyhow::anyhow!("Failed to create mouse up event"))?;
-    up.set_integer_value_field(
-        core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
-        click_count as i64,
-    );
-
     let flags = modifier_flags(modifiers);
-    if !flags.is_empty() {
-        down.set_flags(flags);
-        up.set_flags(flags);
-    }
 
-    // Post both only after both are created.
-    // 15ms delay between down/up — macOS window server can drop events posted
-    // back-to-back with zero gap, especially on Sonoma 14+.
-    down.post(CGEventTapLocation::HID);
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    up.post(CGEventTapLocation::HID);
+    // Loop once per click so Electron apps (which count actual down/up pairs
+    // rather than reading MOUSE_EVENT_CLICK_STATE) register the correct number
+    // of clicks.  Each iteration increments click_state so native Cocoa apps
+    // still see the correct double/triple-click state on every event.
+    for i in 1..=click_count {
+        let click_state = i as i64;
+
+        let down = CGEvent::new_mouse_event(source.clone(), down_type, point, cg_button)
+            .map_err(|_| anyhow::anyhow!("Failed to create mouse down event"))?;
+        down.set_integer_value_field(
+            core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+            click_state,
+        );
+
+        let up = CGEvent::new_mouse_event(source.clone(), up_type, point, cg_button)
+            .map_err(|_| anyhow::anyhow!("Failed to create mouse up event"))?;
+        up.set_integer_value_field(
+            core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+            click_state,
+        );
+
+        if !flags.is_empty() {
+            down.set_flags(flags);
+            up.set_flags(flags);
+        }
+
+        // 15ms delay between down/up — macOS window server can drop events posted
+        // back-to-back with zero gap, especially on Sonoma 14+.
+        down.post(CGEventTapLocation::HID);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        up.post(CGEventTapLocation::HID);
+
+        // 15ms gap between successive pairs (skip after the last pair).
+        if i < click_count {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
 
     Ok(())
 }
@@ -209,29 +222,40 @@ pub fn click_pid(
         ),
     };
 
-    let down = CGEvent::new_mouse_event(source.clone(), down_type, point, cg_button)
-        .map_err(|_| anyhow::anyhow!("Failed to create mouse down event"))?;
-    down.set_integer_value_field(
-        core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
-        click_count as i64,
-    );
-
-    let up = CGEvent::new_mouse_event(source.clone(), up_type, point, cg_button)
-        .map_err(|_| anyhow::anyhow!("Failed to create mouse up event"))?;
-    up.set_integer_value_field(
-        core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
-        click_count as i64,
-    );
-
     let flags = modifier_flags(modifiers);
-    if !flags.is_empty() {
-        down.set_flags(flags);
-        up.set_flags(flags);
-    }
 
-    down.post_to_pid(pid);
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    up.post_to_pid(pid);
+    // Same loop as click(): send N down/up pairs so Electron apps count them
+    // correctly while native Cocoa apps see incrementing click_state on each pair.
+    for i in 1..=click_count {
+        let click_state = i as i64;
+
+        let down = CGEvent::new_mouse_event(source.clone(), down_type, point, cg_button)
+            .map_err(|_| anyhow::anyhow!("Failed to create mouse down event"))?;
+        down.set_integer_value_field(
+            core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+            click_state,
+        );
+
+        let up = CGEvent::new_mouse_event(source.clone(), up_type, point, cg_button)
+            .map_err(|_| anyhow::anyhow!("Failed to create mouse up event"))?;
+        up.set_integer_value_field(
+            core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+            click_state,
+        );
+
+        if !flags.is_empty() {
+            down.set_flags(flags);
+            up.set_flags(flags);
+        }
+
+        down.post_to_pid(pid);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        up.post_to_pid(pid);
+
+        if i < click_count {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
 
     Ok(())
 }
@@ -320,6 +344,45 @@ mod tests {
     fn click_pid_rejects_zero_pid() {
         let result = click_pid(100.0, 100.0, "left", 1, &[], 0);
         assert!(result.is_err());
+    }
+
+    /// click_count=1,2,3 must all be accepted (no panic / type error).
+    /// We use an invalid PID so the function returns early before posting
+    /// events, keeping the test display-server-free.
+    #[test]
+    fn click_pid_accepts_click_count_1() {
+        let result = click_pid(100.0, 100.0, "left", 1, &[], 0);
+        assert!(result.is_err()); // err is "Invalid PID", not a click_count error
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("PID"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn click_pid_accepts_click_count_2() {
+        let result = click_pid(100.0, 100.0, "left", 2, &[], 0);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("PID"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn click_pid_accepts_click_count_3() {
+        let result = click_pid(100.0, 100.0, "left", 3, &[], 0);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("PID"), "unexpected error: {msg}");
+    }
+
+    /// click() rejects NaN coordinates before any event is created.
+    #[test]
+    fn click_rejects_nan_coords() {
+        let result = click(f64::NAN, 100.0, "left", 2, &[]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Invalid coordinates"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]

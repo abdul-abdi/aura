@@ -152,7 +152,7 @@ results.join('\n');"#,
     Some(text.lines().map(String::from).collect())
 }
 
-fn get_clipboard() -> Option<String> {
+pub fn get_clipboard() -> Option<String> {
     let output = Command::new("pbpaste").output().ok()?;
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).to_string();

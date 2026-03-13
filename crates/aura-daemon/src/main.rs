@@ -17,6 +17,7 @@ use tracing_subscriber::EnvFilter;
 mod cloud;
 mod deploy;
 mod orchestrator;
+mod pipeline;
 mod processor;
 mod screen_capture;
 mod tool_helpers;

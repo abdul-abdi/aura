@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Frame dimension snapshot used to map image-pixel coordinates to logical macOS points.
 #[derive(Clone, Copy)]
 pub(crate) struct FrameDims {
@@ -22,6 +24,19 @@ impl FrameDims {
             return y;
         }
         y * (self.logical_h as f64 / self.img_h as f64)
+    }
+}
+
+/// Per-tool-type settle delay before polling for screen changes.
+/// Keyboard actions are near-instant; app activation and scripts need more time.
+pub(crate) fn settle_delay_for_tool(name: &str) -> Duration {
+    match name {
+        "type_text" | "press_key" | "move_mouse" => Duration::from_millis(30),
+        "scroll" | "drag" => Duration::from_millis(50),
+        "click" | "click_element" | "context_menu_click" => Duration::from_millis(100),
+        "activate_app" | "click_menu_item" => Duration::from_millis(150),
+        "run_applescript" => Duration::from_millis(200),
+        _ => Duration::from_millis(150), // conservative default
     }
 }
 
@@ -64,8 +79,11 @@ pub(crate) fn click_element_inner(
             if all_elements.is_empty() {
                 return serde_json::json!({
                     "success": false,
-                    "error": "No interactive UI elements found. The app may not expose accessibility data, \
-                              or Accessibility permission may not be fully granted.",
+                    "error": "No interactive UI elements found.",
+                    "hint": "use_coordinates",
+                    "suggestion": "This app may not expose accessibility data. Use the 'click' tool \
+                                    with pixel coordinates based on what you see in the screenshot instead. \
+                                    Estimate the center of the target element visually.",
                 });
             }
 
@@ -88,9 +106,17 @@ pub(crate) fn click_element_inner(
                 return serde_json::json!({
                     "success": false,
                     "error": format!(
-                        "No element matching label={:?} role={:?}. Available elements: {}",
-                        label, role, alternatives.join(", ")
+                        "No element matching label={:?} role={:?}.",
+                        label, role
                     ),
+                    "available_elements": alternatives,
+                    "hint": if alternatives.len() <= 3 { "sparse_ax_tree" } else { "element_not_found" },
+                    "suggestion": if alternatives.len() <= 3 {
+                        "This app has very few accessibility elements. Try using the 'click' tool \
+                         with pixel coordinates from the screenshot instead."
+                    } else {
+                        "The element wasn't found. Check the available_elements list for the correct label/role."
+                    },
                 });
             }
 
@@ -345,10 +371,11 @@ pub(crate) fn parse_modifiers(args: &serde_json::Value) -> Vec<String> {
 /// Returns true if the tool changes screen state and should get post_state enrichment
 /// and screenshot await behavior.
 pub(crate) fn is_state_changing_tool(name: &str) -> bool {
+    // NOTE: move_mouse is excluded — cursor movement alone rarely changes screen
+    // content, so verification would almost always produce noisy false negatives.
     matches!(
         name,
-        "move_mouse"
-            | "click"
+        "click"
             | "type_text"
             | "press_key"
             | "scroll"
@@ -387,6 +414,44 @@ pub(crate) fn capture_post_state() -> serde_json::Value {
         "focused_element": focused_json,
     })
 }
+
+/// Generate spiral offset pairs for retry clicks.
+/// Returns (dx, dy) offsets starting from (0,0) then cardinal/diagonal directions.
+pub(crate) fn spiral_offsets(radius: i32) -> Vec<(i32, i32)> {
+    vec![
+        (0, 0),             // original position
+        (radius, 0),        // right
+        (0, radius),        // down
+        (-radius, 0),       // left
+        (0, -radius),       // up
+        (radius, radius),   // down-right
+        (-radius, -radius), // up-left
+        (radius, -radius),  // up-right
+        (-radius, radius),  // down-left
+    ]
+}
+
+/// Maximum number of spiral retry attempts for coordinate-based clicks.
+pub(crate) const MAX_CLICK_RETRIES: usize = 4;
+
+/// Check if a point (x, y) in pixel coordinates falls within Gemini-normalized
+/// bounding box [y0, x0, y1, x1] (each in [0, 1000]).
+pub(crate) fn point_in_denormalized_bounds(
+    x: f64,
+    y: f64,
+    bounds: &[i32; 4], // [y0, x0, y1, x1] normalized to [0, 1000]
+    screen_w: f64,
+    screen_h: f64,
+) -> bool {
+    let x0 = bounds[1] as f64 / 1000.0 * screen_w;
+    let y0 = bounds[0] as f64 / 1000.0 * screen_h;
+    let x1 = bounds[3] as f64 / 1000.0 * screen_w;
+    let y1 = bounds[2] as f64 / 1000.0 * screen_h;
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+
+/// Pixel radius for spiral retry offsets.
+pub(crate) const SPIRAL_RADIUS: i32 = 15;
 
 /// Try PID-targeted input first, fall back to global HID.
 pub(crate) async fn run_with_pid_fallback<F1, F2>(
@@ -429,6 +494,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_adaptive_settle_delay() {
+        assert_eq!(
+            settle_delay_for_tool("type_text"),
+            Duration::from_millis(30)
+        );
+        assert_eq!(
+            settle_delay_for_tool("press_key"),
+            Duration::from_millis(30)
+        );
+        assert_eq!(settle_delay_for_tool("click"), Duration::from_millis(100));
+        assert_eq!(
+            settle_delay_for_tool("click_element"),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            settle_delay_for_tool("activate_app"),
+            Duration::from_millis(150)
+        );
+        assert_eq!(
+            settle_delay_for_tool("click_menu_item"),
+            Duration::from_millis(150)
+        );
+        assert_eq!(
+            settle_delay_for_tool("run_applescript"),
+            Duration::from_millis(200)
+        );
+        assert_eq!(settle_delay_for_tool("scroll"), Duration::from_millis(50));
+        assert_eq!(settle_delay_for_tool("drag"), Duration::from_millis(50));
+    }
 
     #[test]
     fn run_applescript_is_state_changing() {
@@ -509,6 +606,60 @@ mod tests {
         assert!(script.contains("tell process \"MyApp\""));
         assert!(script.contains("menu item \"Save\""));
         assert!(script.contains("menu bar item \"File\""));
+    }
+
+    #[test]
+    fn spiral_offsets_has_center_and_cardinal() {
+        let offsets = spiral_offsets(15);
+        assert_eq!(offsets[0], (0, 0));
+        assert!(offsets.contains(&(15, 0)));
+        assert!(offsets.contains(&(-15, 0)));
+        assert!(offsets.contains(&(0, 15)));
+        assert!(offsets.contains(&(0, -15)));
+        assert!(offsets.contains(&(15, 15)));
+        assert!(offsets.contains(&(-15, -15)));
+        assert!(offsets.contains(&(15, -15)));
+        assert!(offsets.contains(&(-15, 15)));
+    }
+
+    #[test]
+    fn click_element_empty_tree_suggests_coordinate_fallback() {
+        let response = serde_json::json!({
+            "success": false,
+            "error": "No interactive UI elements found.",
+            "hint": "use_coordinates",
+            "suggestion": "This app may not expose accessibility data. Use the 'click' tool \
+                            with pixel coordinates based on what you see in the screenshot instead. \
+                            Estimate the center of the target element visually.",
+        });
+        assert_eq!(response["hint"], "use_coordinates");
+        assert!(response["suggestion"].as_str().unwrap().contains("click"));
+    }
+
+    #[test]
+    fn point_in_bounds_check() {
+        // Bounds: [y0, x0, y1, x1] normalized to [0, 1000]
+        // Screen: 1920×1080
+        let screen_w = 1920.0;
+        let screen_h = 1080.0;
+        // Element at roughly center of screen: [400, 400, 600, 600] in normalized
+        let bounds = [400, 400, 600, 600]; // y0, x0, y1, x1
+
+        let x0 = bounds[1] as f64 / 1000.0 * screen_w; // 768
+        let y0 = bounds[0] as f64 / 1000.0 * screen_h; // 432
+
+        // Center of bounds
+        assert!(point_in_denormalized_bounds(
+            960.0, 540.0, &bounds, screen_w, screen_h
+        ));
+        // Outside bounds
+        assert!(!point_in_denormalized_bounds(
+            100.0, 100.0, &bounds, screen_w, screen_h
+        ));
+        // Edge of bounds (inclusive)
+        assert!(point_in_denormalized_bounds(
+            x0, y0, &bounds, screen_w, screen_h
+        ));
     }
 
     #[test]

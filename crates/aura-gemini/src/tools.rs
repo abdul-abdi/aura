@@ -109,6 +109,11 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                                 "type": "array",
                                 "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
                                 "description": "Modifier keys to hold during click. Use for Cmd+click (multi-select, new tab), Shift+click (range select)."
+                            },
+                            "expected_bounds": {
+                                "type": "array",
+                                "items": { "type": "integer" },
+                                "description": "Optional bounding box [y0, x0, y1, x1] (normalized 0-1000) of the expected target element. If provided, the system validates your click coordinates fall within this region and warns if they don't."
                             }
                         },
                         "required": ["x", "y"]

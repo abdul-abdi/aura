@@ -48,7 +48,11 @@ pub fn press_key(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
             "shift" => flags |= CGEventFlags::CGEventFlagShift,
             "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
             "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
-            _ => tracing::warn!("Unknown modifier: {m}"),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown modifier '{m}'. Valid modifiers: cmd, shift, alt, option, ctrl, control"
+                ));
+            }
         }
     }
 
@@ -60,8 +64,10 @@ pub fn press_key(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
     up.set_flags(CGEventFlags::CGEventFlagNull);
 
-    // Post both only after both are created
+    // Post both only after both are created; 12ms gap mirrors mouse click delay
+    // to prevent the macOS window server from dropping key events.
     down.post(CGEventTapLocation::HID);
+    std::thread::sleep(std::time::Duration::from_millis(12));
     up.post(CGEventTapLocation::HID);
 
     Ok(())
@@ -103,7 +109,11 @@ pub fn press_key_pid(key: CGKeyCode, modifiers: &[&str], pid: i32) -> Result<()>
             "shift" => flags |= CGEventFlags::CGEventFlagShift,
             "alt" | "option" => flags |= CGEventFlags::CGEventFlagAlternate,
             "ctrl" | "control" => flags |= CGEventFlags::CGEventFlagControl,
-            _ => tracing::warn!("Unknown modifier: {m}"),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown modifier '{m}'. Valid modifiers: cmd, shift, alt, option, ctrl, control"
+                ));
+            }
         }
     }
 
@@ -115,7 +125,10 @@ pub fn press_key_pid(key: CGKeyCode, modifiers: &[&str], pid: i32) -> Result<()>
         .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
     up.set_flags(CGEventFlags::CGEventFlagNull);
 
+    // 12ms gap mirrors mouse click delay to prevent the macOS window server
+    // from dropping key events.
     down.post_to_pid(pid);
+    std::thread::sleep(std::time::Duration::from_millis(12));
     up.post_to_pid(pid);
 
     Ok(())
@@ -254,6 +267,25 @@ mod tests {
     fn press_key_pid_rejects_zero_pid() {
         let result = press_key_pid(36, &[], 0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn press_key_unknown_modifier_returns_error() {
+        let result = press_key(36, &["super"]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("super"), "error should name the bad modifier");
+        assert!(msg.contains("cmd"), "error should list valid modifiers");
+    }
+
+    #[test]
+    fn press_key_pid_unknown_modifier_returns_error() {
+        // Use a valid PID (1 = launchd) so we don't fail on the PID guard first.
+        let result = press_key_pid(36, &["super"], 1);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("super"), "error should name the bad modifier");
+        assert!(msg.contains("cmd"), "error should list valid modifiers");
     }
 
     // --- Special keys ---

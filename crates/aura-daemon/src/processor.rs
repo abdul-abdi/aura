@@ -122,6 +122,11 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     // Drives the amber "busy" status in the UI.
     let tools_in_flight = Arc::new(AtomicUsize::new(0));
 
+    // Pipeline state: tracks the last state-changing tool for continuation detection
+    let pipeline_last_tool: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let pipeline_chain_count: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
     tracing::info!("Gemini event processor running");
 
     loop {
@@ -410,6 +415,8 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         let tool_ipc_tx = ipc_tx.clone();
                         let tool_held_keys = Arc::clone(&held_keys);
                         let tool_last_hash = Arc::clone(&last_frame_hash);
+                        let tool_pipeline_last = Arc::clone(&pipeline_last_tool);
+                        let tool_pipeline_chain = Arc::clone(&pipeline_chain_count);
                         let tool_dims = tools::FrameDims {
                             img_w: frame_img_w.load(Ordering::Acquire),
                             img_h: frame_img_h.load(Ordering::Acquire),
@@ -507,106 +514,205 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 }
                             }
 
+                            // Validate expected_bounds if provided (click tool)
+                            if matches!(name.as_str(), "click" | "context_menu_click")
+                                && let Some(bounds_arr) = args.get("expected_bounds").and_then(|v| v.as_array())
+                                && bounds_arr.len() == 4
+                            {
+                                let bounds: [i32; 4] = [
+                                    bounds_arr[0].as_i64().unwrap_or(0) as i32,
+                                    bounds_arr[1].as_i64().unwrap_or(0) as i32,
+                                    bounds_arr[2].as_i64().unwrap_or(0) as i32,
+                                    bounds_arr[3].as_i64().unwrap_or(0) as i32,
+                                ];
+                                let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let (sw, sh) = (tool_dims.img_w as f64, tool_dims.img_h as f64);
+                                if !tools::point_in_denormalized_bounds(x, y, &bounds, sw, sh) {
+                                    tracing::warn!(
+                                        tool = %name, x, y, ?bounds,
+                                        "Click coordinates outside expected_bounds — likely mis-targeted"
+                                    );
+                                    if let Some(obj) = response.as_object_mut() {
+                                        obj.insert(
+                                            "bounds_warning".into(),
+                                            serde_json::json!("Click coordinates are outside the expected element bounds. The click may miss its target."),
+                                        );
+                                    }
+                                }
+                            }
+
                             // For state-changing tools: verify screen actually changed before reporting success
-                            let verified;
+                            let mut verified;
                             let mut verification_reason: Option<&str> = None;
 
                             if let Some(pre) = pre_hash {
-                                // Brief delay to let UI settle after the input action
-                                tokio::time::sleep(Duration::from_millis(150)).await;
-
-                                // Poll for screen hash change: 200ms intervals, 2s timeout, 10 checks max
-                                let mut screen_changed = false;
-                                for _ in 0..10 {
-                                    let rx = tool_capture_trigger.trigger_and_wait();
-                                    tool_cap_notify.notify_one();
-                                    let _ = tokio::time::timeout(Duration::from_millis(200), rx).await;
-
-                                    let current_hash = tool_last_hash.load(Ordering::Acquire);
-                                    if current_hash != pre {
-                                        screen_changed = true;
-                                        break;
+                                // Check if this tool forms a safe continuation of the previous one
+                                let should_skip_verify = {
+                                    let prev = tool_pipeline_last.lock().unwrap_or_else(|e| e.into_inner());
+                                    let chain = tool_pipeline_chain.load(Ordering::Acquire);
+                                    match prev.as_deref() {
+                                        Some(prev_name) => {
+                                            super::pipeline::is_safe_continuation(prev_name, &name)
+                                                && !super::pipeline::chain_at_limit(chain)
+                                        }
+                                        None => false,
                                     }
-                                }
-
-                                verified = screen_changed;
-                                if !screen_changed {
-                                    verification_reason = Some("screen_unchanged_after_2s");
-                                    tracing::warn!(tool = %name, "Screen unchanged after action — verification failed");
-                                }
-
-                                // Capture post-action state on a blocking thread (AX FFI)
-                                let post_state = tokio::time::timeout(
-                                    Duration::from_millis(600),
-                                    tokio::task::spawn_blocking(tools::capture_post_state),
-                                )
-                                .await
-                                .unwrap_or(Ok(serde_json::json!({})))
-                                .unwrap_or_else(|_| serde_json::json!({}));
-
-                                // Check for post_state mismatch warning
-                                let warning: Option<&str> = if !verified {
-                                    let has_focus = post_state
-                                        .get("focused_element")
-                                        .map(|e| !e.is_null())
-                                        .unwrap_or(false);
-                                    if has_focus {
-                                        Some("screen_unchanged_but_element_focused — check post_state")
-                                    } else {
-                                        Some("screen_unchanged_and_no_focused_element")
-                                    }
-                                } else {
-                                    None
                                 };
 
-                                if let Some(obj) = response.as_object_mut() {
-                                    obj.insert("verified".to_string(), serde_json::Value::Bool(verified));
-                                    if let Some(reason) = verification_reason {
-                                        obj.insert("verification_reason".to_string(), reason.into());
+                                if should_skip_verify {
+                                    // Pipelined: micro-settle only, skip full verification
+                                    tokio::time::sleep(Duration::from_millis(super::pipeline::MICRO_SETTLE_MS)).await;
+                                    tool_pipeline_chain.fetch_add(1, Ordering::Release);
+                                    verified = true; // Optimistic — errors caught at chain end
+                                    if let Some(obj) = response.as_object_mut() {
+                                        obj.insert("verified".to_string(), serde_json::json!("pipelined"));
+                                        obj.insert("post_state".to_string(), serde_json::json!({}));
                                     }
-                                    if let Some(warn) = warning {
-                                        obj.insert("warning".to_string(), warn.into());
+                                } else {
+                                    // Full adaptive verification
+                                    tokio::time::sleep(tools::settle_delay_for_tool(&name)).await;
+
+                                    // Poll for screen hash change: 50ms intervals, 1s timeout, 20 checks max
+                                    let mut screen_changed = false;
+                                    for _ in 0..20 {
+                                        let rx = tool_capture_trigger.trigger_and_wait();
+                                        tool_cap_notify.notify_one();
+                                        let _ = tokio::time::timeout(Duration::from_millis(50), rx).await;
+
+                                        let current_hash = tool_last_hash.load(Ordering::Acquire);
+                                        if current_hash != pre {
+                                            screen_changed = true;
+                                            break;
+                                        }
                                     }
-                                    let mut ps = post_state;
-                                    if let Some(ps_obj) = ps.as_object_mut() {
-                                        // screenshot_delivered == verified: if the hash changed,
-                                        // a fresh frame was captured during the poll loop and
-                                        // will be delivered with the next Gemini message.
-                                        ps_obj.insert(
-                                            "screenshot_delivered".to_string(),
-                                            serde_json::Value::Bool(verified),
-                                        );
-                                        // Enrich right-click post_state with context menu items
-                                        let is_right_click = name == "click"
-                                            && args.get("button").and_then(|v| v.as_str())
-                                                == Some("right");
-                                        if is_right_click && verified {
-                                            // Brief delay for context menu to appear in AX tree
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
-                                            let menu_items = tokio::task::spawn_blocking(
-                                                aura_screen::accessibility::get_menu_items,
-                                            )
-                                            .await
-                                            .unwrap_or_default();
-                                            if !menu_items.is_empty() {
-                                                let items_json: Vec<serde_json::Value> =
-                                                    menu_items
-                                                        .iter()
-                                                        .map(|el| {
-                                                            serde_json::json!({
-                                                                "label": el.label,
-                                                                "enabled": el.enabled,
-                                                            })
-                                                        })
-                                                        .collect();
-                                                ps_obj.insert(
-                                                    "menu_items".to_string(),
-                                                    serde_json::json!(items_json),
-                                                );
+
+                                    verified = screen_changed;
+                                    if !screen_changed {
+                                        verification_reason = Some("screen_unchanged_after_1s");
+                                        tracing::warn!(tool = %name, "Screen unchanged after action — verification failed");
+                                    }
+
+                                    // Retry with spiral offsets for coordinate-based clicks that failed verification
+                                    if !screen_changed
+                                        && matches!(name.as_str(), "click" | "context_menu_click")
+                                        && let (Some(orig_x), Some(orig_y)) = (
+                                            args.get("x").and_then(|v| v.as_f64()),
+                                            args.get("y").and_then(|v| v.as_f64()),
+                                        )
+                                    {
+                                        let offsets = tools::spiral_offsets(tools::SPIRAL_RADIUS);
+                                        // Skip offset[0] (0,0) — that's the original click we already tried
+                                        for (i, &(dx, dy)) in offsets.iter().skip(1).take(tools::MAX_CLICK_RETRIES).enumerate() {
+                                            let retry_x = orig_x + dx as f64;
+                                            let retry_y = orig_y + dy as f64;
+                                            tracing::debug!(tool = %name, attempt = i + 2, dx, dy, "Retrying click with spiral offset");
+
+                                            // Execute the retry click
+                                            let mut retry_args = args.clone();
+                                            retry_args["x"] = serde_json::json!(retry_x);
+                                            retry_args["y"] = serde_json::json!(retry_y);
+                                            let _ = tools::execute_tool(&name, &retry_args, &tool_executor, &tool_screen_reader, tool_dims).await;
+
+                                            // Brief settle + single hash check
+                                            tokio::time::sleep(Duration::from_millis(80)).await;
+                                            let rx = tool_capture_trigger.trigger_and_wait();
+                                            tool_cap_notify.notify_one();
+                                            let _ = tokio::time::timeout(Duration::from_millis(100), rx).await;
+                                            let current_hash = tool_last_hash.load(Ordering::Acquire);
+                                            if current_hash != pre {
+                                                verified = true;
+                                                verification_reason = None;
+                                                tracing::info!(tool = %name, attempt = i + 2, "Spiral retry succeeded");
+                                                if let Some(obj) = response.as_object_mut() {
+                                                    obj.insert("retry_offset".into(), serde_json::json!({"dx": dx, "dy": dy}));
+                                                }
+                                                break;
                                             }
                                         }
                                     }
-                                    obj.insert("post_state".to_string(), ps);
+
+                                    // Reset chain counter after full verification
+                                    tool_pipeline_chain.store(0, Ordering::Release);
+
+                                    // Capture post-action state on a blocking thread (AX FFI)
+                                    let post_state = tokio::time::timeout(
+                                        Duration::from_millis(300),
+                                        tokio::task::spawn_blocking(tools::capture_post_state),
+                                    )
+                                    .await
+                                    .unwrap_or(Ok(serde_json::json!({})))
+                                    .unwrap_or_else(|_| serde_json::json!({}));
+
+                                    // Check for post_state mismatch warning
+                                    let warning: Option<&str> = if !verified {
+                                        let has_focus = post_state
+                                            .get("focused_element")
+                                            .map(|e| !e.is_null())
+                                            .unwrap_or(false);
+                                        if has_focus {
+                                            Some("screen_unchanged_but_element_focused — check post_state")
+                                        } else {
+                                            Some("screen_unchanged_and_no_focused_element")
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(obj) = response.as_object_mut() {
+                                        obj.insert("verified".to_string(), serde_json::Value::Bool(verified));
+                                        if let Some(reason) = verification_reason {
+                                            obj.insert("verification_reason".to_string(), reason.into());
+                                        }
+                                        if let Some(warn) = warning {
+                                            obj.insert("warning".to_string(), warn.into());
+                                        }
+                                        let mut ps = post_state;
+                                        if let Some(ps_obj) = ps.as_object_mut() {
+                                            // screenshot_delivered == verified: if the hash changed,
+                                            // a fresh frame was captured during the poll loop and
+                                            // will be delivered with the next Gemini message.
+                                            ps_obj.insert(
+                                                "screenshot_delivered".to_string(),
+                                                serde_json::Value::Bool(verified),
+                                            );
+                                            // Enrich right-click post_state with context menu items
+                                            let is_right_click = name == "click"
+                                                && args.get("button").and_then(|v| v.as_str())
+                                                    == Some("right");
+                                            if is_right_click && verified {
+                                                // Brief delay for context menu to appear in AX tree
+                                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                                let menu_items = tokio::task::spawn_blocking(
+                                                    aura_screen::accessibility::get_menu_items,
+                                                )
+                                                .await
+                                                .unwrap_or_default();
+                                                if !menu_items.is_empty() {
+                                                    let items_json: Vec<serde_json::Value> =
+                                                        menu_items
+                                                            .iter()
+                                                            .map(|el| {
+                                                                serde_json::json!({
+                                                                    "label": el.label,
+                                                                    "enabled": el.enabled,
+                                                                })
+                                                            })
+                                                            .collect();
+                                                    ps_obj.insert(
+                                                        "menu_items".to_string(),
+                                                        serde_json::json!(items_json),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        obj.insert("post_state".to_string(), ps);
+                                    }
+                                }
+
+                                // Update last tool name for next iteration
+                                if let Ok(mut prev) = tool_pipeline_last.lock() {
+                                    *prev = Some(name.clone());
                                 }
                             } else {
                                 verified = true; // non-state-changing tools are inherently "verified"
