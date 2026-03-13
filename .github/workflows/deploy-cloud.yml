@@ -25,6 +25,9 @@ on:
           - staging
           - production
 
+env:
+  ENV_SUFFIX: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'prod' || 'staging' }}
+
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false  # Never cancel in-progress deployments
@@ -41,17 +44,32 @@ jobs:
       proxy: ${{ steps.changes.outputs.proxy }}
       consolidation: ${{ steps.changes.outputs.consolidation }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - id: changes
         run: |
-          if git diff --name-only HEAD~1 | grep -q 'crates/aura-proxy/'; then
+          # For push events, github.event.before gives the previous HEAD — covers
+          # multi-commit pushes (HEAD~1 would miss changes in earlier commits).
+          # Falls back to HEAD~1 for workflow_dispatch or missing before SHA.
+          BEFORE="${{ github.event.before }}"
+          if [[ -n "$BEFORE" && "$BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            BASE="$BEFORE"
+          else
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+          fi
+          if [[ -z "$BASE" ]]; then
+            echo "proxy=true" >> "$GITHUB_OUTPUT"
+            echo "consolidation=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          if echo "$CHANGED" | grep -q 'crates/aura-proxy/'; then
             echo "proxy=true" >> "$GITHUB_OUTPUT"
           else
             echo "proxy=false" >> "$GITHUB_OUTPUT"
           fi
-          if git diff --name-only HEAD~1 | grep -q 'infrastructure/'; then
+          if echo "$CHANGED" | grep -q 'infrastructure/'; then
             echo "consolidation=true" >> "$GITHUB_OUTPUT"
           else
             echo "consolidation=false" >> "$GITHUB_OUTPUT"
@@ -60,38 +78,39 @@ jobs:
   deploy-proxy:
     name: Deploy Proxy
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: detect-changes
     if: |
       needs.detect-changes.outputs.proxy == 'true' ||
       github.event.inputs.service == 'all' ||
       github.event.inputs.service == 'proxy'
     environment:
-      name: ${{ github.ref == 'refs/heads/prod' && 'production' || 'staging' }}
+      name: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'production' || 'staging' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Deploy to Cloud Run
         run: |
-          IMAGE="gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy"
+          IMAGE="gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}"
 
           gcloud builds submit . \
             --config=<(cat <<'YAML'
           steps:
             - name: 'gcr.io/cloud-builders/docker'
-              args: ['build', '-t', '${{ secrets.GCP_PROJECT_ID }}/aura-proxy', '-f', 'crates/aura-proxy/Dockerfile', '.']
-          images: ['gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy']
+              args: ['build', '-t', 'gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}', '-f', 'crates/aura-proxy/Dockerfile', '.']
+          images: ['gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}']
           YAML
           ) \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --quiet
 
-          gcloud run deploy aura-proxy \
+          gcloud run deploy aura-proxy-${{ env.ENV_SUFFIX }} \
             --image "${IMAGE}" \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
@@ -108,34 +127,43 @@ jobs:
 
       - name: Health check
         run: |
-          URL=$(gcloud run services describe aura-proxy \
+          URL=$(gcloud run services describe aura-proxy-${{ env.ENV_SUFFIX }} \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --format "value(status.url)")
-          curl -sf "${URL}/health" || (echo "Health check failed!" && exit 1)
+          for i in $(seq 1 10); do
+            if curl -sf "${URL}/health"; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Health check attempt $i/10 failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 10 attempts!" && exit 1
 
   deploy-consolidation:
     name: Deploy Consolidation
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: detect-changes
     if: |
       needs.detect-changes.outputs.consolidation == 'true' ||
       github.event.inputs.service == 'all' ||
       github.event.inputs.service == 'consolidation'
     environment:
-      name: ${{ github.ref == 'refs/heads/prod' && 'production' || 'staging' }}
+      name: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'production' || 'staging' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy aura-consolidation \
+          gcloud run deploy aura-consolidation-${{ env.ENV_SUFFIX }} \
             --source infrastructure/ \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
@@ -150,8 +178,16 @@ jobs:
 
       - name: Health check
         run: |
-          URL=$(gcloud run services describe aura-consolidation \
+          URL=$(gcloud run services describe aura-consolidation-${{ env.ENV_SUFFIX }} \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --format "value(status.url)")
-          curl -sf "${URL}/health" || (echo "Health check failed!" && exit 1)
+          for i in $(seq 1 10); do
+            if curl -sf "${URL}/health"; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Health check attempt $i/10 failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 10 attempts!" && exit 1

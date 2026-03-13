@@ -6,9 +6,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tokio::sync::Semaphore;
 use axum::{
     Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
@@ -30,6 +31,10 @@ const FIRESTORE_BASE: &str = "https://firestore.googleapis.com/v1/projects";
 const METADATA_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 const MAX_PROMPT_CHARS: usize = 50_000;
+/// Maximum request body size (1 MiB).
+const MAX_BODY_BYTES: usize = 1_024 * 1_024;
+/// Maximum concurrent consolidation requests.
+const MAX_CONCURRENT_REQUESTS: usize = 10;
 
 // ---------------------------------------------------------------------------
 // App state
@@ -41,6 +46,7 @@ struct AppState {
     gcp_project_id: String,
     consolidation_model: String,
     http: reqwest::Client,
+    semaphore: Semaphore,
 }
 
 // ---------------------------------------------------------------------------
@@ -118,11 +124,13 @@ async fn main() -> Result<()> {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .context("Failed to build HTTP client")?,
+        semaphore: Semaphore::new(MAX_CONCURRENT_REQUESTS),
     });
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/consolidate", post(consolidate))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
@@ -147,6 +155,15 @@ async fn consolidate(
     headers: HeaderMap,
     Json(req): Json<ConsolidateRequest>,
 ) -> Result<Json<ConsolidationResult>, (StatusCode, String)> {
+    // Rate limit: reject if too many concurrent requests.
+    let _permit = state.semaphore.try_acquire().map_err(|_| {
+        warn!("consolidate: rate limited (max {MAX_CONCURRENT_REQUESTS} concurrent)");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many concurrent requests".to_string(),
+        )
+    })?;
+
     // Auth check (constant-time via SHA-256 comparison).
     let provided = extract_bearer(&headers).unwrap_or_default();
     if !constant_time_eq(provided, &state.auth_token) {

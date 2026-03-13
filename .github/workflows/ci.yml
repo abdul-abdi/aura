@@ -19,9 +19,10 @@ jobs:
   format:
     name: Formatting
     runs-on: macos-15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -29,12 +30,13 @@ jobs:
   lint:
     name: Clippy
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: clippy
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -44,15 +46,16 @@ jobs:
           key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-clippy-
       # objc/cocoa crates emit ~30 `unexpected_cfg` warnings — upstream noise.
-      - run: cargo clippy --workspace -- -D warnings -A unexpected_cfgs
+      - run: cargo clippy --workspace --locked -- -D warnings -A unexpected_cfgs
 
   # ── Commit message lint ────────────────────────────────────────────────
   commits:
     name: Commit Messages
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - name: Validate conventional commits
@@ -85,10 +88,11 @@ jobs:
   test:
     name: Tests
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -98,7 +102,10 @@ jobs:
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-test-
       - name: Run tests
-        run: cargo test --workspace 2>&1 | tee /tmp/test-output.txt
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee /tmp/test-output.txt
       - name: Summarize results
         if: always()
         run: |
@@ -107,8 +114,8 @@ jobs:
           grep '^test result:' /tmp/test-output.txt >> "$GITHUB_STEP_SUMMARY" || echo "No results found" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-          PASSED=$(grep -oP '\d+ passed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
-          FAILED=$(grep -oP '\d+ failed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
+          PASSED=$(grep -oE '[0-9]+ passed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
+          FAILED=$(grep -oE '[0-9]+ failed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Total: ${PASSED} passed, ${FAILED} failed**" >> "$GITHUB_STEP_SUMMARY"
 
@@ -116,22 +123,24 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           components: llvm-tools-preview
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+            ~/.cargo/bin/cargo-llvm-cov
             target/
           key: ${{ runner.os }}-cov-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cov-
+      - name: Install cargo-llvm-cov
+        run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked
       - name: Generate coverage
         run: |
           cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee /tmp/cov-output.txt
@@ -148,6 +157,7 @@ jobs:
   docker:
     name: Docker Build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         include:
@@ -158,19 +168,20 @@ jobs:
             context: infrastructure/
             dockerfile: infrastructure/Dockerfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build ${{ matrix.name }} Docker image
-        run: docker build -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+        run: docker build -f "${{ matrix.dockerfile }}" "${{ matrix.context }}"
 
   # ── Build verification ─────────────────────────────────────────────────
   build:
     name: Build
     runs-on: macos-15
+    timeout-minutes: 30
     needs: [format, lint]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry/index/
@@ -180,7 +191,7 @@ jobs:
           key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-build-
       - name: Build release binary
-        run: cargo build --release -p aura-daemon
+        run: cargo build --release --locked -p aura-daemon
       - name: Bundle Aura.app
         run: bash scripts/bundle.sh
       - name: Verify binary
@@ -190,7 +201,6 @@ jobs:
           echo "Binary: $(du -h target/release/aura-daemon | cut -f1)"
 
           # Ensure the app bundle is valid
-          test -d target/release/Aura.app/Contents/MacOS/aura-daemon || \
           test -f target/release/Aura.app/Contents/MacOS/aura-daemon
           echo "App bundle: $(du -sh target/release/Aura.app | cut -f1)"
       - name: Summarize build
@@ -206,12 +216,19 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: ${{ runner.os }}-cargo-audit-v1
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: command -v cargo-audit || cargo install cargo-audit --locked
       - name: Audit dependencies
+        shell: bash
         run: |
+          set -o pipefail
           cargo audit 2>&1 | tee /tmp/audit-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
 
@@ -226,9 +243,10 @@ jobs:
   pr-size:
     name: PR Size
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
       - name: Check PR size
@@ -270,8 +288,9 @@ jobs:
   gate:
     name: Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: always()
-    needs: [format, lint, test, build, audit, coverage, docker]
+    needs: [format, lint, test, build, audit, coverage, docker, commits]
     steps:
       - name: Check required jobs
         run: |
@@ -282,7 +301,9 @@ jobs:
           echo "audit:    ${{ needs.audit.result }}"
           echo "coverage: ${{ needs.coverage.result }}"
           echo "docker:   ${{ needs.docker.result }}"
+          echo "commits:  ${{ needs.commits.result }}"
 
+          # commits is skipped on push (only runs on PRs) — that's OK.
           if [[ "${{ needs.format.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
@@ -291,6 +312,11 @@ jobs:
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs.docker.result }}" != "success" ]]; then
             echo "::error::One or more required checks failed"
+            exit 1
+          fi
+          COMMITS="${{ needs.commits.result }}"
+          if [[ "$COMMITS" != "success" && "$COMMITS" != "skipped" ]]; then
+            echo "::error::Commit message validation failed"
             exit 1
           fi
           echo "All checks passed"
