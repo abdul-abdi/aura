@@ -44,7 +44,7 @@ jobs:
       proxy: ${{ steps.changes.outputs.proxy }}
       consolidation: ${{ steps.changes.outputs.consolidation }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
       - id: changes
@@ -79,42 +79,34 @@ jobs:
     name: Deploy Proxy
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: detect-changes
+    needs: [detect-changes, deploy-consolidation]
     if: |
-      needs.detect-changes.outputs.proxy == 'true' ||
+      always() &&
+      (needs.detect-changes.outputs.proxy == 'true' ||
       github.event.inputs.service == 'all' ||
-      github.event.inputs.service == 'proxy'
+      github.event.inputs.service == 'proxy') &&
+      needs.detect-changes.result == 'success'
     environment:
       name: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'production' || 'staging' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - id: auth
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
       - name: Deploy to Cloud Run
         run: |
-          IMAGE="gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}"
-
-          gcloud builds submit . \
-            --config=<(cat <<'YAML'
-          steps:
-            - name: 'gcr.io/cloud-builders/docker'
-              args: ['build', '-t', 'gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}', '-f', 'crates/aura-proxy/Dockerfile', '.']
-          images: ['gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}']
-          YAML
-          ) \
-            --project "${{ secrets.GCP_PROJECT_ID }}" \
-            --quiet
-
+          # gcloud run deploy --source expects Dockerfile at source root.
+          # Proxy Dockerfile lives in crates/aura-proxy/ but needs the full
+          # workspace as build context, so copy it to root for the deploy.
+          cp crates/aura-proxy/Dockerfile Dockerfile
           gcloud run deploy aura-proxy-${{ env.ENV_SUFFIX }} \
-            --image "${IMAGE}" \
+            --source . \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
-            --platform managed \
             --allow-unauthenticated \
             --port 8080 \
             --memory 256Mi \
@@ -153,13 +145,13 @@ jobs:
     environment:
       name: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'production' || 'staging' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - id: auth
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
       - name: Deploy to Cloud Run
         run: |
