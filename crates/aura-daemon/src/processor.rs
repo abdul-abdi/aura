@@ -515,7 +515,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
 
                             // For state-changing tools: verify screen actually changed before reporting success
-                            let verified;
+                            let mut verified;
                             let mut verification_reason: Option<&str> = None;
 
                             if let Some(pre) = pre_hash {
@@ -563,6 +563,45 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                     if !screen_changed {
                                         verification_reason = Some("screen_unchanged_after_1s");
                                         tracing::warn!(tool = %name, "Screen unchanged after action — verification failed");
+                                    }
+
+                                    // Retry with spiral offsets for coordinate-based clicks that failed verification
+                                    if !screen_changed
+                                        && matches!(name.as_str(), "click" | "context_menu_click")
+                                        && let (Some(orig_x), Some(orig_y)) = (
+                                            args.get("x").and_then(|v| v.as_f64()),
+                                            args.get("y").and_then(|v| v.as_f64()),
+                                        )
+                                    {
+                                        let offsets = tools::spiral_offsets(tools::SPIRAL_RADIUS);
+                                        // Skip offset[0] (0,0) — that's the original click we already tried
+                                        for (i, &(dx, dy)) in offsets.iter().skip(1).take(tools::MAX_CLICK_RETRIES).enumerate() {
+                                            let retry_x = orig_x + dx as f64;
+                                            let retry_y = orig_y + dy as f64;
+                                            tracing::debug!(tool = %name, attempt = i + 2, dx, dy, "Retrying click with spiral offset");
+
+                                            // Execute the retry click
+                                            let mut retry_args = args.clone();
+                                            retry_args["x"] = serde_json::json!(retry_x);
+                                            retry_args["y"] = serde_json::json!(retry_y);
+                                            let _ = tools::execute_tool(&name, &retry_args, &tool_executor, &tool_screen_reader, tool_dims).await;
+
+                                            // Brief settle + single hash check
+                                            tokio::time::sleep(Duration::from_millis(80)).await;
+                                            let rx = tool_capture_trigger.trigger_and_wait();
+                                            tool_cap_notify.notify_one();
+                                            let _ = tokio::time::timeout(Duration::from_millis(100), rx).await;
+                                            let current_hash = tool_last_hash.load(Ordering::Acquire);
+                                            if current_hash != pre {
+                                                verified = true;
+                                                verification_reason = None;
+                                                tracing::info!(tool = %name, attempt = i + 2, "Spiral retry succeeded");
+                                                if let Some(obj) = response.as_object_mut() {
+                                                    obj.insert("retry_offset".into(), serde_json::json!({"dx": dx, "dy": dy}));
+                                                }
+                                                break;
+                                            }
+                                        }
                                     }
 
                                     // Reset chain counter after full verification

@@ -414,6 +414,28 @@ pub(crate) fn capture_post_state() -> serde_json::Value {
     })
 }
 
+/// Generate spiral offset pairs for retry clicks.
+/// Returns (dx, dy) offsets starting from (0,0) then cardinal/diagonal directions.
+pub(crate) fn spiral_offsets(radius: i32) -> Vec<(i32, i32)> {
+    vec![
+        (0, 0),             // original position
+        (radius, 0),        // right
+        (0, radius),        // down
+        (-radius, 0),       // left
+        (0, -radius),       // up
+        (radius, radius),   // down-right
+        (-radius, -radius), // up-left
+        (radius, -radius),  // up-right
+        (-radius, radius),  // down-left
+    ]
+}
+
+/// Maximum number of spiral retry attempts for coordinate-based clicks.
+pub(crate) const MAX_CLICK_RETRIES: usize = 4;
+
+/// Pixel radius for spiral retry offsets.
+pub(crate) const SPIRAL_RADIUS: i32 = 15;
+
 /// Try PID-targeted input first, fall back to global HID.
 pub(crate) async fn run_with_pid_fallback<F1, F2>(
     pid_fn: F1,
@@ -567,6 +589,20 @@ mod tests {
         assert!(script.contains("tell process \"MyApp\""));
         assert!(script.contains("menu item \"Save\""));
         assert!(script.contains("menu bar item \"File\""));
+    }
+
+    #[test]
+    fn spiral_offsets_has_center_and_cardinal() {
+        let offsets = spiral_offsets(15);
+        assert_eq!(offsets[0], (0, 0));
+        assert!(offsets.contains(&(15, 0)));
+        assert!(offsets.contains(&(-15, 0)));
+        assert!(offsets.contains(&(0, 15)));
+        assert!(offsets.contains(&(0, -15)));
+        assert!(offsets.contains(&(15, 15)));
+        assert!(offsets.contains(&(-15, -15)));
+        assert!(offsets.contains(&(15, -15)));
+        assert!(offsets.contains(&(-15, 15)));
     }
 
     #[test]
