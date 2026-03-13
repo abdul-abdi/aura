@@ -195,6 +195,21 @@ pub fn frame_looks_censored(rgb: &[u8], width: usize, height: usize) -> bool {
     unique_colors.len() <= 8
 }
 
+/// Generate a SoM-annotated version of a captured frame.
+/// Returns the annotated JPEG (base64) and the mark positions.
+/// Called on-demand when Gemini requests visual element targeting.
+pub fn annotate_with_som(jpeg_bytes: &[u8]) -> Option<(String, Vec<crate::som::SomMark>)> {
+    let img = image::load_from_memory(jpeg_bytes).ok()?;
+    let (annotated, marks) = crate::som::annotate_frame(&img);
+
+    // Encode annotated image back to JPEG
+    let mut buf = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+    annotated.write_with_encoder(encoder).ok()?;
+
+    Some((BASE64.encode(&buf), marks))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

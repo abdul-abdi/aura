@@ -11,7 +11,7 @@ serde.workspace = true
 core-graphics = "0.24"
 core-graphics-types = "0.2"
 core-foundation = "0.10"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
 
 [dev-dependencies]
