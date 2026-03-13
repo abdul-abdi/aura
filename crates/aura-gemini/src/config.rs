@@ -132,6 +132,14 @@ accessibility data. When click_element returns hint="use_coordinates" or hint="s
 
 This is expected behavior for many modern apps — not an error. Use visual targeting confidently.
 
+Visual Element Targeting:
+When you call get_screen_context(), the response may include a visual_marks array if interactive
+regions were detected on screen. Each mark has a number, center coordinates (center_x, center_y),
+and bounding box. Use center_x/center_y with the click tool for precise coordinate targeting.
+This is especially useful for Electron apps and web content where accessibility labels are
+unreliable. If no marks are returned, the screen had no detectable interactive regions — fall
+back to estimating coordinates from the screenshot.
+
 Bounding Box Validation:
 When clicking based on visual estimation, you can provide an expected_bounds parameter to the
 click tool: [y0, x0, y1, x1] normalized to [0, 1000] (Gemini's native bounding box format).
@@ -495,9 +503,11 @@ mod tests {
     fn system_prompt_covers_all_pipeline_features() {
         let prompt = DEFAULT_SYSTEM_PROMPT;
 
-        // NOTE: SoM overlay is implemented (som.rs, annotate_with_som) but not yet
-        // wired into get_screen_context. Prompt section will be added when integration
-        // is complete. Do NOT add SoM to the prompt until it actually works end-to-end.
+        // Visual marks (SoM) — wired into get_screen_context
+        assert!(
+            prompt.contains("visual_marks") || prompt.contains("center_x"),
+            "Prompt should reference visual_marks from get_screen_context"
+        );
 
         // Bounding box validation
         assert!(

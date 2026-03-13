@@ -49,14 +49,19 @@ tccutil reset All com.aura.desktop 2>/dev/null || true
 tccutil reset All com.aura.daemon  2>/dev/null || true
 echo "      Done."
 
-# Remove app bundle
-if [[ -d "$APP_PATH" ]]; then
-    echo "  ==> Removing $APP_PATH..."
-    rm -rf "$APP_PATH"
-    echo "      Done."
-else
-    echo "  ==> $APP_PATH not found (skipped)"
-fi
+# Remove app bundle (installed + build artifact)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_APP="$(dirname "$SCRIPT_DIR")/target/release/${APP_PATH##*/}"
+
+for bundle in "$APP_PATH" "$BUILD_APP"; do
+    if [[ -d "$bundle" ]]; then
+        echo "  ==> Removing $bundle..."
+        rm -rf "$bundle"
+        echo "      Done."
+    else
+        echo "  ==> $bundle not found (skipped)"
+    fi
+done
 
 # Remove data directory (SQLite DB, logs, models, socket)
 if [[ -d "$DATA_DIR" ]]; then

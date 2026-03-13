@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use aura_bridge::script::{ScriptExecutor, ScriptLanguage};
 use aura_screen::macos::MacOSScreenReader;
+use base64::Engine;
 
 use super::is_automation_denied;
 use super::tool_helpers::{
@@ -93,10 +94,42 @@ pub(crate) async fn execute_tool(
                 "stderr": result.stderr,
             })
         }
-        "get_screen_context" => match screen_reader.capture_context() {
-            Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
-            Err(e) => serde_json::json!({ "success": false, "error": format!("{e}") }),
-        },
+        "get_screen_context" => {
+            let ctx = screen_reader.capture_context();
+            let mut response = match ctx {
+                Ok(ctx) => serde_json::json!({ "success": true, "context": ctx.summary() }),
+                Err(e) => return serde_json::json!({ "success": false, "error": format!("{e}") }),
+            };
+            // Capture high-res frame and run SoM overlay for visual element targeting
+            if let Ok(Ok(frame)) =
+                tokio::task::spawn_blocking(aura_screen::capture::capture_screen_high_res).await
+                && let Ok(jpeg_bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(&frame.jpeg_base64)
+                && let Some((_annotated_b64, marks)) =
+                    aura_screen::capture::annotate_with_som(&jpeg_bytes)
+                && !marks.is_empty()
+            {
+                let marks_json: Vec<serde_json::Value> = marks
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "mark": m.id,
+                            "center_x": m.x + m.width / 2,
+                            "center_y": m.y + m.height / 2,
+                            "bounds": { "x": m.x, "y": m.y, "w": m.width, "h": m.height },
+                        })
+                    })
+                    .collect();
+                if let Some(obj) = response.as_object_mut() {
+                    obj.insert("visual_marks".to_string(), serde_json::json!(marks_json));
+                    obj.insert(
+                        "visual_marks_note".to_string(),
+                        "Numbered marks detected on screen. Use center_x/center_y with click tool for precise targeting.".into(),
+                    );
+                }
+            }
+            response
+        }
         // All input tools (mouse/keyboard) require Accessibility permission.
         // CGEvent.post() silently drops events without it — check before executing
         // so Gemini gets an honest failure instead of a fake success.

@@ -223,7 +223,7 @@ pub fn annotate_with_som(jpeg_bytes: &[u8]) -> Option<(String, Vec<crate::som::S
 
     // Encode annotated image back to JPEG
     let mut buf = Vec::new();
-    let encoder = JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+    let encoder = JpegEncoder::new_with_quality(&mut buf, ONDEMAND_JPEG_QUALITY);
     annotated.write_with_encoder(encoder).ok()?;
 
     Some((BASE64.encode(&buf), marks))
