@@ -137,8 +137,7 @@ impl FirestoreClient {
         summary: &str,
         auth_token: &str,
     ) -> Result<()> {
-        validate_document_id(session_id)
-            .context("invalid session_id for Firestore path")?;
+        validate_document_id(session_id).context("invalid session_id for Firestore path")?;
         let url = format!("{}/sessions/{}", self.base_url(), session_id);
         let now = Utc::now().to_rfc3339();
         let body = json!({
