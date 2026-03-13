@@ -178,15 +178,7 @@ pub(crate) async fn execute_tool(
             .await;
             // Brief delay to let apps register hover state before clicking
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            let modifiers: Vec<String> = args
-                .get("modifiers")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let modifiers = crate::tool_helpers::parse_modifiers(args);
             let btn = button.clone();
             let mods = modifiers.clone();
             run_with_pid_fallback(
@@ -261,15 +253,7 @@ pub(crate) async fn execute_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let modifiers: Vec<String> = args
-                .get("modifiers")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let modifiers = crate::tool_helpers::parse_modifiers(args);
             match aura_input::keyboard::keycode_from_name(&key_name) {
                 Some(keycode) => {
                     let mods = modifiers.clone();
@@ -322,15 +306,7 @@ pub(crate) async fn execute_tool(
             let fy = dims.to_logical_y(raw_fy);
             let tx = dims.to_logical_x(raw_tx);
             let ty = dims.to_logical_y(raw_ty);
-            let modifiers: Vec<String> = args
-                .get("modifiers")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let modifiers = crate::tool_helpers::parse_modifiers(args);
             let mods = modifiers.clone();
             run_with_pid_fallback(
                 move |pid| {
@@ -474,15 +450,7 @@ pub(crate) async fn execute_tool(
                     return serde_json::json!({ "success": false, "error": format!("Unknown key: {key_name}") });
                 }
             };
-            let modifiers: Vec<String> = args
-                .get("modifiers")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let modifiers = crate::tool_helpers::parse_modifiers(args);
             match action {
                 "down" => {
                     let mods = modifiers.clone();

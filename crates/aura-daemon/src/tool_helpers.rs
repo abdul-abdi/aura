@@ -330,6 +330,18 @@ pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
     format!("{}...[truncated]", &s[..end])
 }
 
+/// Parse optional modifier keys from tool args JSON.
+pub(crate) fn parse_modifiers(args: &serde_json::Value) -> Vec<String> {
+    args.get("modifiers")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Returns true if the tool changes screen state and should get post_state enrichment
 /// and screenshot await behavior.
 pub(crate) fn is_state_changing_tool(name: &str) -> bool {
@@ -341,7 +353,6 @@ pub(crate) fn is_state_changing_tool(name: &str) -> bool {
             | "press_key"
             | "scroll"
             | "drag"
-            | "key_state"
             | "click_element"
             | "activate_app"
             | "click_menu_item"

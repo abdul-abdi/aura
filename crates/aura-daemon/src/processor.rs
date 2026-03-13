@@ -559,6 +559,35 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             "screenshot_delivered".to_string(),
                                             serde_json::Value::Bool(verified),
                                         );
+                                        // Enrich right-click post_state with context menu items
+                                        let is_right_click = name == "click"
+                                            && args.get("button").and_then(|v| v.as_str())
+                                                == Some("right");
+                                        if is_right_click && verified {
+                                            // Brief delay for context menu to appear in AX tree
+                                            tokio::time::sleep(Duration::from_millis(100)).await;
+                                            let menu_items = tokio::task::spawn_blocking(
+                                                aura_screen::accessibility::get_menu_items,
+                                            )
+                                            .await
+                                            .unwrap_or_default();
+                                            if !menu_items.is_empty() {
+                                                let items_json: Vec<serde_json::Value> =
+                                                    menu_items
+                                                        .iter()
+                                                        .map(|el| {
+                                                            serde_json::json!({
+                                                                "label": el.label,
+                                                                "enabled": el.enabled,
+                                                            })
+                                                        })
+                                                        .collect();
+                                                ps_obj.insert(
+                                                    "menu_items".to_string(),
+                                                    serde_json::json!(items_json),
+                                                );
+                                            }
+                                        }
                                     }
                                     obj.insert("post_state".to_string(), ps);
                                 }
