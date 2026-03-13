@@ -104,7 +104,12 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             "x": { "type": "number", "description": "X coordinate" },
                             "y": { "type": "number", "description": "Y coordinate" },
                             "button": { "type": "string", "enum": ["left", "right"], "description": "Mouse button. Default: left" },
-                            "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" }
+                            "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" },
+                            "modifiers": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                                "description": "Modifier keys to hold during click. Use for Cmd+click (multi-select, new tab), Shift+click (range select)."
+                            }
                         },
                         "required": ["x", "y"]
                     }),
@@ -171,7 +176,8 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                 FunctionDeclaration {
                     name: "drag".into(),
                     description: "Click and drag from one point to another. Used for moving \
-                        windows, selecting text, dragging files, etc. \
+                        windows, selecting text, dragging files, etc. Interpolates intermediate \
+                        points for reliable drag operations. \
                         Invoke this tool only after you have identified the start and end \
                         coordinates from screen context."
                         .into(),
@@ -181,7 +187,12 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                             "from_x": { "type": "number", "description": "Start X coordinate" },
                             "from_y": { "type": "number", "description": "Start Y coordinate" },
                             "to_x": { "type": "number", "description": "End X coordinate" },
-                            "to_y": { "type": "number", "description": "End Y coordinate" }
+                            "to_y": { "type": "number", "description": "End Y coordinate" },
+                            "modifiers": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                                "description": "Modifier keys to hold during drag."
+                            }
                         },
                         "required": ["from_x", "from_y", "to_x", "to_y"]
                     }),

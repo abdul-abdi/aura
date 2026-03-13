@@ -178,11 +178,27 @@ pub(crate) async fn execute_tool(
             .await;
             // Brief delay to let apps register hover state before clicking
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let modifiers: Vec<String> = args
+                .get("modifiers")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
             let btn = button.clone();
+            let mods = modifiers.clone();
             run_with_pid_fallback(
-                move |pid| aura_input::mouse::click_pid(x, y, &btn, count, pid),
+                move |pid| {
+                    let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
+                    aura_input::mouse::click_pid(x, y, &btn, count, &mod_refs, pid)
+                },
                 "pid_click",
-                move || aura_input::mouse::click(x, y, &button, count),
+                move || {
+                    let mod_refs: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
+                    aura_input::mouse::click(x, y, &button, count, &mod_refs)
+                },
                 "hid_click",
             )
             .await
@@ -306,10 +322,26 @@ pub(crate) async fn execute_tool(
             let fy = dims.to_logical_y(raw_fy);
             let tx = dims.to_logical_x(raw_tx);
             let ty = dims.to_logical_y(raw_ty);
+            let modifiers: Vec<String> = args
+                .get("modifiers")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mods = modifiers.clone();
             run_with_pid_fallback(
-                move |pid| aura_input::mouse::drag_pid(fx, fy, tx, ty, pid),
+                move |pid| {
+                    let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
+                    aura_input::mouse::drag_pid(fx, fy, tx, ty, &mod_refs, pid)
+                },
                 "pid_drag",
-                move || aura_input::mouse::drag(fx, fy, tx, ty),
+                move || {
+                    let mod_refs: Vec<&str> = modifiers.iter().map(|s| s.as_str()).collect();
+                    aura_input::mouse::drag(fx, fy, tx, ty, &mod_refs)
+                },
                 "hid_drag",
             )
             .await

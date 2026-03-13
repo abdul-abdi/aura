@@ -144,7 +144,7 @@ pub(crate) fn click_element_inner(
 
     // Try 2: PID-targeted click
     if let Some(pid) = aura_screen::macos::get_frontmost_pid() {
-        if aura_input::mouse::click_pid(center_x, center_y, "left", 1, pid).is_ok() {
+        if aura_input::mouse::click_pid(center_x, center_y, "left", 1, &[], pid).is_ok() {
             return serde_json::json!({
                 "success": true,
                 "method": "pid_click",
@@ -162,7 +162,7 @@ pub(crate) fn click_element_inner(
     }
 
     // Try 3: HID click fallback
-    match aura_input::mouse::click(center_x, center_y, "left", 1) {
+    match aura_input::mouse::click(center_x, center_y, "left", 1, &[]) {
         Ok(()) => serde_json::json!({
             "success": true,
             "method": "hid_click",
