@@ -23,6 +23,11 @@ const AX_ERROR_SUCCESS: i32 = 0;
 const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
 
+/// Interactive roles whose children should be collected (bounded, 1 level, max 10).
+const RECURSE_INTO_ROLES: &[&str] = &["AXPopUpButton", "AXComboBox", "AXTabGroup", "AXMenuBar"];
+
+const MAX_CHILDREN_PER_INTERACTIVE: usize = 10;
+
 pub static INTERACTIVE_ROLES: &[&str] = &[
     "AXButton",
     "AXTextField",
@@ -286,13 +291,58 @@ fn walk_element(
         };
 
         elements.push(UIElement {
-            role,
-            label,
-            value,
-            bounds,
+            role: role.clone(),
+            label: label.clone(),
+            value: value.clone(),
+            bounds: bounds.clone(),
             enabled,
             focused,
+            parent_label: None,
         });
+
+        // Bounded 1-level recursion into container roles to expose children
+        // (dropdown options, tab labels, combo box items, menu bar items).
+        if RECURSE_INTO_ROLES.contains(&role.as_str()) {
+            let parent_label_for_children = label.clone();
+            let children = get_ax_children(element);
+            let mut child_count = 0;
+            for child in &children {
+                if child_count >= MAX_CHILDREN_PER_INTERACTIVE || elements.len() >= MAX_ELEMENTS {
+                    break;
+                }
+                if let Some(child_role) = get_ax_string(*child, "AXRole") {
+                    let child_label = get_ax_string(*child, "AXTitle")
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            get_ax_string(*child, "AXDescription").filter(|s| !s.is_empty())
+                        });
+                    let child_value = get_ax_string(*child, "AXValue").filter(|s| !s.is_empty());
+                    let child_enabled = get_ax_bool(*child, "AXEnabled");
+                    let child_bounds = match (get_ax_position(*child), get_ax_size(*child)) {
+                        (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                        }),
+                        _ => None,
+                    };
+                    elements.push(UIElement {
+                        role: child_role,
+                        label: child_label,
+                        value: child_value,
+                        bounds: child_bounds,
+                        enabled: child_enabled,
+                        focused: false,
+                        parent_label: parent_label_for_children.clone(),
+                    });
+                    child_count += 1;
+                }
+            }
+            for child in &children {
+                unsafe { CFRelease(*child) };
+            }
+        }
     } else {
         // Not interactive — recurse into children.
         let children = get_ax_children(element);
@@ -376,6 +426,7 @@ pub fn get_focused_element() -> Option<UIElement> {
         bounds,
         enabled,
         focused,
+        parent_label: None,
     })
 }
 
@@ -560,6 +611,7 @@ fn find_element_single_pass(
                 bounds,
                 enabled,
                 focused,
+                parent_label: None,
             },
         ));
     }
@@ -795,6 +847,7 @@ fn collect_menu_items(
             bounds,
             enabled,
             focused: false,
+            parent_label: None,
         });
         return;
     }
@@ -830,6 +883,7 @@ mod tests {
             }),
             enabled: true,
             focused: false,
+            parent_label: None,
         }
     }
 
