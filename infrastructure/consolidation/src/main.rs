@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::Semaphore;
 use axum::{
     Router,
     extract::{DefaultBodyLimit, State},
@@ -15,11 +14,12 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
-use futures::future::join_all;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -97,8 +97,7 @@ struct ConsolidationResult {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -189,24 +188,17 @@ async fn consolidate(
     );
 
     // Build prompt and call Gemini.
-    let result = call_gemini(&state, &req.messages)
-        .await
-        .map_err(|e| {
-            error!("Gemini call failed: {e:#}");
-            (StatusCode::BAD_GATEWAY, "Upstream model error".to_string())
-        })?;
+    let result = call_gemini(&state, &req.messages).await.map_err(|e| {
+        error!("Gemini call failed: {e:#}");
+        (StatusCode::BAD_GATEWAY, "Upstream model error".to_string())
+    })?;
 
     // Obtain GCP access token and write to Firestore.
     match get_gcp_token(&state.http).await {
         Ok(gcp_token) => {
-            if let Err(e) = write_to_firestore(
-                &state,
-                &gcp_token,
-                &req.device_id,
-                &req.session_id,
-                &result,
-            )
-            .await
+            if let Err(e) =
+                write_to_firestore(&state, &gcp_token, &req.device_id, &req.session_id, &result)
+                    .await
             {
                 // Non-fatal — log and continue so the caller still gets facts.
                 error!("Firestore write failed: {e:#}");
@@ -266,7 +258,11 @@ fn build_prompt(messages: &[Message]) -> String {
             r == "user" || r == "tool_call"
         })
         .map(|m| {
-            let label = if m.role == "user" { "USER" } else { "TOOL_CALL" };
+            let label = if m.role == "user" {
+                "USER"
+            } else {
+                "TOOL_CALL"
+            };
             format!("[{label}] {}", m.content)
         })
         .collect();
@@ -297,7 +293,10 @@ fn build_prompt(messages: &[Message]) -> String {
 
 async fn call_gemini(state: &AppState, messages: &[Message]) -> Result<ConsolidationResult> {
     let prompt = build_prompt(messages);
-    let url = format!("{GEMINI_REST_URL}/{}:generateContent", state.consolidation_model);
+    let url = format!(
+        "{GEMINI_REST_URL}/{}:generateContent",
+        state.consolidation_model
+    );
 
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
@@ -377,23 +376,27 @@ async fn write_to_firestore(
     );
 
     // Write all facts concurrently.
-    let fact_futures: Vec<_> = result.facts.iter().map(|fact| {
-        let doc_id = fact_doc_id(&fact.category, &fact.content);
-        let url = format!("{base}/facts/{doc_id}");
-        let body = fact_to_firestore_doc(fact, session_id);
-        let http = &state.http;
-        async move {
-            http.patch(&url)
-                .bearer_auth(gcp_token)
-                .json(&body)
-                .send()
-                .await
-                .context("write_fact: request failed")?
-                .error_for_status()
-                .context("write_fact: non-2xx response")?;
-            Ok::<_, anyhow::Error>(())
-        }
-    }).collect();
+    let fact_futures: Vec<_> = result
+        .facts
+        .iter()
+        .map(|fact| {
+            let doc_id = fact_doc_id(&fact.category, &fact.content);
+            let url = format!("{base}/facts/{doc_id}");
+            let body = fact_to_firestore_doc(fact, session_id);
+            let http = &state.http;
+            async move {
+                http.patch(&url)
+                    .bearer_auth(gcp_token)
+                    .json(&body)
+                    .send()
+                    .await
+                    .context("write_fact: request failed")?
+                    .error_for_status()
+                    .context("write_fact: non-2xx response")?;
+                Ok::<_, anyhow::Error>(())
+            }
+        })
+        .collect();
 
     let results = join_all(fact_futures).await;
     for (i, r) in results.into_iter().enumerate() {
