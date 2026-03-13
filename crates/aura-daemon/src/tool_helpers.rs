@@ -433,6 +433,22 @@ pub(crate) fn spiral_offsets(radius: i32) -> Vec<(i32, i32)> {
 /// Maximum number of spiral retry attempts for coordinate-based clicks.
 pub(crate) const MAX_CLICK_RETRIES: usize = 4;
 
+/// Check if a point (x, y) in pixel coordinates falls within Gemini-normalized
+/// bounding box [y0, x0, y1, x1] (each in [0, 1000]).
+pub(crate) fn point_in_denormalized_bounds(
+    x: f64,
+    y: f64,
+    bounds: &[i32; 4], // [y0, x0, y1, x1] normalized to [0, 1000]
+    screen_w: f64,
+    screen_h: f64,
+) -> bool {
+    let x0 = bounds[1] as f64 / 1000.0 * screen_w;
+    let y0 = bounds[0] as f64 / 1000.0 * screen_h;
+    let x1 = bounds[3] as f64 / 1000.0 * screen_w;
+    let y1 = bounds[2] as f64 / 1000.0 * screen_h;
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+
 /// Pixel radius for spiral retry offsets.
 pub(crate) const SPIRAL_RADIUS: i32 = 15;
 
@@ -617,6 +633,32 @@ mod tests {
         });
         assert_eq!(response["hint"], "use_coordinates");
         assert!(response["suggestion"].as_str().unwrap().contains("click"));
+    }
+
+    #[test]
+    fn point_in_bounds_check() {
+        // Bounds: [y0, x0, y1, x1] normalized to [0, 1000]
+        // Screen: 1920×1080
+        let screen_w = 1920.0;
+        let screen_h = 1080.0;
+        // Element at roughly center of screen: [400, 400, 600, 600] in normalized
+        let bounds = [400, 400, 600, 600]; // y0, x0, y1, x1
+
+        let x0 = bounds[1] as f64 / 1000.0 * screen_w; // 768
+        let y0 = bounds[0] as f64 / 1000.0 * screen_h; // 432
+
+        // Center of bounds
+        assert!(point_in_denormalized_bounds(
+            960.0, 540.0, &bounds, screen_w, screen_h
+        ));
+        // Outside bounds
+        assert!(!point_in_denormalized_bounds(
+            100.0, 100.0, &bounds, screen_w, screen_h
+        ));
+        // Edge of bounds (inclusive)
+        assert!(point_in_denormalized_bounds(
+            x0, y0, &bounds, screen_w, screen_h
+        ));
     }
 
     #[test]

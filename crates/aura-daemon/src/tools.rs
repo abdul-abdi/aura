@@ -11,7 +11,7 @@ use super::tool_helpers::{
 // Re-export helpers used by processor.rs via `tools::` path
 pub(crate) use super::tool_helpers::{
     FrameDims, MAX_CLICK_RETRIES, SPIRAL_RADIUS, capture_post_state, is_state_changing_tool,
-    settle_delay_for_tool, spiral_offsets, truncate_tool_response,
+    point_in_denormalized_bounds, settle_delay_for_tool, spiral_offsets, truncate_tool_response,
 };
 
 /// Maximum characters allowed in a single type_text tool call.

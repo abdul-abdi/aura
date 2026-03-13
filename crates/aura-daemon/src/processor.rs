@@ -514,6 +514,34 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 }
                             }
 
+                            // Validate expected_bounds if provided (click tool)
+                            if matches!(name.as_str(), "click" | "context_menu_click")
+                                && let Some(bounds_arr) = args.get("expected_bounds").and_then(|v| v.as_array())
+                                && bounds_arr.len() == 4
+                            {
+                                let bounds: [i32; 4] = [
+                                    bounds_arr[0].as_i64().unwrap_or(0) as i32,
+                                    bounds_arr[1].as_i64().unwrap_or(0) as i32,
+                                    bounds_arr[2].as_i64().unwrap_or(0) as i32,
+                                    bounds_arr[3].as_i64().unwrap_or(0) as i32,
+                                ];
+                                let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let (sw, sh) = (tool_dims.img_w as f64, tool_dims.img_h as f64);
+                                if !tools::point_in_denormalized_bounds(x, y, &bounds, sw, sh) {
+                                    tracing::warn!(
+                                        tool = %name, x, y, ?bounds,
+                                        "Click coordinates outside expected_bounds — likely mis-targeted"
+                                    );
+                                    if let Some(obj) = response.as_object_mut() {
+                                        obj.insert(
+                                            "bounds_warning".into(),
+                                            serde_json::json!("Click coordinates are outside the expected element bounds. The click may miss its target."),
+                                        );
+                                    }
+                                }
+                            }
+
                             // For state-changing tools: verify screen actually changed before reporting success
                             let mut verified;
                             let mut verification_reason: Option<&str> = None;
