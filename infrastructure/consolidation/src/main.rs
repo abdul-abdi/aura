@@ -24,7 +24,7 @@ use futures::future::join_all;
 // Constants
 // ---------------------------------------------------------------------------
 
-const CONSOLIDATION_MODEL: &str = "gemini-2.0-flash-lite";
+const DEFAULT_CONSOLIDATION_MODEL: &str = "gemini-2.5-flash-lite";
 const GEMINI_REST_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const FIRESTORE_BASE: &str = "https://firestore.googleapis.com/v1/projects";
 const METADATA_TOKEN_URL: &str =
@@ -39,6 +39,7 @@ struct AppState {
     gemini_api_key: String,
     auth_token: String,
     gcp_project_id: String,
+    consolidation_model: String,
     http: reqwest::Client,
 }
 
@@ -101,6 +102,8 @@ async fn main() -> Result<()> {
         std::env::var("AURA_AUTH_TOKEN").context("AURA_AUTH_TOKEN env var is required")?;
     let gcp_project_id =
         std::env::var("GCP_PROJECT_ID").context("GCP_PROJECT_ID env var is required")?;
+    let consolidation_model = std::env::var("CONSOLIDATION_MODEL")
+        .unwrap_or_else(|_| DEFAULT_CONSOLIDATION_MODEL.to_string());
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -110,6 +113,7 @@ async fn main() -> Result<()> {
         gemini_api_key,
         auth_token,
         gcp_project_id,
+        consolidation_model,
         http: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -272,7 +276,7 @@ fn build_prompt(messages: &[Message]) -> String {
 
 async fn call_gemini(state: &AppState, messages: &[Message]) -> Result<ConsolidationResult> {
     let prompt = build_prompt(messages);
-    let url = format!("{GEMINI_REST_URL}/{CONSOLIDATION_MODEL}:generateContent");
+    let url = format!("{GEMINI_REST_URL}/{}:generateContent", state.consolidation_model);
 
     let body = json!({
         "contents": [{"parts": [{"text": prompt}]}],
