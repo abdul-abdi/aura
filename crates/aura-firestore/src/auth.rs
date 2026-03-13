@@ -27,7 +27,7 @@ pub struct AuthCache {
     client: reqwest::Client,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct SignUpResponse {
     #[serde(rename = "idToken")]
     id_token: String,
@@ -39,7 +39,7 @@ struct SignUpResponse {
     expires_in: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct RefreshResponse {
     id_token: String,
     refresh_token: String,
@@ -52,7 +52,10 @@ impl AuthCache {
         Self {
             web_api_key,
             cached: Mutex::new(None),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("Failed to build reqwest client for AuthCache"),
         }
     }
 
@@ -90,6 +93,8 @@ impl AuthCache {
             .send()
             .await
             .context("Firebase anonymous sign-up request failed")?
+            .error_for_status()
+            .context("Firebase sign-up returned error status")?
             .json()
             .await
             .context("Failed to parse Firebase sign-up response")?;
@@ -130,6 +135,8 @@ impl AuthCache {
             .send()
             .await
             .context("Firebase token refresh request failed")?
+            .error_for_status()
+            .context("Firebase token refresh returned error status")?
             .json()
             .await
             .context("Failed to parse Firebase refresh response")?;

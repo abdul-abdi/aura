@@ -9,12 +9,13 @@ set -euo pipefail
 
 PROJECT_ID=""
 REGION="us-central1"
-SERVICE_NAME="aura-consolidation"
+ENVIRONMENT="staging"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --project) PROJECT_ID="$2"; shift 2;;
         --region) REGION="$2"; shift 2;;
+        --environment) ENVIRONMENT="$2"; shift 2;;
         *) echo "Unknown arg: $1"; exit 1;;
     esac
 done
@@ -23,10 +24,19 @@ if [[ -z "$PROJECT_ID" ]]; then
     echo "Usage: ./scripts/deploy-gcp.sh --project <GCP_PROJECT_ID>"
     echo ""
     echo "Options:"
-    echo "  --project   GCP project ID (required)"
-    echo "  --region    GCP region (default: us-central1)"
+    echo "  --project       GCP project ID (required)"
+    echo "  --region        GCP region (default: us-central1)"
+    echo "  --environment   staging or production (default: staging)"
     exit 1
 fi
+
+# Derive service name from environment
+case "$ENVIRONMENT" in
+    production|prod) ENV_SUFFIX="prod" ;;
+    staging)         ENV_SUFFIX="staging" ;;
+    *) echo "Error: --environment must be 'staging' or 'production'" >&2; exit 1 ;;
+esac
+SERVICE_NAME="aura-consolidation-${ENV_SUFFIX}"
 
 echo "==> Pre-flight checks..."
 
@@ -39,15 +49,12 @@ fi
 if [[ -z "${AURA_AUTH_TOKEN:-}" ]]; then
     echo "  AURA_AUTH_TOKEN not set — generating a random token..."
     AURA_AUTH_TOKEN=$(openssl rand -hex 32)
-    echo "  Generated AURA_AUTH_TOKEN: $AURA_AUTH_TOKEN"
-    echo "  (Save this — you will need it in config.toml)"
+    echo "  Generated AURA_AUTH_TOKEN (saved to Secret Manager, retrieve with gcloud)"
+    echo "  (Set cloud_run_auth_token in config.toml to this value)"
 fi
 
 echo "==> Checking gcloud CLI..."
 command -v gcloud >/dev/null 2>&1 || { echo "Error: gcloud CLI not found. Install: https://cloud.google.com/sdk/docs/install"; exit 1; }
-
-echo "==> Setting project to $PROJECT_ID..."
-gcloud config set project "$PROJECT_ID"
 
 echo "==> Enabling required APIs..."
 gcloud services enable \
@@ -55,10 +62,18 @@ gcloud services enable \
     run.googleapis.com \
     artifactregistry.googleapis.com \
     cloudbuild.googleapis.com \
-    secretmanager.googleapis.com
+    secretmanager.googleapis.com \
+    --project "$PROJECT_ID"
 
 echo "==> Creating Firestore database (Native mode)..."
-gcloud firestore databases create --location="$REGION" 2>/dev/null || echo "    Firestore database already exists, skipping."
+if ! gcloud firestore databases describe --project "$PROJECT_ID" &>/dev/null; then
+    gcloud firestore databases create --location="$REGION" --project "$PROJECT_ID" || {
+        echo "ERROR: Failed to create Firestore database. Check permissions and billing."
+        exit 1
+    }
+else
+    echo "    Firestore database already exists, skipping."
+fi
 
 echo "==> Storing secrets in Secret Manager..."
 
@@ -95,6 +110,7 @@ done
 echo "==> Building and deploying Cloud Run service..."
 gcloud run deploy "$SERVICE_NAME" \
     --source infrastructure/ \
+    --project "$PROJECT_ID" \
     --region "$REGION" \
     --allow-unauthenticated \
     --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
@@ -110,7 +126,7 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --role="roles/datastore.user" \
     --quiet
 
-CLOUD_RUN_URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format 'value(status.url)')
+CLOUD_RUN_URL=$(gcloud run services describe "$SERVICE_NAME" --project "$PROJECT_ID" --region "$REGION" --format 'value(status.url)')
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

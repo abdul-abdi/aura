@@ -154,10 +154,14 @@ async fn consolidate(
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()));
     }
 
-    // Validate device_id to prevent Firestore path traversal.
+    // Validate device_id and session_id to prevent Firestore path traversal.
     validate_device_id(&req.device_id).map_err(|e| {
         warn!("consolidate: invalid device_id: {e}");
         (StatusCode::BAD_REQUEST, format!("Invalid device_id: {e}"))
+    })?;
+    validate_document_id(&req.session_id).map_err(|e| {
+        warn!("consolidate: invalid session_id: {e}");
+        (StatusCode::BAD_REQUEST, format!("Invalid session_id: {e}"))
     })?;
 
     info!(
@@ -172,7 +176,7 @@ async fn consolidate(
         .await
         .map_err(|e| {
             error!("Gemini call failed: {e:#}");
-            (StatusCode::BAD_GATEWAY, format!("Gemini error: {e}"))
+            (StatusCode::BAD_GATEWAY, "Upstream model error".to_string())
         })?;
 
     // Obtain GCP access token and write to Firestore.
@@ -420,6 +424,23 @@ fn fact_doc_id(category: &str, content: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{:016x}", hash)
+}
+
+/// Validate a string is safe for use as a Firestore document ID in URL paths.
+/// Allows alphanumeric chars, hyphens, and underscores only. Max 128 chars.
+fn validate_document_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 128 {
+        anyhow::bail!("document ID must be 1-128 characters, got {}", id.len());
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "document ID must contain only alphanumeric characters, hyphens, and underscores"
+        );
+    }
+    Ok(())
 }
 
 /// Validate device_id to prevent Firestore path traversal.

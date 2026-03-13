@@ -185,6 +185,14 @@ fn check_script_safety(script: &str, language: ScriptLanguage) -> Option<String>
         return Some("'do shell script' is blocked — it allows arbitrary command execution".into());
     }
 
+    // Block `run script` — it evaluates a string as a new AppleScript at runtime,
+    // bypassing all safety checks on the outer script.
+    if lower.contains("run script") {
+        return Some(
+            "'run script' is blocked — it can evaluate arbitrary code at runtime".to_string(),
+        );
+    }
+
     // Block concatenation-based obfuscation of "do shell script"
     // Detects atoms "do", "shell", "script" all present with `&` (AppleScript concat operator)
     if lower.contains('&') && contains_shell_atoms(&lower) {
@@ -385,6 +393,28 @@ mod tests {
     #[test]
     fn allowlist_blocks_jxa_doscript() {
         assert!(check_jxa(r#"Application("Terminal").doScript("ls")"#).is_some());
+    }
+
+    // --- Blocked: run script (dynamic eval bypass) ---
+
+    #[test]
+    fn allowlist_blocks_run_script() {
+        assert!(check_as(r#"run script "do shell script \"ls\"""#).is_some());
+        assert!(check_as(r#"run script "some arbitrary code""#).is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_run_script_case_insensitive() {
+        assert!(check_as(r#"Run Script "code""#).is_some());
+        assert!(check_as(r#"RUN SCRIPT "code""#).is_some());
+    }
+
+    #[test]
+    fn allowlist_blocks_run_script_in_tell_block() {
+        let script = r#"tell application "System Events"
+            run script "do shell script \"whoami\""
+        end tell"#;
+        assert!(check_as(script).is_some());
     }
 
     // --- Edge cases ---
