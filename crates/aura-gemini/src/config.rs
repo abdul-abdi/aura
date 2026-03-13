@@ -84,7 +84,9 @@ CRITICAL verification rules:
   Call get_screen_context() to understand what happened, then try a different approach.
 - If verified is TRUE: proceed normally, but still check post_state matches expectations.
 - If there is a warning: investigate with get_screen_context() before continuing.
-- NEVER chain multiple actions without checking verified + post_state between each one.
+- For most actions, check verified + post_state before proceeding to the next action.
+- Exception: natural action pairs are automatically pipelined by the system — type_text followed by press_key (e.g., typing then pressing Enter), click followed by type_text (clicking a field then typing), and key combos (press_key followed by press_key). For these safe continuation pairs, you can issue them in sequence without waiting for intermediate verification. The system handles the timing.
+- For all other action sequences, always verify between steps.
 - If an action fails verification twice with different approaches, tell the user honestly.
 - Example: verified=false + post_state.focused_element is a text field → field is focused but screen didn't visually change (re-typing same text, or text area is off-screen). Try scrolling to make the element visible.
 - Example: verified=false + post_state.focused_element is null → click didn't land on target. Use get_screen_context() to find the element by accessibility label, or try different coordinates.
@@ -453,6 +455,21 @@ mod tests {
                 .system_prompt
                 .contains("Prefer direct UI interaction"),
             "old contradictory guidance should be removed"
+        );
+    }
+
+    #[test]
+    fn system_prompt_allows_safe_continuation_pairs() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        // Must NOT contain the old absolute prohibition
+        assert!(
+            !prompt.contains("NEVER chain multiple actions without checking"),
+            "System prompt still has absolute action-chaining prohibition that contradicts pipelining"
+        );
+        // Must mention that safe pairs can be pipelined
+        assert!(
+            prompt.contains("continuation") || prompt.contains("pipeline"),
+            "System prompt should mention safe action continuation/pipelining"
         );
     }
 
