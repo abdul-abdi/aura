@@ -142,9 +142,8 @@ pub fn key_down(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
 }
 
 /// Release a previously held key.
-pub fn key_up(key: CGKeyCode, modifiers: &[&str]) -> Result<()> {
+pub fn key_up(key: CGKeyCode) -> Result<()> {
     let source = event_source()?;
-    let _ = modifiers;
     let up = CGEvent::new_keyboard_event(source, key, false)
         .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
     up.set_flags(CGEventFlags::CGEventFlagNull);
@@ -494,7 +493,7 @@ mod tests {
 
     #[test]
     fn key_up_creates_event_without_panic() {
-        let result = key_up(56, &[]);
+        let result = key_up(56);
         assert!(result.is_ok());
     }
 }

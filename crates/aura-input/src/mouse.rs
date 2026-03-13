@@ -157,6 +157,9 @@ pub fn drag(from_x: f64, from_y: f64, to_x: f64, to_y: f64, modifiers: &[&str]) 
     // Mouse up at destination
     let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
         .map_err(|_| anyhow::anyhow!("Failed to create drag up event"))?;
+    if !flags.is_empty() {
+        up.set_flags(flags);
+    }
     up.post(CGEventTapLocation::HID);
 
     Ok(())
@@ -301,6 +304,9 @@ pub fn drag_pid(
     // Mouse up at destination
     let up = CGEvent::new_mouse_event(source, CGEventType::LeftMouseUp, to, CGMouseButton::Left)
         .map_err(|_| anyhow::anyhow!("Failed to create drag up event"))?;
+    if !flags.is_empty() {
+        up.set_flags(flags);
+    }
     up.post_to_pid(pid);
 
     Ok(())

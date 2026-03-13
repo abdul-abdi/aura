@@ -72,6 +72,8 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let last_sent_hash = Arc::new(AtomicU64::new(0));
     let tool_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
     let state_change_mutex = Arc::new(tokio::sync::Mutex::new(()));
+    let held_keys: Arc<std::sync::Mutex<std::collections::HashSet<u16>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
     // Shared frame dimensions for coordinate mapping (image pixels -> logical points).
     // Updated by the capture loop after each successful capture.
@@ -307,9 +309,28 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("context");
                             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                            let response = if content.is_empty() {
-                                serde_json::json!({"success": false, "error": "content is required"})
-                            } else {
+                            const VALID_CATEGORIES: &[&str] = &["preference", "habit", "entity", "task", "context"];
+
+                            if content.is_empty() {
+                                let response = serde_json::json!({"success": false, "error": "content is required"});
+                                if let Err(e) = session.send_tool_response(id, name, response).await {
+                                    tracing::error!("Failed to send save_memory response: {e}");
+                                }
+                                continue;
+                            }
+
+                            if !VALID_CATEGORIES.contains(&category) {
+                                let response = serde_json::json!({
+                                    "success": false,
+                                    "error": format!("Invalid category '{}'. Must be one of: {}", category, VALID_CATEGORIES.join(", "))
+                                });
+                                if let Err(e) = session.send_tool_response(id, name, response).await {
+                                    tracing::error!("Failed to send save_memory response: {e}");
+                                }
+                                continue;
+                            }
+
+                            let response = {
                                 let cat = category.to_string();
                                 let cont = content.to_string();
                                 let sid = session_id.clone();
@@ -370,6 +391,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         let tool_inflight = Arc::clone(&tools_in_flight);
                         let tool_permission_error = Arc::clone(&has_permission_error);
                         let tool_ipc_tx = ipc_tx.clone();
+                        let tool_held_keys = Arc::clone(&held_keys);
                         let tool_last_hash = Arc::clone(&last_frame_hash);
                         let tool_dims = tools::FrameDims {
                             img_w: frame_img_w.load(Ordering::Acquire),
@@ -449,6 +471,23 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 guard.remove(&id);
                             } else {
                                 tracing::error!("active_tool_tokens lock poisoned on remove");
+                            }
+
+                            // Track held keys for key_state tool to enable auto-release on disconnect
+                            if name == "key_state"
+                                && response.get("success").and_then(|v| v.as_bool()).unwrap_or(false)
+                            {
+                                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                                let key_name = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(kc) = aura_input::keyboard::keycode_from_name(key_name)
+                                    && let Ok(mut keys) = tool_held_keys.lock()
+                                {
+                                    match action {
+                                        "down" => { keys.insert(kc); }
+                                        "up" => { keys.remove(&kc); }
+                                        _ => {}
+                                    }
+                                }
                             }
 
                             // For state-changing tools: verify screen actually changed before reporting success
@@ -728,6 +767,17 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                     }
                     Ok(GeminiEvent::Disconnected) => {
                         tracing::info!("Gemini session disconnected");
+
+                        // Release all held keys to prevent system-wide stuck modifiers
+                        let keys_to_release: Vec<u16> = held_keys
+                            .lock()
+                            .map(|mut g| g.drain().collect())
+                            .unwrap_or_default();
+                        for kc in keys_to_release {
+                            if let Err(e) = aura_input::keyboard::key_up(kc) {
+                                tracing::warn!(keycode = kc, "Failed to release held key on disconnect: {e}");
+                            }
+                        }
 
                         if let Some(ref tx) = menubar_tx {
                             let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;

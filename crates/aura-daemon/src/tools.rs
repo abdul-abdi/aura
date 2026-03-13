@@ -454,7 +454,9 @@ pub(crate) async fn execute_tool(
         "write_clipboard" => {
             let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
             match aura_screen::macos::set_clipboard(text) {
-                Ok(()) => serde_json::json!({ "success": true, "chars_written": text.len() }),
+                Ok(()) => {
+                    serde_json::json!({ "success": true, "chars_written": text.chars().count() })
+                }
                 Err(e) => {
                     serde_json::json!({ "success": false, "error": format!("Clipboard write failed: {e}") })
                 }
@@ -494,15 +496,8 @@ pub(crate) async fn execute_tool(
                     .await
                 }
                 "up" => {
-                    let mods = modifiers.clone();
-                    run_input_blocking(
-                        move || {
-                            let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
-                            aura_input::keyboard::key_up(keycode, &mod_refs)
-                        },
-                        "key_up",
-                    )
-                    .await
+                    run_input_blocking(move || aura_input::keyboard::key_up(keycode), "key_up")
+                        .await
                 }
                 other => {
                     serde_json::json!({ "success": false, "error": format!("Unknown action: {other}. Use 'down' or 'up'.") })
@@ -530,18 +525,28 @@ pub(crate) async fn execute_tool(
             let lx = dims.to_logical_x(raw_x);
             let ly = dims.to_logical_y(raw_y);
 
+            // Pre-move to target for hover registration
+            let _ = aura_input::mouse::move_mouse(lx, ly);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
             // Right-click at position
             if let Err(e) = aura_input::mouse::click(lx, ly, "right", 1, &[]) {
                 return serde_json::json!({ "success": false, "error": format!("Right-click failed: {e}") });
             }
 
+            // Initial delay to let the context menu render AX items
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
             // Poll for menu items to appear (up to 500ms)
             let mut found_item = None;
+            let mut last_seen_items: Vec<String> = Vec::new();
             for _ in 0..10 {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let items = tokio::task::spawn_blocking(aura_screen::accessibility::get_menu_items)
                     .await
                     .unwrap_or_default();
+                if !items.is_empty() {
+                    last_seen_items = items.iter().filter_map(|el| el.label.clone()).collect();
+                }
                 let label_lower = item_label.to_lowercase();
                 if let Some(item) = items.into_iter().find(|el| {
                     el.label
@@ -552,6 +557,7 @@ pub(crate) async fn execute_tool(
                     found_item = Some(item);
                     break;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
 
             match found_item {
@@ -573,16 +579,10 @@ pub(crate) async fn execute_tool(
                     }
                 }
                 None => {
-                    let items =
-                        tokio::task::spawn_blocking(aura_screen::accessibility::get_menu_items)
-                            .await
-                            .unwrap_or_default();
-                    let available: Vec<String> =
-                        items.iter().filter_map(|el| el.label.clone()).collect();
                     serde_json::json!({
                         "success": false,
                         "error": format!("Menu item '{}' not found in context menu", item_label),
-                        "available_items": available,
+                        "available_items": last_seen_items,
                     })
                 }
             }

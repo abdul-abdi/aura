@@ -321,10 +321,13 @@ pub(crate) fn truncate_tool_response(response: &mut serde_json::Value) {
 
 pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        format!("{}...[truncated]", &s[..max_chars])
+        return s.to_string();
     }
+    let mut end = max_chars.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated]", &s[..end])
 }
 
 /// Returns true if the tool changes screen state and should get post_state enrichment

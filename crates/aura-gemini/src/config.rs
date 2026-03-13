@@ -37,7 +37,7 @@ Computer Control Tools:
 - key_state(key, action): Hold or release a modifier key. action is 'down' or 'up'.
 - write_clipboard(text): Write text to the clipboard.
 - context_menu_click(x, y, item_label): Right-click at coordinates and select a context menu item by label.
-- save_memory(key, value): Persist information across sessions.
+- save_memory(category, content): Persist information across sessions with a category and content.
 - run_applescript(script): Execute AppleScript for complex automation.
 - get_screen_context(): Get frontmost app, windows, clipboard, and interactive UI elements with their labels and bounds.
 
