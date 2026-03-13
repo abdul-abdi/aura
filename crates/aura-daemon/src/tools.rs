@@ -99,7 +99,7 @@ pub(crate) async fn execute_tool(
         // All input tools (mouse/keyboard) require Accessibility permission.
         // CGEvent.post() silently drops events without it — check before executing
         // so Gemini gets an honest failure instead of a fake success.
-        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag"
+        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "key_state"
             if !aura_input::accessibility::check_accessibility(false) =>
         {
             serde_json::json!({
@@ -449,6 +449,143 @@ pub(crate) async fn execute_tool(
                     "error": format!("Menu item not found or click failed: {}", result.stderr),
                     "stderr": result.stderr,
                 })
+            }
+        }
+        "write_clipboard" => {
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            match aura_screen::macos::set_clipboard(text) {
+                Ok(()) => serde_json::json!({ "success": true, "chars_written": text.len() }),
+                Err(e) => {
+                    serde_json::json!({ "success": false, "error": format!("Clipboard write failed: {e}") })
+                }
+            }
+        }
+        "key_state" => {
+            let key_name = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("down");
+            let keycode = match aura_input::keyboard::keycode_from_name(key_name) {
+                Some(k) => k,
+                None => {
+                    return serde_json::json!({ "success": false, "error": format!("Unknown key: {key_name}") });
+                }
+            };
+            let modifiers: Vec<String> = args
+                .get("modifiers")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match action {
+                "down" => {
+                    let mods = modifiers.clone();
+                    run_input_blocking(
+                        move || {
+                            let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
+                            aura_input::keyboard::key_down(keycode, &mod_refs)
+                        },
+                        "key_down",
+                    )
+                    .await
+                }
+                "up" => {
+                    let mods = modifiers.clone();
+                    run_input_blocking(
+                        move || {
+                            let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
+                            aura_input::keyboard::key_up(keycode, &mod_refs)
+                        },
+                        "key_up",
+                    )
+                    .await
+                }
+                other => {
+                    serde_json::json!({ "success": false, "error": format!("Unknown action: {other}. Use 'down' or 'up'.") })
+                }
+            }
+        }
+        "context_menu_click" => {
+            if !aura_input::accessibility::check_accessibility(false) {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "Accessibility permission is not granted. \
+                              Required for context_menu_click to read menu items. \
+                              Enable in System Settings > Privacy & Security > Accessibility.",
+                    "error_kind": "accessibility_denied",
+                });
+            }
+
+            let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let item_label = args
+                .get("item_label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let lx = dims.to_logical_x(raw_x);
+            let ly = dims.to_logical_y(raw_y);
+
+            // Right-click at position
+            if let Err(e) = aura_input::mouse::click(lx, ly, "right", 1, &[]) {
+                return serde_json::json!({ "success": false, "error": format!("Right-click failed: {e}") });
+            }
+
+            // Poll for menu items to appear (up to 500ms)
+            let mut found_item = None;
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let items =
+                    tokio::task::spawn_blocking(aura_screen::accessibility::get_menu_items)
+                        .await
+                        .unwrap_or_default();
+                let label_lower = item_label.to_lowercase();
+                if let Some(item) = items.into_iter().find(|el| {
+                    el.label
+                        .as_deref()
+                        .map(|l| l.to_lowercase().contains(&label_lower))
+                        .unwrap_or(false)
+                }) {
+                    found_item = Some(item);
+                    break;
+                }
+            }
+
+            match found_item {
+                Some(item) => {
+                    if let Some(ref bounds) = item.bounds {
+                        let cx = bounds.x + bounds.width / 2.0;
+                        let cy = bounds.y + bounds.height / 2.0;
+                        let _ = aura_input::mouse::click(cx, cy, "left", 1, &[]);
+                        serde_json::json!({
+                            "success": true,
+                            "method": "context_menu_coordinate_click",
+                            "clicked_item": item.label,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "success": false,
+                            "error": "Found menu item but it has no bounds",
+                        })
+                    }
+                }
+                None => {
+                    let items =
+                        tokio::task::spawn_blocking(aura_screen::accessibility::get_menu_items)
+                            .await
+                            .unwrap_or_default();
+                    let available: Vec<String> =
+                        items.iter().filter_map(|el| el.label.clone()).collect();
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Menu item '{}' not found in context menu", item_label),
+                        "available_items": available,
+                    })
+                }
             }
         }
         other => serde_json::json!({

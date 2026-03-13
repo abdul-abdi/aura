@@ -6,7 +6,7 @@ use serde_json::json;
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
 /// Returns a `Vec<Tool>` with:
-/// - 13 function declarations for macOS automation and computer control
+/// - 14 function declarations for macOS automation and computer control
 /// - Google Search grounding (current events, weather, facts, etc.)
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![
@@ -291,6 +291,42 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },
+                FunctionDeclaration {
+                    name: "write_clipboard".into(),
+                    description: "Write text to the system clipboard. Use with Cmd+V to paste. \
+                        Useful for large text blocks or special characters that are hard to type. \
+                        Invoke this tool only after you have the text to place on the clipboard."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Text to place on the clipboard" }
+                        },
+                        "required": ["text"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "key_state".into(),
+                    description: "Hold or release a key. Use before drag to hold Shift/Option \
+                        during drag. Always release keys after use. \
+                        Invoke this tool only after you know which key to hold or release."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Key name (e.g., 'shift', 'a', 'cmd')" },
+                            "action": { "type": "string", "enum": ["down", "up"], "description": "'down' to hold, 'up' to release" },
+                            "modifiers": {
+                                "type": "array",
+                                "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+                                "description": "Additional modifier keys"
+                            }
+                        },
+                        "required": ["key", "action"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
             ]),
             google_search: None,
             code_execution: None,
@@ -313,7 +349,7 @@ mod tests {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 2, "Function declarations + Google Search");
         let decls = tools[0].function_declarations.as_ref().unwrap();
-        assert_eq!(decls.len(), 13, "Should have 13 function declarations");
+        assert_eq!(decls.len(), 15, "Should have 15 function declarations");
     }
 
     #[test]
@@ -337,6 +373,8 @@ mod tests {
                 "click_element",
                 "activate_app",
                 "click_menu_item",
+                "write_clipboard",
+                "key_state",
             ]
         );
     }
@@ -355,13 +393,15 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 13);
+        assert_eq!(decls.len(), 15);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
         assert_eq!(decls[3]["name"], "move_mouse");
         assert_eq!(decls[8]["name"], "drag");
         assert_eq!(decls[9]["name"], "recall_memory");
+        assert_eq!(decls[13]["name"], "write_clipboard");
+        assert_eq!(decls[14]["name"], "key_state");
         // Google Search
         assert!(value[1]["googleSearch"].is_object());
     }
