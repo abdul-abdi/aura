@@ -214,6 +214,46 @@ pub(crate) async fn execute_tool(
                 text
             };
 
+            // Detect password fields and route through clipboard paste instead of synthetic keys
+            let is_secure =
+                tokio::task::spawn_blocking(aura_screen::accessibility::is_focused_element_secure)
+                    .await
+                    .unwrap_or(false);
+
+            if is_secure {
+                tracing::info!("Secure text field detected — routing through clipboard paste");
+                if let Err(e) = aura_screen::macos::set_clipboard(&text) {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to write to clipboard for secure field: {e}"),
+                    });
+                }
+                // Paste with Cmd+V
+                let paste_result = run_input_blocking(
+                    || {
+                        aura_input::keyboard::press_key(
+                            aura_input::keyboard::keycode_from_name("v").unwrap(),
+                            &["cmd"],
+                        )
+                    },
+                    "clipboard_paste",
+                )
+                .await;
+                if paste_result
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    return serde_json::json!({
+                        "success": true,
+                        "method": "clipboard_paste",
+                        "reason": "secure_text_field",
+                        "note": "Used clipboard paste because the focused field blocks synthetic keyboard input (password field).",
+                    });
+                }
+                return paste_result;
+            }
+
             // If label/role provided, focus the target element first via AX
             let label = args.get("label").and_then(|v| v.as_str()).map(String::from);
             let role = args.get("role").and_then(|v| v.as_str()).map(String::from);

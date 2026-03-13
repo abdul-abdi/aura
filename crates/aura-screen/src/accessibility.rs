@@ -870,6 +870,43 @@ pub fn ax_set_focused(label: Option<&str>, role: Option<&str>) -> AXActionResult
     }
 }
 
+/// Check if a subrole indicates a secure (password) text field.
+/// macOS blocks synthetic keyboard input to these fields via SecureEventInput.
+pub fn is_secure_text_subrole(subrole: &str) -> bool {
+    subrole == "AXSecureTextField"
+}
+
+/// Check if the currently focused element is a secure text field.
+/// Returns true if the focused element's subrole is AXSecureTextField.
+pub fn is_focused_element_secure() -> bool {
+    let pid = match crate::macos::get_frontmost_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return false;
+    }
+    let app_ref = CfRef::new(app);
+
+    // Get the raw AXUIElement ref for the focused element
+    let attr_key = cf_string_from_str("AXFocusedUIElement");
+    let mut focused: CFTypeRef = std::ptr::null();
+    let err =
+        unsafe { AXUIElementCopyAttributeValue(app_ref.as_raw(), attr_key.as_raw(), &mut focused) };
+    if err != AX_ERROR_SUCCESS || focused.is_null() {
+        return false;
+    }
+    let focused_ref = CfRef::new(focused);
+
+    // Get the subrole of the focused element
+    match get_ax_string(focused_ref.as_raw(), "AXSubrole") {
+        Some(subrole) => is_secure_text_subrole(&subrole),
+        None => false,
+    }
+}
+
 /// Collect AXMenuItem elements from the frontmost app's AX tree.
 pub fn get_menu_items() -> Vec<UIElement> {
     let pid = match crate::macos::get_frontmost_pid() {
@@ -1145,5 +1182,13 @@ mod tests {
         let result = ax_set_focused(Some("NonExistentField99"), Some("AXTextField"));
         assert!(!result.success);
         assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn is_secure_field_detects_password_subroles() {
+        assert!(is_secure_text_subrole("AXSecureTextField"));
+        assert!(!is_secure_text_subrole("AXTextField"));
+        assert!(!is_secure_text_subrole("AXTextArea"));
+        assert!(!is_secure_text_subrole(""));
     }
 }
