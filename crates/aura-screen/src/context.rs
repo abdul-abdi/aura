@@ -45,14 +45,15 @@ impl UIElement {
             parts.push(format!("\"{}\"", label));
         }
 
-        if let Some(ref v) = self.value {
-            if !v.is_empty() && self.label.as_deref() != Some(v.as_str()) {
-                let truncated: String = v.chars().take(100).collect();
-                if truncated.len() < v.len() {
-                    parts.push(format!("value=\"{}...\"", truncated));
-                } else {
-                    parts.push(format!("value=\"{}\"", truncated));
-                }
+        if let Some(ref v) = self.value
+            && !v.is_empty()
+            && self.label.as_deref() != Some(v.as_str())
+        {
+            let truncated: String = v.chars().take(100).collect();
+            if truncated.len() < v.len() {
+                parts.push(format!("value=\"{}...\"", truncated));
+            } else {
+                parts.push(format!("value=\"{}\"", truncated));
             }
         }
 
@@ -138,7 +139,7 @@ impl ScreenContext {
             parts.push(format!("Open windows: {}", self.open_windows.join(", ")));
         }
         if let Some(ref clip) = self.clipboard {
-            let truncated: String = clip.chars().take(200).collect();
+            let truncated: String = clip.chars().take(500).collect();
             if truncated.len() < clip.len() {
                 parts.push(format!("Clipboard: {truncated}..."));
             } else {

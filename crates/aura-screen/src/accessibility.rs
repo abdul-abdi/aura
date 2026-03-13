@@ -985,7 +985,7 @@ fn collect_menu_items(
             focused: false,
             parent_label: None,
         });
-        return;
+        // Recurse into children to capture submenu items
     }
     let children = get_ax_children(element);
     for child in &children {

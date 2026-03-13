@@ -419,6 +419,15 @@ pub(crate) async fn execute_tool(
             let fy = dims.to_logical_y(raw_fy);
             let tx = dims.to_logical_x(raw_tx);
             let ty = dims.to_logical_y(raw_ty);
+            // Pre-move cursor to drag origin so apps register hover state
+            let pre_x = fx;
+            let pre_y = fy;
+            run_input_blocking(
+                move || aura_input::mouse::move_mouse(pre_x, pre_y),
+                "pre_drag_move",
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             let modifiers = crate::tool_helpers::parse_modifiers(args);
             let mods = modifiers.clone();
             run_with_pid_fallback(
