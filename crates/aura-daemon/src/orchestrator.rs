@@ -341,6 +341,22 @@ pub(crate) async fn run_daemon(
         // Consecutive frames above threshold during playback (prevents transients).
         let mut barge_in_streak: u32 = 0;
 
+        // VAD for speech detection (replaces energy-threshold gating).
+        // VoiceDetector wraps a raw C pointer and is not Send by default.
+        // This task has sole ownership and never shares it across threads,
+        // so the unsafe Send impl is sound.
+        struct SendableVad(aura_voice::vad::VoiceDetector);
+        // SAFETY: sole ownership, single-task access, no concurrent mutation.
+        unsafe impl Send for SendableVad {}
+        let mut vad: Option<SendableVad> = match aura_voice::vad::VoiceDetector::new() {
+            Ok(v) => Some(SendableVad(v)),
+            Err(e) => {
+                tracing::warn!("VAD init failed, falling back to energy gating: {e}");
+                None
+            }
+        };
+        let mut vad_accumulator: Vec<f32> = Vec::with_capacity(aura_voice::vad::VAD_FRAME_SIZE);
+
         loop {
             tokio::select! {
                 _ = audio_cancel.cancelled() => break,
@@ -379,30 +395,54 @@ pub(crate) async fn run_daemon(
                     prev_playing = currently_playing;
 
                     if currently_playing {
-                        // Energy-gate with inflated threshold: the multiplier
-                        // accounts for speaker bleed at high system volume.
-                        let energy = processor::rms_energy(&samples);
-                        let base = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
-                        let threshold = base * PLAYBACK_THRESHOLD_MULTIPLIER;
-                        if energy < threshold {
-                            barge_in_streak = 0;
-                            continue; // Below threshold — likely speaker echo
+                        if let Some(ref mut v) = vad {
+                            // Accumulate into VAD-sized frames
+                            vad_accumulator.extend_from_slice(&samples);
+                            let mut any_speech = false;
+                            while vad_accumulator.len() >= aura_voice::vad::VAD_FRAME_SIZE {
+                                let frame_f32: Vec<f32> = vad_accumulator.drain(..aura_voice::vad::VAD_FRAME_SIZE).collect();
+                                let frame_i16: Vec<i16> = frame_f32.iter()
+                                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                                    .collect();
+                                if v.0.is_speech(&frame_i16) {
+                                    any_speech = true;
+                                }
+                            }
+                            if !any_speech {
+                                continue; // VAD says no speech — skip
+                            }
+                            if barge_in_streak == 0 {
+                                tracing::info!("Barge-in: VAD detected speech during playback");
+                            }
+                            barge_in_streak = barge_in_streak.saturating_add(1);
+                            if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
+                                continue;
+                            }
+                        } else {
+                            // Fallback: original energy-based gating
+                            let energy = processor::rms_energy(&samples);
+                            let base = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
+                            let threshold = base * PLAYBACK_THRESHOLD_MULTIPLIER;
+                            if energy < threshold {
+                                barge_in_streak = 0;
+                                continue; // Below threshold — likely speaker echo
+                            }
+                            // Require sustained speech across consecutive frames
+                            // to avoid transient spikes from loud AI passages.
+                            barge_in_streak = barge_in_streak.saturating_add(1);
+                            if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
+                                continue; // Not enough consecutive frames yet
+                            }
+                            if barge_in_streak == BARGE_IN_CONSECUTIVE_FRAMES {
+                                tracing::info!(
+                                    energy,
+                                    threshold,
+                                    "Barge-in: sustained user speech detected during playback"
+                                );
+                            }
+                            // Don't reset streak — keep forwarding all above-threshold
+                            // frames so Gemini receives continuous audio for VAD.
                         }
-                        // Require sustained speech across consecutive frames
-                        // to avoid transient spikes from loud AI passages.
-                        barge_in_streak = barge_in_streak.saturating_add(1);
-                        if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
-                            continue; // Not enough consecutive frames yet
-                        }
-                        if barge_in_streak == BARGE_IN_CONSECUTIVE_FRAMES {
-                            tracing::info!(
-                                energy,
-                                threshold,
-                                "Barge-in: sustained user speech detected during playback"
-                            );
-                        }
-                        // Don't reset streak — keep forwarding all above-threshold
-                        // frames so Gemini receives continuous audio for VAD.
                     } else if gemini_speaking {
                         // Gemini is still sending audio data but the pre-buffer
                         // hasn't flushed to the hardware yet (~80 ms window).
@@ -422,6 +462,26 @@ pub(crate) async fn run_daemon(
                             tracing::debug!(energy, threshold, "Speech during reverb guard — forwarding");
                         }
                         playback_stopped_at = None;
+                    }
+
+                    // VAD gate for non-playback audio
+                    if !currently_playing && playback_stopped_at.is_none() {
+                        if let Some(ref mut v) = vad {
+                            vad_accumulator.extend_from_slice(&samples);
+                            let mut any_speech = false;
+                            while vad_accumulator.len() >= aura_voice::vad::VAD_FRAME_SIZE {
+                                let frame_f32: Vec<f32> = vad_accumulator.drain(..aura_voice::vad::VAD_FRAME_SIZE).collect();
+                                let frame_i16: Vec<i16> = frame_f32.iter()
+                                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                                    .collect();
+                                if v.0.is_speech(&frame_i16) {
+                                    any_speech = true;
+                                }
+                            }
+                            if !any_speech {
+                                continue; // Not speech — don't send to Gemini
+                            }
+                        }
                     }
 
                     if let Err(e) = audio_session.send_audio(&samples) {
