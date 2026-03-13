@@ -79,11 +79,13 @@ jobs:
     name: Deploy Proxy
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: detect-changes
+    needs: [detect-changes, deploy-consolidation]
     if: |
-      needs.detect-changes.outputs.proxy == 'true' ||
+      always() &&
+      (needs.detect-changes.outputs.proxy == 'true' ||
       github.event.inputs.service == 'all' ||
-      github.event.inputs.service == 'proxy'
+      github.event.inputs.service == 'proxy') &&
+      needs.detect-changes.result == 'success'
     environment:
       name: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'production' || 'staging' }}
     steps:
@@ -97,24 +99,11 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          IMAGE="gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}"
-
-          gcloud builds submit . \
-            --config=<(cat <<'YAML'
-          steps:
-            - name: 'gcr.io/cloud-builders/docker'
-              args: ['build', '-t', 'gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}', '-f', 'crates/aura-proxy/Dockerfile', '.']
-          images: ['gcr.io/${{ secrets.GCP_PROJECT_ID }}/aura-proxy-${{ env.ENV_SUFFIX }}']
-          YAML
-          ) \
-            --project "${{ secrets.GCP_PROJECT_ID }}" \
-            --quiet
-
           gcloud run deploy aura-proxy-${{ env.ENV_SUFFIX }} \
-            --image "${IMAGE}" \
+            --source . \
+            --dockerfile crates/aura-proxy/Dockerfile \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
-            --platform managed \
             --allow-unauthenticated \
             --port 8080 \
             --memory 256Mi \
