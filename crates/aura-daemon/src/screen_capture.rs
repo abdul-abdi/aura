@@ -85,7 +85,6 @@ pub(crate) fn spawn_screen_capture(
             last_frame_hash.store(frame.hash, Ordering::Release);
 
             // On first non-duplicate frame, log at INFO so it's visible without --verbose.
-            // Also check if the frame looks censored (Screen Recording not granted).
             if !censored_warned {
                 tracing::info!(
                     width = frame.width,
@@ -94,27 +93,34 @@ pub(crate) fn spawn_screen_capture(
                     size_kb = frame.jpeg_base64.len() / 1024,
                     "First screen frame captured"
                 );
-                // Decode the base64 back to check pixel content for censorship detection.
-                if let Ok(jpeg_bytes) = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &frame.jpeg_base64,
-                ) && let Ok(img) =
-                    image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
-                {
-                    let rgb = img.to_rgb8();
-                    if aura_screen::capture::frame_looks_censored(
-                        rgb.as_raw(),
-                        rgb.width() as usize,
-                        rgb.height() as usize,
-                    ) {
+            }
+
+            // Check every new frame for censorship (Screen Recording not granted).
+            // Decode the base64 back to check pixel content for censorship detection.
+            if let Ok(jpeg_bytes) = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                &frame.jpeg_base64,
+            ) && let Ok(img) =
+                image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+            {
+                let rgb = img.to_rgb8();
+                if aura_screen::capture::frame_looks_censored(
+                    rgb.as_raw(),
+                    rgb.width() as usize,
+                    rgb.height() as usize,
+                ) {
+                    if !censored_warned {
                         tracing::error!(
                             "Screen capture appears CENSORED — window contents are blank. \
                              Grant Screen Recording in System Settings > Privacy & Security > Screen Recording, \
                              then restart Aura."
                         );
+                        censored_warned = true;
                     }
+                } else {
+                    // Permission restored or was never revoked — reset so warning can fire again.
+                    censored_warned = false;
                 }
-                censored_warned = true;
             }
 
             // Store frame dimensions for coordinate mapping in tool handlers.

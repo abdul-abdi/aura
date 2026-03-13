@@ -45,6 +45,18 @@ impl UIElement {
             parts.push(format!("\"{}\"", label));
         }
 
+        if let Some(ref v) = self.value
+            && !v.is_empty()
+            && self.label.as_deref() != Some(v.as_str())
+        {
+            let truncated: String = v.chars().take(100).collect();
+            if truncated.len() < v.len() {
+                parts.push(format!("value=\"{}...\"", truncated));
+            } else {
+                parts.push(format!("value=\"{}\"", truncated));
+            }
+        }
+
         if let Some(ref b) = self.bounds {
             parts.push(format!(
                 "bounds={{x:{}, y:{}, w:{}, h:{}}}",
@@ -127,7 +139,7 @@ impl ScreenContext {
             parts.push(format!("Open windows: {}", self.open_windows.join(", ")));
         }
         if let Some(ref clip) = self.clipboard {
-            let truncated: String = clip.chars().take(200).collect();
+            let truncated: String = clip.chars().take(500).collect();
             if truncated.len() < clip.len() {
                 parts.push(format!("Clipboard: {truncated}..."));
             } else {
@@ -195,6 +207,95 @@ mod tests {
         let s = el.summary();
         assert!(!s.contains("\"\""), "no empty quotes when label is None");
         assert!(s.contains("textfield"), "role without AX prefix");
+        assert!(
+            s.contains("value=\"hello\""),
+            "value should appear in summary"
+        );
+    }
+
+    #[test]
+    fn ui_element_value_shown_when_different_from_label() {
+        let el = UIElement {
+            role: "AXTextField".to_string(),
+            label: Some("Search".to_string()),
+            value: Some("rust lang".to_string()),
+            bounds: None,
+            enabled: true,
+            focused: false,
+            parent_label: None,
+        };
+        let s = el.summary();
+        assert!(
+            s.contains("value=\"rust lang\""),
+            "value should appear when different from label"
+        );
+    }
+
+    #[test]
+    fn ui_element_value_omitted_when_same_as_label() {
+        let el = UIElement {
+            role: "AXButton".to_string(),
+            label: Some("Save".to_string()),
+            value: Some("Save".to_string()),
+            bounds: None,
+            enabled: true,
+            focused: false,
+            parent_label: None,
+        };
+        let s = el.summary();
+        // value should not appear twice when it duplicates the label
+        assert_eq!(
+            s.matches("Save").count(),
+            1,
+            "value should not duplicate label"
+        );
+    }
+
+    #[test]
+    fn ui_element_value_truncated_at_100_chars() {
+        let long_value = "a".repeat(150);
+        let el = UIElement {
+            role: "AXTextField".to_string(),
+            label: None,
+            value: Some(long_value),
+            bounds: None,
+            enabled: false,
+            focused: false,
+            parent_label: None,
+        };
+        let s = el.summary();
+        assert!(s.contains("value=\""), "value should appear");
+        assert!(
+            s.contains("...\""),
+            "long value should be truncated with ellipsis"
+        );
+        // the truncated portion should be exactly 100 'a' chars
+        assert!(
+            s.contains(&"a".repeat(100)),
+            "first 100 chars should be present"
+        );
+        assert!(
+            !s.contains(&"a".repeat(101)),
+            "101st char should not be present"
+        );
+    }
+
+    #[test]
+    fn ui_element_value_omitted_when_empty() {
+        let el = UIElement {
+            role: "AXTextField".to_string(),
+            label: None,
+            value: Some(String::new()),
+            bounds: None,
+            enabled: false,
+            focused: false,
+            parent_label: None,
+        };
+        let s = el.summary();
+        assert!(
+            !s.contains("value="),
+            "empty value should not appear in summary"
+        );
     }
 
     #[test]

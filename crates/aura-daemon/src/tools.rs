@@ -24,6 +24,9 @@ const CLICK_COUNT_MAX: u32 = 3;
 /// Maximum absolute scroll amount in either axis.
 const SCROLL_MAX: i32 = 1000;
 
+/// Maximum timeout allowed for a single run_applescript call.
+const MAX_APPLESCRIPT_TIMEOUT_SECS: u64 = 120;
+
 pub(crate) async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
@@ -47,7 +50,12 @@ pub(crate) async fn execute_tool(
             if let Some(target_app) = aura_bridge::automation::extract_target_app(script)
                 && let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&target_app)
             {
-                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                let bundle = bundle_id.to_string();
+                let perm = tokio::task::spawn_blocking(move || {
+                    aura_bridge::automation::check_automation_permission(&bundle)
+                })
+                .await
+                .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
                 if perm == aura_bridge::automation::AutomationPermission::Denied {
                     tracing::warn!(
                         target_app = %target_app,
@@ -68,7 +76,8 @@ pub(crate) async fn execute_tool(
             let timeout = args
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(30);
+                .unwrap_or(30)
+                .min(MAX_APPLESCRIPT_TIMEOUT_SECS);
             let result = executor.run(script, language, timeout).await;
 
             // Detect Automation denial from osascript stderr (covers cases where
@@ -200,8 +209,14 @@ pub(crate) async fn execute_tool(
             .await
         }
         "click" => {
-            let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let raw_x = match args.get("x").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return serde_json::json!({"error": "missing required parameter: x"}),
+            };
+            let raw_y = match args.get("y").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return serde_json::json!({"error": "missing required parameter: y"}),
+            };
             let x = dims.to_logical_x(raw_x);
             let y = dims.to_logical_y(raw_y);
             let button = args
@@ -404,6 +419,15 @@ pub(crate) async fn execute_tool(
             let fy = dims.to_logical_y(raw_fy);
             let tx = dims.to_logical_x(raw_tx);
             let ty = dims.to_logical_y(raw_ty);
+            // Pre-move cursor to drag origin so apps register hover state
+            let pre_x = fx;
+            let pre_y = fy;
+            run_input_blocking(
+                move || aura_input::mouse::move_mouse(pre_x, pre_y),
+                "pre_drag_move",
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             let modifiers = crate::tool_helpers::parse_modifiers(args);
             let mods = modifiers.clone();
             run_with_pid_fallback(
@@ -421,6 +445,20 @@ pub(crate) async fn execute_tool(
             .await
         }
         "activate_app" => {
+            const BLOCKED_APPS: &[&str] = &[
+                "terminal",
+                "iterm",
+                "iterm2",
+                "kitty",
+                "alacritty",
+                "warp",
+                "hyper",
+                "tabby",
+                "rio",
+                "wezterm",
+                "ghostty",
+            ];
+
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return serde_json::json!({
@@ -428,13 +466,30 @@ pub(crate) async fn execute_tool(
                     "error": "name parameter is required"
                 });
             }
+
+            let name_lower = name.to_lowercase();
+            if BLOCKED_APPS
+                .iter()
+                .any(|b| name_lower == *b || name_lower.contains(b))
+            {
+                return serde_json::json!({
+                    "error": "blocked_app",
+                    "message": "Cannot activate terminal apps for safety — Aura could accidentally execute commands. Ask the user to switch to it manually."
+                });
+            }
+
             // Sanitize app name to prevent AppleScript injection
             let safe_name = name.replace(['\\', '"'], "");
             let script = format!(r#"tell application "{safe_name}" to activate"#);
 
             // Pre-check automation permission if we know the bundle ID
             if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&safe_name) {
-                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                let bundle = bundle_id.to_string();
+                let perm = tokio::task::spawn_blocking(move || {
+                    aura_bridge::automation::check_automation_permission(&bundle)
+                })
+                .await
+                .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
                 if perm == aura_bridge::automation::AutomationPermission::Denied {
                     return serde_json::json!({
                         "success": false,
@@ -499,7 +554,12 @@ pub(crate) async fn execute_tool(
             // Pre-check automation permission for System Events
             if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id("System Events")
             {
-                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                let bundle = bundle_id.to_string();
+                let perm = tokio::task::spawn_blocking(move || {
+                    aura_bridge::automation::check_automation_permission(&bundle)
+                })
+                .await
+                .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
                 if perm == aura_bridge::automation::AutomationPermission::Denied {
                     return serde_json::json!({
                         "success": false,
@@ -638,6 +698,12 @@ pub(crate) async fn execute_tool(
                             "clicked_item": item.label,
                         })
                     } else {
+                        // Dismiss the stale context menu before returning an error
+                        let _ = aura_input::keyboard::press_key(
+                            aura_input::keyboard::keycode_from_name("escape").unwrap_or(53),
+                            &[],
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         serde_json::json!({
                             "success": false,
                             "error": "Found menu item but it has no bounds",
@@ -645,6 +711,12 @@ pub(crate) async fn execute_tool(
                     }
                 }
                 None => {
+                    // Dismiss the stale context menu before returning an error
+                    let _ = aura_input::keyboard::press_key(
+                        aura_input::keyboard::keycode_from_name("escape").unwrap_or(53),
+                        &[],
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     serde_json::json!({
                         "success": false,
                         "error": format!("Menu item '{}' not found in context menu", item_label),

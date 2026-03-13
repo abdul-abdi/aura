@@ -33,20 +33,20 @@ fn test_empty_context() {
 
 #[test]
 fn test_clipboard_truncation_ascii() {
-    let long_clip = "x".repeat(300);
+    let long_clip = "x".repeat(600);
     let ctx = ScreenContext::new_with_details("App", None, vec![], Some(long_clip));
     let summary = ctx.summary();
     assert!(
         summary.contains("..."),
         "Long clipboard should be truncated with ellipsis"
     );
-    // The truncated content should have at most 200 chars before "..."
+    // The truncated content should have at most 500 chars before "..."
     let clip_line = summary
         .lines()
         .find(|l| l.starts_with("Clipboard:"))
         .unwrap();
     assert!(
-        clip_line.len() < 220,
+        clip_line.len() < 520,
         "Truncated clipboard line should be short"
     );
 }
@@ -54,7 +54,7 @@ fn test_clipboard_truncation_ascii() {
 #[test]
 fn test_clipboard_truncation_multibyte() {
     // Use multi-byte characters to verify we don't panic on byte-boundary slicing
-    let long_clip: String = std::iter::repeat_n('\u{1F600}', 300).collect();
+    let long_clip: String = std::iter::repeat_n('\u{1F600}', 600).collect();
     let ctx = ScreenContext::new_with_details("App", None, vec![], Some(long_clip));
     let summary = ctx.summary();
     assert!(

@@ -18,6 +18,8 @@ You are watching a live video feed of the user's screen — ~2 frames/sec when a
 - Use what you see to understand context without being told.
 - When taking action, use pixel coordinates from the screenshot you see.
 - After each action, wait for the next screenshot to verify the result before proceeding.
+- Screenshots are JPEG-compressed (quality 80) — small text below ~8px may be unreadable. Zoom in or get_screen_context() for precise text.
+- Only the display under the mouse cursor is captured. If you need to see another monitor, move_mouse there first.
 
 Coordinate System:
 - Screenshots are 1920px wide (downscaled from Retina). All coordinates are in this 1920px image space.

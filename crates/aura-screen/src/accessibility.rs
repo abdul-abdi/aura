@@ -50,6 +50,10 @@ pub static INTERACTIVE_ROLES: &[&str] = &[
     "AXIncrementor",
     "AXColorWell",
     "AXDisclosureTriangle",
+    // AXStaticText provides text label context (e.g. labels next to buttons/fields).
+    // Only collected when the element has a non-empty label (enforced in walk_element_with_limits).
+    // The existing MAX_ELEMENTS cap prevents flooding on label-heavy UIs.
+    "AXStaticText",
 ];
 
 // ── C structs for AXValueGetValue ────────────────────────────────────────────
@@ -83,6 +87,7 @@ unsafe extern "C" {
         value: CFTypeRef,
     ) -> i32;
     fn AXUIElementPerformAction(element: CFTypeRef, action: CFTypeRef) -> i32;
+    fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
 }
 
 // ── RAII wrapper for CFTypeRef ───────────────────────────────────────────────
@@ -304,6 +309,25 @@ fn walk_element_with_limits(
             .filter(|s| !s.is_empty())
             .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
 
+        // AXStaticText with no label provides no useful context — skip it to
+        // avoid cluttering the element list with invisible/empty text nodes.
+        if role == "AXStaticText" && label.is_none() {
+            let children = get_ax_children(element);
+            for child in children {
+                walk_element_with_limits(
+                    child,
+                    depth + 1,
+                    elements,
+                    start_time,
+                    max_elements,
+                    max_depth,
+                    timeout_ms,
+                );
+                unsafe { CFRelease(child) };
+            }
+            return;
+        }
+
         let value = get_ax_string(element, "AXValue").filter(|s| !s.is_empty());
         let enabled = get_ax_bool(element, "AXEnabled");
         let focused = get_ax_bool(element, "AXFocused");
@@ -410,6 +434,7 @@ pub fn get_focused_app_elements() -> Vec<UIElement> {
     if app_element.is_null() {
         return Vec::new();
     }
+    unsafe { AXUIElementSetMessagingTimeout(app_element, 1.0) };
     let app_ref = CfRef::new(app_element);
 
     // ── Phase 1: fast density probe ──────────────────────────────────────────
@@ -960,7 +985,7 @@ fn collect_menu_items(
             focused: false,
             parent_label: None,
         });
-        return;
+        // Recurse into children to capture submenu items
     }
     let children = get_ax_children(element);
     for child in &children {
@@ -1080,9 +1105,10 @@ mod tests {
         assert!(INTERACTIVE_ROLES.contains(&"AXTextField"));
         assert!(INTERACTIVE_ROLES.contains(&"AXCheckBox"));
         assert!(INTERACTIVE_ROLES.contains(&"AXLink"));
-        // Non-interactive roles must NOT be present
+        // AXStaticText is included to expose text labels for Gemini context.
+        assert!(INTERACTIVE_ROLES.contains(&"AXStaticText"));
+        // Container/layout roles that provide no actionable context must NOT be present.
         assert!(!INTERACTIVE_ROLES.contains(&"AXGroup"));
-        assert!(!INTERACTIVE_ROLES.contains(&"AXStaticText"));
     }
 
     // ── AXActionResult tests ───────────────────────────────────────────────────
