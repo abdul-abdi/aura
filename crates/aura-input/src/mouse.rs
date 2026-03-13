@@ -54,11 +54,17 @@ pub fn click(x: f64, y: f64, button: &str, click_count: u32, modifiers: &[&str])
             CGEventType::RightMouseUp,
             CGMouseButton::Right,
         ),
-        _ => (
+        "middle" => (
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            CGMouseButton::Center,
+        ),
+        "left" => (
             CGEventType::LeftMouseDown,
             CGEventType::LeftMouseUp,
             CGMouseButton::Left,
         ),
+        other => anyhow::bail!("unsupported mouse button: {other}"),
     };
 
     let flags = modifier_flags(modifiers);
@@ -215,11 +221,17 @@ pub fn click_pid(
             CGEventType::RightMouseUp,
             CGMouseButton::Right,
         ),
-        _ => (
+        "middle" => (
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            CGMouseButton::Center,
+        ),
+        "left" => (
             CGEventType::LeftMouseDown,
             CGEventType::LeftMouseUp,
             CGMouseButton::Left,
         ),
+        other => anyhow::bail!("unsupported mouse button: {other}"),
     };
 
     let flags = modifier_flags(modifiers);

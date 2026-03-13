@@ -50,7 +50,12 @@ pub(crate) async fn execute_tool(
             if let Some(target_app) = aura_bridge::automation::extract_target_app(script)
                 && let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&target_app)
             {
-                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                let bundle = bundle_id.to_string();
+                let perm = tokio::task::spawn_blocking(move || {
+                    aura_bridge::automation::check_automation_permission(&bundle)
+                })
+                .await
+                .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
                 if perm == aura_bridge::automation::AutomationPermission::Denied {
                     tracing::warn!(
                         target_app = %target_app,
@@ -458,7 +463,12 @@ pub(crate) async fn execute_tool(
 
             // Pre-check automation permission if we know the bundle ID
             if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id(&safe_name) {
-                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                let bundle = bundle_id.to_string();
+                let perm = tokio::task::spawn_blocking(move || {
+                    aura_bridge::automation::check_automation_permission(&bundle)
+                })
+                .await
+                .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
                 if perm == aura_bridge::automation::AutomationPermission::Denied {
                     return serde_json::json!({
                         "success": false,

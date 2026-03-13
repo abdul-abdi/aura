@@ -378,6 +378,7 @@ pub(crate) fn is_state_changing_tool(name: &str) -> bool {
         "click"
             | "type_text"
             | "press_key"
+            | "key_state"
             | "scroll"
             | "drag"
             | "click_element"
