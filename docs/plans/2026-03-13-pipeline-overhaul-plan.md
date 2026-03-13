@@ -1018,3 +1018,986 @@ cargo fmt --all
 git add -A
 git commit -m "chore: format after pipeline overhaul"
 ```
+
+---
+
+## Phase 2: Closing the Remaining Gaps
+
+Tasks 10-15 address capabilities that Phases 1-5 alone don't provide: retry logic for missed clicks, bounding box validation, visual element labeling (SoM), password field workarounds, and system prompt coherence.
+
+---
+
+### Task 10: Coordinate Retry with Spiral Offset
+
+**Files:**
+- Modify: `crates/aura-daemon/src/processor.rs:510-536` (verification block)
+- Modify: `crates/aura-daemon/src/tool_helpers.rs` (add spiral offset helper)
+
+**Context:** When a coordinate-based click returns `verified=false`, the click likely missed its target by a few pixels. Instead of giving up or asking Gemini to re-estimate, we can retry with small spiral offsets (±15px) around the original coordinate. This is invisible to Gemini — the daemon handles it automatically.
+
+**Step 1: Write the failing test**
+
+Add to `tool_helpers.rs` test module:
+
+```rust
+#[test]
+fn spiral_offsets_are_correct() {
+    let offsets = spiral_offsets(15);
+    // First offset is always (0, 0) — original coordinates
+    assert_eq!(offsets[0], (0, 0));
+    // Then cardinal directions, then diagonals
+    assert_eq!(offsets.len(), 9);
+    assert!(offsets.contains(&(15, 0)));
+    assert!(offsets.contains(&(-15, 0)));
+    assert!(offsets.contains(&(0, 15)));
+    assert!(offsets.contains(&(0, -15)));
+    assert!(offsets.contains(&(15, 15)));
+    assert!(offsets.contains(&(-15, -15)));
+    assert!(offsets.contains(&(15, -15)));
+    assert!(offsets.contains(&(-15, 15)));
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p aura-daemon spiral_offsets`
+Expected: FAIL — `spiral_offsets` doesn't exist
+
+**Step 3: Implement spiral_offsets**
+
+Add to `crates/aura-daemon/src/tool_helpers.rs`:
+
+```rust
+/// Generate spiral offset pairs for retry clicks.
+/// Returns (dx, dy) offsets starting from (0,0) then cardinal/diagonal directions.
+pub(crate) fn spiral_offsets(radius: i32) -> Vec<(i32, i32)> {
+    vec![
+        (0, 0),           // original position
+        (radius, 0),      // right
+        (0, radius),      // down
+        (-radius, 0),     // left
+        (0, -radius),     // up
+        (radius, radius), // down-right
+        (-radius, -radius), // up-left
+        (radius, -radius),  // up-right
+        (-radius, radius),  // down-left
+    ]
+}
+
+/// Maximum number of spiral retry attempts for coordinate-based clicks.
+pub(crate) const MAX_CLICK_RETRIES: usize = 4;
+
+/// Pixel radius for spiral retry offsets.
+pub(crate) const SPIRAL_RADIUS: i32 = 15;
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test -p aura-daemon spiral_offsets`
+Expected: PASS
+
+**Step 5: Integrate retry into processor.rs verification block**
+
+In `processor.rs`, after the verification failure block (where `verified = false`), add retry logic for coordinate-based click tools:
+
+```rust
+// Retry with spiral offsets for coordinate-based clicks that failed verification
+if !screen_changed && matches!(name.as_str(), "click" | "context_menu_click") {
+    if let (Some(orig_x), Some(orig_y)) = (
+        args.get("x").and_then(|v| v.as_f64()),
+        args.get("y").and_then(|v| v.as_f64()),
+    ) {
+        let offsets = tools::spiral_offsets(tools::SPIRAL_RADIUS);
+        // Skip offset[0] (0,0) — that's the original click we already tried
+        for (i, &(dx, dy)) in offsets.iter().skip(1).take(tools::MAX_CLICK_RETRIES).enumerate() {
+            let retry_x = orig_x + dx as f64;
+            let retry_y = orig_y + dy as f64;
+            tracing::debug!(tool = %name, attempt = i + 2, dx, dy, "Retrying click with spiral offset");
+
+            // Execute the retry click
+            let mut retry_args = args.clone();
+            retry_args["x"] = serde_json::json!(retry_x);
+            retry_args["y"] = serde_json::json!(retry_y);
+            let _ = tools::execute_tool(&name, &retry_args, dims).await;
+
+            // Brief settle + single hash check
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let rx = tool_capture_trigger.trigger_and_wait();
+            tool_cap_notify.notify_one();
+            let _ = tokio::time::timeout(Duration::from_millis(100), rx).await;
+            let current_hash = tool_last_hash.load(Ordering::Acquire);
+            if current_hash != pre {
+                screen_changed = true;
+                verified = true;
+                tracing::info!(tool = %name, attempt = i + 2, "Spiral retry succeeded");
+                if let Some(obj) = response.as_object_mut() {
+                    obj.insert("retry_offset".into(), serde_json::json!({"dx": dx, "dy": dy}));
+                }
+                break;
+            }
+        }
+    }
+}
+```
+
+**Step 6: Run full test suite**
+
+Run: `cargo test -p aura-daemon`
+Expected: All tests pass
+
+**Step 7: Commit**
+
+```bash
+git add crates/aura-daemon/src/processor.rs crates/aura-daemon/src/tool_helpers.rs
+git commit -m "feat: spiral retry for coordinate clicks on verification failure
+
+When a click at (x,y) returns verified=false, automatically retry with
+±15px spiral offsets (up to 4 retries). Transparent to Gemini — the
+daemon handles missed clicks without round-tripping to the model."
+```
+
+---
+
+### Task 11: Bounding Box Validation on Click Tool
+
+**Files:**
+- Modify: `crates/aura-gemini/src/tools.rs:94-117` (click tool declaration)
+- Modify: `crates/aura-daemon/src/tool_helpers.rs` (add bounds validation helper)
+- Modify: `crates/aura-gemini/src/config.rs` (system prompt reference)
+
+**Context:** Gemini has native bounding box detection — it can return `[y0, x0, y1, x1]` coordinates normalized to [0, 1000]. We add an optional `expected_element` parameter to the click tool. When provided, the daemon validates that the click coordinates fall within the expected bounds after denormalization, logging a warning if they don't. This catches coordinate estimation errors before they happen.
+
+**Step 1: Write the failing test**
+
+Add to `tool_helpers.rs` test module:
+
+```rust
+#[test]
+fn point_in_bounds_check() {
+    // Bounds: [y0, x0, y1, x1] normalized to [0, 1000]
+    // Screen: 1920×1080
+    let screen_w = 1920.0;
+    let screen_h = 1080.0;
+    // Element at roughly center of screen: [400, 400, 600, 600] in normalized
+    let bounds = [400, 400, 600, 600]; // y0, x0, y1, x1
+
+    let x0 = bounds[1] as f64 / 1000.0 * screen_w; // 768
+    let y0 = bounds[0] as f64 / 1000.0 * screen_h; // 432
+    let x1 = bounds[3] as f64 / 1000.0 * screen_w; // 1152
+    let y1 = bounds[2] as f64 / 1000.0 * screen_h; // 648
+
+    // Center of bounds
+    assert!(point_in_denormalized_bounds(960.0, 540.0, &bounds, screen_w, screen_h));
+    // Outside bounds
+    assert!(!point_in_denormalized_bounds(100.0, 100.0, &bounds, screen_w, screen_h));
+    // Edge of bounds (inclusive)
+    assert!(point_in_denormalized_bounds(x0, y0, &bounds, screen_w, screen_h));
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p aura-daemon point_in_bounds`
+Expected: FAIL — function doesn't exist
+
+**Step 3: Implement bounds validation**
+
+Add to `crates/aura-daemon/src/tool_helpers.rs`:
+
+```rust
+/// Check if a point (x, y) in pixel coordinates falls within Gemini-normalized
+/// bounding box [y0, x0, y1, x1] (each in [0, 1000]).
+pub(crate) fn point_in_denormalized_bounds(
+    x: f64,
+    y: f64,
+    bounds: &[i32; 4], // [y0, x0, y1, x1] normalized to [0, 1000]
+    screen_w: f64,
+    screen_h: f64,
+) -> bool {
+    let x0 = bounds[1] as f64 / 1000.0 * screen_w;
+    let y0 = bounds[0] as f64 / 1000.0 * screen_h;
+    let x1 = bounds[3] as f64 / 1000.0 * screen_w;
+    let y1 = bounds[2] as f64 / 1000.0 * screen_h;
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test -p aura-daemon point_in_bounds`
+Expected: PASS
+
+**Step 5: Add optional `expected_bounds` parameter to click tool declaration**
+
+In `crates/aura-gemini/src/tools.rs`, update the click tool's parameters (around line 101-115):
+
+```rust
+parameters: json!({
+    "type": "object",
+    "properties": {
+        "x": { "type": "number", "description": "X coordinate" },
+        "y": { "type": "number", "description": "Y coordinate" },
+        "button": { "type": "string", "enum": ["left", "right"], "description": "Mouse button. Default: left" },
+        "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" },
+        "modifiers": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["cmd", "shift", "alt", "ctrl"] },
+            "description": "Modifier keys to hold during click."
+        },
+        "expected_bounds": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "description": "Optional bounding box [y0, x0, y1, x1] (normalized 0-1000) of the expected target element. If provided, the system validates your click coordinates fall within this region and warns if they don't."
+        }
+    },
+    "required": ["x", "y"]
+}),
+```
+
+**Step 6: Add validation in tool execution**
+
+In the click tool handler in `processor.rs` or `tool_helpers.rs`, before executing the click:
+
+```rust
+// Validate expected_bounds if provided
+if let Some(bounds_arr) = args.get("expected_bounds").and_then(|v| v.as_array()) {
+    if bounds_arr.len() == 4 {
+        let bounds: [i32; 4] = [
+            bounds_arr[0].as_i64().unwrap_or(0) as i32,
+            bounds_arr[1].as_i64().unwrap_or(0) as i32,
+            bounds_arr[2].as_i64().unwrap_or(0) as i32,
+            bounds_arr[3].as_i64().unwrap_or(0) as i32,
+        ];
+        let x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let (sw, sh) = (dims.img_w as f64, dims.img_h as f64);
+        if !tools::point_in_denormalized_bounds(x, y, &bounds, sw, sh) {
+            tracing::warn!(
+                tool = "click", x, y, ?bounds,
+                "Click coordinates outside expected_bounds — likely mis-targeted"
+            );
+            if let Some(obj) = response.as_object_mut() {
+                obj.insert("bounds_warning".into(),
+                    serde_json::json!("Click coordinates are outside the expected element bounds. The click may miss its target."));
+            }
+        }
+    }
+}
+```
+
+**Step 7: Run full test suite**
+
+Run: `cargo test -p aura-daemon && cargo test -p aura-gemini`
+Expected: All tests pass
+
+**Step 8: Commit**
+
+```bash
+git add crates/aura-gemini/src/tools.rs crates/aura-daemon/src/tool_helpers.rs crates/aura-daemon/src/processor.rs
+git commit -m "feat: optional bounding box validation for click tool
+
+Add expected_bounds parameter ([y0,x0,y1,x1] normalized 0-1000) to
+the click tool. When Gemini provides bounds from its native bounding
+box detection, the daemon validates that (x,y) falls within them and
+warns on mismatch. Catches coordinate estimation errors early."
+```
+
+---
+
+### Task 12: Lightweight Edge-Based SoM Overlay
+
+**Files:**
+- Create: `crates/aura-screen/src/som.rs` (SoM overlay module)
+- Modify: `crates/aura-screen/src/lib.rs` (expose module)
+- Modify: `crates/aura-screen/Cargo.toml` (add `image` PNG feature)
+- Modify: `crates/aura-screen/src/capture.rs` (optional SoM-annotated frame)
+
+**Context:** Set-of-Mark (SoM) overlays number detected interactive regions on the screenshot. OmniParser uses YOLO+Florence (too heavy, requires CUDA+Python). Instead we use pure Rust edge detection with the `image` crate (already a dependency) to find rectangular regions, then overlay numbered markers. This gives Gemini explicit targets: "click mark 7" instead of guessing coordinates. ~200-300 lines of image processing.
+
+**Step 1: Add PNG feature to image dependency**
+
+In `crates/aura-screen/Cargo.toml`, update the image dependency:
+
+```toml
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+```
+
+The `png` feature is needed for rendering text/overlay marks with alpha compositing.
+
+**Step 2: Write the failing tests**
+
+Create `crates/aura-screen/src/som.rs`:
+
+```rust
+//! Lightweight Set-of-Mark (SoM) overlay for visual element targeting.
+//!
+//! Detects rectangular interactive regions in screenshots via edge detection
+//! and overlays numbered markers. Gemini can then reference "mark N" instead
+//! of estimating pixel coordinates.
+//!
+//! This is a pure-Rust alternative to OmniParser (YOLO+Florence, requires CUDA).
+
+use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+
+/// A detected interactive region with its bounding box and mark number.
+#[derive(Debug, Clone)]
+pub struct SomMark {
+    /// Mark number (1-indexed, displayed on overlay).
+    pub id: usize,
+    /// Bounding box: (x, y, width, height) in pixels.
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Minimum region dimension (pixels) to qualify as an interactive element.
+const MIN_REGION_SIZE: u32 = 20;
+
+/// Maximum number of marks to overlay (prevents clutter).
+const MAX_MARKS: usize = 30;
+
+/// Edge detection threshold (0-255). Pixels with gradient magnitude above
+/// this are considered edges.
+const EDGE_THRESHOLD: u8 = 40;
+
+/// Minimum gap between detected regions to avoid duplicates (pixels).
+const MIN_REGION_GAP: u32 = 10;
+
+/// Detect rectangular interactive regions using Sobel edge detection
+/// and connected component analysis on the resulting binary edge map.
+pub fn detect_regions(img: &DynamicImage) -> Vec<SomMark> {
+    let gray = img.to_luma8();
+    let (w, h) = gray.dimensions();
+
+    if w < MIN_REGION_SIZE * 2 || h < MIN_REGION_SIZE * 2 {
+        return Vec::new();
+    }
+
+    // Sobel edge detection
+    let mut edges = vec![false; (w * h) as usize];
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let idx = |dx: i32, dy: i32| -> u8 {
+                gray.get_pixel((x as i32 + dx) as u32, (y as i32 + dy) as u32).0[0]
+            };
+            // Sobel X
+            let gx = -(idx(-1, -1) as i16) + (idx(1, -1) as i16)
+                - 2 * (idx(-1, 0) as i16) + 2 * (idx(1, 0) as i16)
+                - (idx(-1, 1) as i16) + (idx(1, 1) as i16);
+            // Sobel Y
+            let gy = -(idx(-1, -1) as i16) - 2 * (idx(0, -1) as i16) - (idx(1, -1) as i16)
+                + (idx(-1, 1) as i16) + 2 * (idx(0, 1) as i16) + (idx(1, 1) as i16);
+            let magnitude = ((gx.abs() + gy.abs()) / 2) as u8;
+            if magnitude > EDGE_THRESHOLD {
+                edges[(y * w + x) as usize] = true;
+            }
+        }
+    }
+
+    // Simple horizontal run-length region detection:
+    // Find horizontal runs of edges, group into rectangular regions
+    let mut regions: Vec<(u32, u32, u32, u32)> = Vec::new(); // (x, y, w, h)
+
+    // Scan for rectangular clusters using a grid-based approach
+    let grid_size = MIN_REGION_SIZE;
+    let mut visited = vec![false; (w * h) as usize];
+
+    for gy in (0..h).step_by(grid_size as usize / 2) {
+        for gx in (0..w).step_by(grid_size as usize / 2) {
+            // Count edges in this grid cell
+            let mut edge_count = 0u32;
+            let cell_w = grid_size.min(w - gx);
+            let cell_h = grid_size.min(h - gy);
+            for dy in 0..cell_h {
+                for dx in 0..cell_w {
+                    let idx = ((gy + dy) * w + (gx + dx)) as usize;
+                    if idx < edges.len() && edges[idx] {
+                        edge_count += 1;
+                    }
+                }
+            }
+
+            // If enough edges, this is likely an interactive region
+            let cell_area = cell_w * cell_h;
+            if cell_area > 0 && edge_count * 100 / cell_area > 15 {
+                // Check if this overlaps with an existing region
+                let overlaps = regions.iter().any(|&(rx, ry, rw, rh)| {
+                    gx < rx + rw + MIN_REGION_GAP
+                        && gx + cell_w + MIN_REGION_GAP > rx
+                        && gy < ry + rh + MIN_REGION_GAP
+                        && gy + cell_h + MIN_REGION_GAP > ry
+                });
+
+                if !overlaps {
+                    regions.push((gx, gy, cell_w, cell_h));
+                }
+            }
+        }
+    }
+
+    // Sort by position (top-to-bottom, left-to-right) and cap at MAX_MARKS
+    regions.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    regions.truncate(MAX_MARKS);
+
+    regions
+        .into_iter()
+        .enumerate()
+        .map(|(i, (x, y, w, h))| SomMark {
+            id: i + 1,
+            x,
+            y,
+            width: w,
+            height: h,
+        })
+        .collect()
+}
+
+/// Render numbered markers on a copy of the image at each detected region.
+/// Returns the annotated image and the list of marks with their coordinates.
+pub fn annotate_frame(img: &DynamicImage) -> (DynamicImage, Vec<SomMark>) {
+    let marks = detect_regions(img);
+    let mut canvas = img.to_rgba8();
+
+    for mark in &marks {
+        draw_mark_label(&mut canvas, mark);
+    }
+
+    (DynamicImage::ImageRgba8(canvas), marks)
+}
+
+/// Draw a numbered label at the top-left corner of a mark's bounding box.
+fn draw_mark_label(canvas: &mut RgbaImage, mark: &SomMark) {
+    let label = format!("{}", mark.id);
+    let label_w = (label.len() as u32) * 8 + 4; // ~8px per char + padding
+    let label_h: u32 = 14;
+
+    // Draw background rectangle (semi-transparent red)
+    let bg_color = Rgba([220, 40, 40, 200]);
+    let text_color = Rgba([255, 255, 255, 255]);
+
+    let (img_w, img_h) = canvas.dimensions();
+    let bx = mark.x.min(img_w.saturating_sub(label_w));
+    let by = mark.y.saturating_sub(label_h + 2);
+
+    for dy in 0..label_h {
+        for dx in 0..label_w {
+            let px = bx + dx;
+            let py = by + dy;
+            if px < img_w && py < img_h {
+                canvas.put_pixel(px, py, bg_color);
+            }
+        }
+    }
+
+    // Draw number using simple pixel font (3×5 digit bitmaps)
+    let digits: Vec<u8> = label.bytes().map(|b| b - b'0').collect();
+    for (di, &digit) in digits.iter().enumerate() {
+        let bitmap = digit_bitmap(digit);
+        let ox = bx + 2 + (di as u32) * 8;
+        let oy = by + 3;
+        for (row, bits) in bitmap.iter().enumerate() {
+            for col in 0..5u32 {
+                if bits & (1 << (4 - col)) != 0 {
+                    // Draw 2× scaled pixel for readability
+                    for sy in 0..2u32 {
+                        for sx in 0..2u32 {
+                            let px = ox + col * 2 + sx;
+                            let py = oy + (row as u32) * 2 + sy;
+                            if px < img_w && py < img_h {
+                                canvas.put_pixel(px, py, text_color);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw outline around the region (1px red border)
+    let outline_color = Rgba([220, 40, 40, 180]);
+    for dx in 0..mark.width {
+        let px = mark.x + dx;
+        if px < img_w {
+            if mark.y < img_h { canvas.put_pixel(px, mark.y, outline_color); }
+            let bot = mark.y + mark.height.saturating_sub(1);
+            if bot < img_h { canvas.put_pixel(px, bot, outline_color); }
+        }
+    }
+    for dy in 0..mark.height {
+        let py = mark.y + dy;
+        if py < img_h {
+            if mark.x < img_w { canvas.put_pixel(mark.x, py, outline_color); }
+            let right = mark.x + mark.width.saturating_sub(1);
+            if right < img_w { canvas.put_pixel(right, py, outline_color); }
+        }
+    }
+}
+
+/// 3×5 pixel bitmap for digits 0-9 (5 bits per row, MSB = leftmost).
+fn digit_bitmap(d: u8) -> [u8; 5] {
+    match d {
+        0 => [0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+        1 => [0b00100, 0b01100, 0b00100, 0b00100, 0b01110],
+        2 => [0b01110, 0b10001, 0b00110, 0b01000, 0b11111],
+        3 => [0b01110, 0b10001, 0b00110, 0b10001, 0b01110],
+        4 => [0b10010, 0b10010, 0b11111, 0b00010, 0b00010],
+        5 => [0b11111, 0b10000, 0b11110, 0b00001, 0b11110],
+        6 => [0b01110, 0b10000, 0b11110, 0b10001, 0b01110],
+        7 => [0b11111, 0b00001, 0b00010, 0b00100, 0b00100],
+        8 => [0b01110, 0b10001, 0b01110, 0b10001, 0b01110],
+        9 => [0b01110, 0b10001, 0b01111, 0b00001, 0b01110],
+        _ => [0; 5],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_regions_on_blank_image_returns_empty() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::new(200, 200));
+        let regions = detect_regions(&img);
+        assert!(regions.is_empty(), "Blank image should have no regions");
+    }
+
+    #[test]
+    fn detect_regions_on_tiny_image_returns_empty() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::new(10, 10));
+        let regions = detect_regions(&img);
+        assert!(regions.is_empty(), "Tiny image should have no regions");
+    }
+
+    #[test]
+    fn marks_are_numbered_sequentially() {
+        // Create an image with high-contrast rectangles that should be detected
+        let mut img = RgbaImage::new(400, 400);
+        // Draw two distinct rectangles with sharp edges
+        for x in 50..150 {
+            for y in 50..100 {
+                img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        for x in 250..350 {
+            for y in 50..100 {
+                img.put_pixel(x, y, Rgba([255, 255, 255, 255]));
+            }
+        }
+        let dyn_img = DynamicImage::ImageRgba8(img);
+        let marks = detect_regions(&dyn_img);
+        // Marks should be 1-indexed
+        for (i, mark) in marks.iter().enumerate() {
+            assert_eq!(mark.id, i + 1);
+        }
+    }
+
+    #[test]
+    fn annotate_frame_returns_same_dimensions() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::new(200, 200));
+        let (annotated, _marks) = annotate_frame(&img);
+        assert_eq!(annotated.width(), 200);
+        assert_eq!(annotated.height(), 200);
+    }
+
+    #[test]
+    fn digit_bitmap_all_digits_valid() {
+        for d in 0..=9 {
+            let bm = digit_bitmap(d);
+            // Each digit should have at least some pixels set
+            assert!(bm.iter().any(|&row| row != 0), "Digit {d} bitmap is empty");
+        }
+    }
+
+    #[test]
+    fn max_marks_cap() {
+        // Even if we detect many regions, cap at MAX_MARKS
+        assert!(MAX_MARKS <= 30);
+    }
+}
+```
+
+**Step 3: Expose module in lib.rs**
+
+Add to `crates/aura-screen/src/lib.rs`:
+```rust
+pub mod som;
+```
+
+**Step 4: Run tests**
+
+Run: `cargo test -p aura-screen som`
+Expected: All tests pass
+
+**Step 5: Add SoM-annotated frame generation to capture.rs**
+
+Add a public function to `crates/aura-screen/src/capture.rs`:
+
+```rust
+/// Generate a SoM-annotated version of a captured frame.
+/// Returns the annotated JPEG (base64) and the mark positions.
+/// Called on-demand when Gemini requests visual element targeting.
+pub fn annotate_with_som(jpeg_bytes: &[u8]) -> Option<(String, Vec<crate::som::SomMark>)> {
+    let img = image::load_from_memory(jpeg_bytes).ok()?;
+    let (annotated, marks) = crate::som::annotate_frame(&img);
+
+    // Encode annotated image back to JPEG
+    let mut buf = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
+    annotated.write_with_encoder(encoder).ok()?;
+
+    Some((BASE64.encode(&buf), marks))
+}
+```
+
+**Step 6: Run full test suite**
+
+Run: `cargo test -p aura-screen`
+Expected: All tests pass
+
+**Step 7: Commit**
+
+```bash
+git add crates/aura-screen/src/som.rs crates/aura-screen/src/lib.rs crates/aura-screen/src/capture.rs crates/aura-screen/Cargo.toml
+git commit -m "feat: lightweight edge-based Set-of-Mark overlay
+
+Pure Rust SoM implementation using Sobel edge detection and grid-based
+region clustering. Overlays numbered markers on detected interactive
+regions. ~250 lines, no external ML dependencies. Gemini can reference
+'mark N' instead of estimating pixel coordinates."
+```
+
+---
+
+### Task 13: Password Field Detection with Clipboard Paste Workaround
+
+**Files:**
+- Modify: `crates/aura-daemon/src/tool_helpers.rs` (detect secure input fields)
+- Modify: `crates/aura-screen/src/accessibility.rs` (expose subrole detection)
+
+**Context:** macOS `SecureEventInput` blocks synthetic keyboard input in password fields. This is a hard OS limitation — no userspace workaround exists for `type_text`. However, we can detect when the focused field is a secure text field (AX subrole `AXSecureTextField`) and automatically route through clipboard paste (`write_clipboard` + Cmd+V) instead. The user sees the same result, but we bypass the keyboard input block.
+
+**Step 1: Write the failing test**
+
+Add to `accessibility.rs` test module:
+
+```rust
+#[test]
+fn is_secure_field_detects_password_subroles() {
+    assert!(is_secure_text_subrole("AXSecureTextField"));
+    assert!(!is_secure_text_subrole("AXTextField"));
+    assert!(!is_secure_text_subrole("AXTextArea"));
+    assert!(!is_secure_text_subrole(""));
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p aura-screen is_secure_field`
+Expected: FAIL — function doesn't exist
+
+**Step 3: Implement subrole detection in accessibility.rs**
+
+Add to `crates/aura-screen/src/accessibility.rs`:
+
+```rust
+/// Check if a subrole indicates a secure (password) text field.
+/// macOS blocks synthetic keyboard input to these fields via SecureEventInput.
+pub fn is_secure_text_subrole(subrole: &str) -> bool {
+    subrole == "AXSecureTextField"
+}
+
+/// Check if the currently focused element is a secure text field.
+/// Returns true if the focused element's subrole is AXSecureTextField.
+pub fn is_focused_element_secure() -> bool {
+    let pid = match crate::macos::get_frontmost_pid() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return false;
+    }
+    let app_ref = CfRef::new(app);
+
+    // Get the focused element
+    let mut focused: CFTypeRef = std::ptr::null();
+    let err = unsafe {
+        AXUIElementCopyAttributeValue(
+            app_ref.as_raw(),
+            cf_str("AXFocusedUIElement"),
+            &mut focused,
+        )
+    };
+    if err != AX_ERROR_SUCCESS || focused.is_null() {
+        return false;
+    }
+    let _focused_ref = CfRef::new(focused);
+
+    // Get the subrole
+    let mut subrole_ref: CFTypeRef = std::ptr::null();
+    let err = unsafe {
+        AXUIElementCopyAttributeValue(focused, cf_str("AXSubrole"), &mut subrole_ref)
+    };
+    if err != AX_ERROR_SUCCESS || subrole_ref.is_null() {
+        return false;
+    }
+    let subrole = unsafe { cfstring_to_string(subrole_ref as CFStringRef) };
+    unsafe { CFRelease(subrole_ref) };
+
+    is_secure_text_subrole(&subrole)
+}
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test -p aura-screen is_secure_field`
+Expected: PASS
+
+**Step 5: Add clipboard paste workaround to type_text handler**
+
+In `crates/aura-daemon/src/tool_helpers.rs`, in the `type_text` tool handler (or wherever type_text is dispatched), add before the actual typing:
+
+```rust
+// Detect password fields and route through clipboard paste instead of synthetic keys
+if aura_screen::accessibility::is_focused_element_secure() {
+    tracing::info!("Secure text field detected — routing through clipboard paste");
+    // Write to clipboard
+    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if let Err(e) = write_to_clipboard(text) {
+        return serde_json::json!({
+            "success": false,
+            "error": format!("Failed to write to clipboard for secure field: {e}"),
+        });
+    }
+    // Paste with Cmd+V
+    let paste_result = execute_key_press("v", &["cmd"]);
+    return serde_json::json!({
+        "success": true,
+        "method": "clipboard_paste",
+        "reason": "secure_text_field",
+        "note": "Used clipboard paste because the focused field blocks synthetic keyboard input (password field).",
+    });
+}
+```
+
+**Step 6: Run full test suite**
+
+Run: `cargo test -p aura-screen && cargo test -p aura-daemon`
+Expected: All tests pass
+
+**Step 7: Commit**
+
+```bash
+git add crates/aura-screen/src/accessibility.rs crates/aura-daemon/src/tool_helpers.rs
+git commit -m "feat: detect password fields and use clipboard paste workaround
+
+macOS SecureEventInput blocks synthetic keyboard input in password
+fields. Now type_text detects AXSecureTextField subrole and
+automatically routes through write_clipboard + Cmd+V paste instead.
+Transparent to Gemini — it just calls type_text as usual."
+```
+
+---
+
+### Task 14: Fix System Prompt Contradiction About Action Chaining
+
+**Files:**
+- Modify: `crates/aura-gemini/src/config.rs:87` (contradictory instruction)
+
+**Context:** Line 87 of the system prompt says `"NEVER chain multiple actions without checking verified + post_state between each one."` This directly contradicts Task 8's pipelining feature, where safe continuation pairs (type_text→press_key, click→type_text) intentionally skip intermediate verification. The prompt must be updated to allow pipelined pairs while still requiring verification for other sequences.
+
+**Step 1: Write a test to catch the contradiction**
+
+Add to `crates/aura-gemini/src/config.rs` test module:
+
+```rust
+#[test]
+fn system_prompt_allows_safe_continuation_pairs() {
+    let prompt = DEFAULT_SYSTEM_PROMPT;
+    // Must NOT contain the old absolute prohibition
+    assert!(
+        !prompt.contains("NEVER chain multiple actions without checking"),
+        "System prompt still has absolute action-chaining prohibition that contradicts pipelining"
+    );
+    // Must mention that safe pairs can be pipelined
+    assert!(
+        prompt.contains("continuation") || prompt.contains("pipeline"),
+        "System prompt should mention safe action continuation/pipelining"
+    );
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p aura-gemini system_prompt_allows`
+Expected: FAIL — the old text still exists
+
+**Step 3: Replace the contradictory line**
+
+In `crates/aura-gemini/src/config.rs`, replace line 87:
+
+```
+// Before:
+- NEVER chain multiple actions without checking verified + post_state between each one.
+
+// After:
+- For most actions, check verified + post_state before proceeding to the next action.
+- Exception: natural action pairs are automatically pipelined by the system — type_text followed by press_key (e.g., typing then pressing Enter), click followed by type_text (clicking a field then typing), and key combos (press_key followed by press_key). For these safe continuation pairs, you can issue them in sequence without waiting for intermediate verification. The system handles the timing.
+- For all other action sequences, always verify between steps.
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `cargo test -p aura-gemini system_prompt_allows`
+Expected: PASS
+
+**Step 5: Run full gemini test suite**
+
+Run: `cargo test -p aura-gemini`
+Expected: All tests pass (including the existing `system_prompt_has_decision_tree` test)
+
+**Step 6: Commit**
+
+```bash
+git add crates/aura-gemini/src/config.rs
+git commit -m "fix: update system prompt to allow safe action pipelining
+
+Replace absolute 'NEVER chain actions' rule with nuanced guidance
+that allows natural continuation pairs (type→enter, click→type,
+key combos) while still requiring verification for other sequences.
+Aligns prompt with the daemon's pipelining behavior from Task 8."
+```
+
+---
+
+### Task 15: System Prompt Update for All New Capabilities
+
+**Files:**
+- Modify: `crates/aura-gemini/src/config.rs` (system prompt additions)
+
+**Context:** Tasks 1-14 add several capabilities that Gemini needs to know about: coordinate fallback is in Task 6, but we still need to teach Gemini about VAD behavior changes, SoM overlay usage, bounding box validation, and the retry spiral. Without these prompt updates, Gemini won't know when or how to use the new features.
+
+**Step 1: Write tests for new prompt sections**
+
+Add to `crates/aura-gemini/src/config.rs` test module:
+
+```rust
+#[test]
+fn system_prompt_covers_all_pipeline_features() {
+    let prompt = DEFAULT_SYSTEM_PROMPT;
+
+    // SoM overlay reference
+    assert!(
+        prompt.contains("mark") || prompt.contains("SoM") || prompt.contains("numbered"),
+        "Prompt should reference SoM/numbered marks"
+    );
+
+    // Bounding box validation
+    assert!(
+        prompt.contains("expected_bounds") || prompt.contains("bounding box"),
+        "Prompt should reference expected_bounds or bounding box validation"
+    );
+
+    // Retry spiral is transparent — Gemini doesn't need to know details,
+    // but should know retries happen automatically
+    assert!(
+        prompt.contains("automatic retry") || prompt.contains("retried"),
+        "Prompt should mention automatic click retries"
+    );
+
+    // Password field workaround is transparent
+    assert!(
+        prompt.contains("password") || prompt.contains("secure"),
+        "Prompt should mention password/secure field handling"
+    );
+}
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `cargo test -p aura-gemini system_prompt_covers`
+Expected: FAIL — new sections don't exist yet
+
+**Step 3: Add new sections to the system prompt**
+
+Append the following sections to `DEFAULT_SYSTEM_PROMPT` in `config.rs`, after the existing "Tool Tips" section and before "Rules:":
+
+```
+Visual Element Targeting (SoM):
+When you need precise targeting on visually complex screens, you can request a Set-of-Mark
+annotated screenshot by calling get_screen_context(). If interactive regions were detected,
+the response includes a list of numbered marks with their pixel coordinates. Reference these
+marks when clicking: use the mark's center coordinates with the click tool. This is especially
+useful for Electron apps and web content where accessibility labels are unreliable.
+
+Bounding Box Validation:
+When clicking based on visual estimation, you can provide an expected_bounds parameter to the
+click tool: [y0, x0, y1, x1] normalized to [0, 1000] (Gemini's native bounding box format).
+The system validates your click coordinates fall within this region and warns if they don't.
+Use this when you want extra confidence that a coordinate click will hit its target.
+
+Automatic Click Retry:
+If a coordinate-based click (click tool) doesn't cause a visible screen change, the system
+automatically retries with small offsets (±15px spiral) up to 4 times. This is transparent to
+you — if the response shows verified=true with a retry_offset field, the retry succeeded. You
+don't need to manually retry missed clicks.
+
+Secure Fields:
+Password fields and other secure text inputs block synthetic keyboard input on macOS. When
+type_text targets a password field, the system automatically routes through clipboard paste
+(this is transparent to you). If you see method="clipboard_paste" in the response, this
+happened automatically.
+```
+
+**Step 4: Run tests**
+
+Run: `cargo test -p aura-gemini`
+Expected: All tests pass
+
+**Step 5: Commit**
+
+```bash
+git add crates/aura-gemini/src/config.rs
+git commit -m "feat: update system prompt for SoM, bounds validation, retries, secure fields
+
+Teach Gemini about all new pipeline capabilities: Set-of-Mark visual
+targeting, expected_bounds validation on clicks, automatic spiral
+retry for missed clicks, and transparent clipboard paste for password
+fields. Completes the prompt alignment for the full pipeline overhaul."
+```
+
+---
+
+### Task 16: Integration Verification (Phase 2)
+
+**Files:** None (verification only)
+
+**Step 1: Run full workspace tests**
+
+Run: `cargo test --workspace`
+Expected: All tests pass across all crates
+
+**Step 2: Build release binary**
+
+Run: `cargo build --release`
+Expected: Compiles without errors or warnings
+
+**Step 3: Run clippy**
+
+Run: `cargo clippy --workspace -- -D warnings`
+Expected: No warnings
+
+**Step 4: Run formatter**
+
+Run: `cargo fmt --all -- --check`
+Expected: All files formatted
+
+**Step 5: Final commit if any formatting needed**
+
+```bash
+cargo fmt --all
+git add -A
+git commit -m "chore: format after pipeline overhaul phase 2"
+```
