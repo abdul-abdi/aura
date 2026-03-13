@@ -11,6 +11,11 @@ const MAX_WIDTH: u32 = 1920;
 /// JPEG quality (0-100). 80 balances readability vs bandwidth.
 const JPEG_QUALITY: u8 = 80;
 
+/// Maximum width for on-demand high-res captures (get_screen_context, SoM, tool verification).
+const ONDEMAND_MAX_WIDTH: u32 = 2560;
+/// JPEG quality for on-demand captures. 92 gives crisp text without excessive size.
+const ONDEMAND_JPEG_QUALITY: u8 = 92;
+
 /// A captured frame ready to send to Gemini.
 pub struct CapturedFrame {
     /// Base64-encoded JPEG data.
@@ -63,8 +68,22 @@ fn active_display_id() -> Option<u32> {
     }
 }
 
-/// Capture the active display (display under mouse cursor) as a JPEG-encoded base64 string.
+/// Capture the active display at streaming quality (1920px, Q80).
+/// Used by the 2 FPS capture loop.
 pub fn capture_screen() -> Result<CapturedFrame> {
+    capture_screen_with_params(MAX_WIDTH, JPEG_QUALITY)
+}
+
+/// Capture the active display at high resolution (2560px, Q92).
+/// Used for on-demand captures: get_screen_context, SoM annotation,
+/// tool-triggered verification frames. Costs ~2x more tokens per frame
+/// but provides 33% more detail for coordinate targeting.
+pub fn capture_screen_high_res() -> Result<CapturedFrame> {
+    capture_screen_with_params(ONDEMAND_MAX_WIDTH, ONDEMAND_JPEG_QUALITY)
+}
+
+/// Internal capture with configurable resolution and quality.
+fn capture_screen_with_params(max_width: u32, jpeg_quality: u8) -> Result<CapturedFrame> {
     let display_id = active_display_id().unwrap_or(CGDisplay::main().id);
     let display = CGDisplay::new(display_id);
     let cg_image = CGDisplay::image(&display)
@@ -109,15 +128,15 @@ pub fn capture_screen() -> Result<CapturedFrame> {
     // Simple hash for change detection (sample pixels)
     let hash = compute_frame_hash(&rgb);
 
-    // Downscale if wider than MAX_WIDTH
-    let (final_rgb, final_w, final_h) = if width as u32 > MAX_WIDTH {
-        let scale = MAX_WIDTH as f64 / width as f64;
+    // Downscale if wider than max_width
+    let (final_rgb, final_w, final_h) = if width as u32 > max_width {
+        let scale = max_width as f64 / width as f64;
         let new_h = (height as f64 * scale) as u32;
         let img = image::RgbImage::from_raw(width as u32, height as u32, rgb)
             .context("Failed to create image buffer")?;
         let resized = image::imageops::resize(
             &img,
-            MAX_WIDTH,
+            max_width,
             new_h,
             image::imageops::FilterType::Triangle,
         );
@@ -130,7 +149,7 @@ pub fn capture_screen() -> Result<CapturedFrame> {
 
     // Encode to JPEG
     let mut jpeg_buf = Vec::new();
-    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, JPEG_QUALITY);
+    let mut encoder = JpegEncoder::new_with_quality(&mut jpeg_buf, jpeg_quality);
     encoder
         .encode(&final_rgb, final_w, final_h, image::ExtendedColorType::Rgb8)
         .context("JPEG encoding failed")?;
@@ -322,6 +341,29 @@ mod tests {
         let trigger = CaptureTrigger::new();
         trigger.trigger(); // regular trigger, no waiter
         assert!(trigger.take_waiter().is_none());
+    }
+
+    #[test]
+    fn high_res_constants_are_larger_than_streaming() {
+        assert!(
+            ONDEMAND_MAX_WIDTH > MAX_WIDTH,
+            "On-demand should be higher res than streaming"
+        );
+        assert!(
+            ONDEMAND_JPEG_QUALITY > JPEG_QUALITY,
+            "On-demand should be higher quality than streaming"
+        );
+        assert!(
+            ONDEMAND_MAX_WIDTH <= 2560,
+            "On-demand should not exceed 2560px"
+        );
+    }
+
+    #[test]
+    fn capture_screen_high_res_exists() {
+        // Verify the function signature compiles — actual capture requires
+        // Screen Recording permission and will fail in CI.
+        let _fn_ptr: fn() -> Result<CapturedFrame> = capture_screen_high_res;
     }
 }
 
