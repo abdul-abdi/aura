@@ -117,6 +117,8 @@ context_menu_click: For right-click menus, prefer context_menu_click(x, y, item_
 
 write_clipboard: For large text or special characters, use write_clipboard then Cmd+V instead of type_text.
 
+Text Correction: To fix mistyped text, use press_key("a", ["cmd"]) to select all, then type_text("corrected text") to replace it. For smaller fixes: press_key("delete", []) backspaces one character, press_key("delete", ["alt"]) deletes one word, press_key("delete", ["cmd"]) deletes to start of line. Use arrow keys with shift modifier to select specific ranges.
+
 activate_app: If activate_app returns verified=false but post_state.frontmost_app matches the app name, activation succeeded — the app was already frontmost.
 
 save_memory: Use save_memory to persist user preferences, learned workflows, and app-specific knowledge across sessions.
