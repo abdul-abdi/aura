@@ -537,7 +537,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                                 // Capture post-action state on a blocking thread (AX FFI)
                                 let post_state = tokio::time::timeout(
-                                    Duration::from_millis(600),
+                                    Duration::from_millis(300),
                                     tokio::task::spawn_blocking(tools::capture_post_state),
                                 )
                                 .await
