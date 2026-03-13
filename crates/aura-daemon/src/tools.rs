@@ -431,6 +431,11 @@ pub(crate) async fn execute_tool(
             .await
         }
         "activate_app" => {
+            const BLOCKED_APPS: &[&str] = &[
+                "terminal", "iterm", "iterm2", "kitty", "alacritty", "warp",
+                "hyper", "tabby", "rio", "wezterm", "ghostty",
+            ];
+
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return serde_json::json!({
@@ -438,6 +443,15 @@ pub(crate) async fn execute_tool(
                     "error": "name parameter is required"
                 });
             }
+
+            let name_lower = name.to_lowercase();
+            if BLOCKED_APPS.iter().any(|b| name_lower == *b || name_lower.contains(b)) {
+                return serde_json::json!({
+                    "error": "blocked_app",
+                    "message": "Cannot activate terminal apps for safety — Aura could accidentally execute commands. Ask the user to switch to it manually."
+                });
+            }
+
             // Sanitize app name to prevent AppleScript injection
             let safe_name = name.replace(['\\', '"'], "");
             let script = format!(r#"tell application "{safe_name}" to activate"#);
