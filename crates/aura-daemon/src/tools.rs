@@ -109,6 +109,9 @@ pub(crate) async fn execute_tool(
                     aura_screen::capture::annotate_with_som(&jpeg_bytes)
                 && !marks.is_empty()
             {
+                // Note: _annotated_b64 (the overlay image) is intentionally discarded.
+                // Gemini tool responses are JSON text — inline images aren't supported.
+                // The mark coordinates below give Gemini enough to target clicks precisely.
                 let marks_json: Vec<serde_json::Value> = marks
                     .iter()
                     .map(|m| {
@@ -278,6 +281,9 @@ pub(crate) async fn execute_tool(
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 if let Some(ref prev) = prev_clipboard {
                     let _ = aura_screen::macos::set_clipboard(prev);
+                } else {
+                    // Clipboard was empty before — clear the password from clipboard
+                    let _ = aura_screen::macos::set_clipboard("");
                 }
                 if paste_result
                     .get("success")
