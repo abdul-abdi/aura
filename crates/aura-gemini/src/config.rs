@@ -626,16 +626,26 @@ mod tests {
     fn system_prompt_has_xml_section_markers() {
         let prompt = DEFAULT_SYSTEM_PROMPT;
         let expected_sections = [
-            "<persona>", "</persona>",
-            "<vision>", "</vision>",
-            "<tools>", "</tools>",
-            "<strategy>", "</strategy>",
-            "<verification>", "</verification>",
-            "<tool_responses>", "</tool_responses>",
-            "<tool_tips>", "</tool_tips>",
-            "<workflows>", "</workflows>",
-            "<memory>", "</memory>",
-            "<rules>", "</rules>",
+            "<persona>",
+            "</persona>",
+            "<vision>",
+            "</vision>",
+            "<tools>",
+            "</tools>",
+            "<strategy>",
+            "</strategy>",
+            "<verification>",
+            "</verification>",
+            "<tool_responses>",
+            "</tool_responses>",
+            "<tool_tips>",
+            "</tool_tips>",
+            "<workflows>",
+            "</workflows>",
+            "<memory>",
+            "</memory>",
+            "<rules>",
+            "</rules>",
         ];
         for tag in &expected_sections {
             assert!(
@@ -673,7 +683,9 @@ mod tests {
 
         // Memory categories explained
         assert!(
-            prompt.contains("preference:") && prompt.contains("habit:") && prompt.contains("entity:"),
+            prompt.contains("preference:")
+                && prompt.contains("habit:")
+                && prompt.contains("entity:"),
             "Prompt should explain memory categories"
         );
 
