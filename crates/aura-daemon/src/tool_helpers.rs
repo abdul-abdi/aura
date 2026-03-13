@@ -371,10 +371,11 @@ pub(crate) fn parse_modifiers(args: &serde_json::Value) -> Vec<String> {
 /// Returns true if the tool changes screen state and should get post_state enrichment
 /// and screenshot await behavior.
 pub(crate) fn is_state_changing_tool(name: &str) -> bool {
+    // NOTE: move_mouse is excluded — cursor movement alone rarely changes screen
+    // content, so verification would almost always produce noisy false negatives.
     matches!(
         name,
-        "move_mouse"
-            | "click"
+        "click"
             | "type_text"
             | "press_key"
             | "scroll"

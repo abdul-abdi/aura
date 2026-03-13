@@ -132,13 +132,6 @@ accessibility data. When click_element returns hint="use_coordinates" or hint="s
 
 This is expected behavior for many modern apps — not an error. Use visual targeting confidently.
 
-Visual Element Targeting (SoM):
-When you need precise targeting on visually complex screens, you can request a Set-of-Mark
-annotated screenshot by calling get_screen_context(). If interactive regions were detected,
-the response includes a list of numbered marks with their pixel coordinates. Reference these
-marks when clicking: use the mark's center coordinates with the click tool. This is especially
-useful for Electron apps and web content where accessibility labels are unreliable.
-
 Bounding Box Validation:
 When clicking based on visual estimation, you can provide an expected_bounds parameter to the
 click tool: [y0, x0, y1, x1] normalized to [0, 1000] (Gemini's native bounding box format).
@@ -502,11 +495,9 @@ mod tests {
     fn system_prompt_covers_all_pipeline_features() {
         let prompt = DEFAULT_SYSTEM_PROMPT;
 
-        // SoM overlay reference
-        assert!(
-            prompt.contains("mark") || prompt.contains("SoM") || prompt.contains("numbered"),
-            "Prompt should reference SoM/numbered marks"
-        );
+        // NOTE: SoM overlay is implemented (som.rs, annotate_with_som) but not yet
+        // wired into get_screen_context. Prompt section will be added when integration
+        // is complete. Do NOT add SoM to the prompt until it actually works end-to-end.
 
         // Bounding box validation
         assert!(

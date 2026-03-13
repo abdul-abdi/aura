@@ -222,6 +222,8 @@ pub(crate) async fn execute_tool(
 
             if is_secure {
                 tracing::info!("Secure text field detected — routing through clipboard paste");
+                // Save current clipboard so we can restore it after pasting
+                let prev_clipboard = aura_screen::macos::get_clipboard();
                 if let Err(e) = aura_screen::macos::set_clipboard(&text) {
                     return serde_json::json!({
                         "success": false,
@@ -239,6 +241,11 @@ pub(crate) async fn execute_tool(
                     "clipboard_paste",
                 )
                 .await;
+                // Restore previous clipboard after brief delay for paste to land
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Some(ref prev) = prev_clipboard {
+                    let _ = aura_screen::macos::set_clipboard(prev);
+                }
                 if paste_result
                     .get("success")
                     .and_then(|v| v.as_bool())
