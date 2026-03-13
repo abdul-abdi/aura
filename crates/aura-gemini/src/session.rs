@@ -547,6 +547,7 @@ async fn connect_and_stream_inner(
     let mut ping_interval = tokio::time::interval(Duration::from_secs(20));
     ping_interval.tick().await; // skip immediate first tick
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_server_activity = std::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -559,6 +560,7 @@ async fn connect_and_stream_inner(
                     return Err(anyhow::anyhow!("WebSocket connection closed"));
                 };
                 let msg = msg?;
+                last_server_activity = std::time::Instant::now();
 
                 let json_text = match msg {
                     Message::Text(text) => Some(text),
@@ -617,6 +619,13 @@ async fn connect_and_stream_inner(
             }
 
             _ = ping_interval.tick() => {
+                // Detect stale connections: if no data received since 2 ping
+                // intervals, the network has likely silently died.
+                if last_server_activity.elapsed() > Duration::from_secs(60) {
+                    return Err(anyhow::anyhow!(
+                        "No server activity for 60s, assuming connection dead"
+                    ));
+                }
                 ws_sink.send(Message::Ping(vec![])).await?;
             }
 
@@ -785,6 +794,12 @@ fn encode_audio_message(pcm: &[f32]) -> RealtimeAudioMessage {
 
 /// Convert 16-bit LE PCM bytes to f32 PCM [-1.0, 1.0].
 fn pcm_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
+    if bytes.len() % 2 != 0 {
+        tracing::debug!(
+            len = bytes.len(),
+            "Odd-length audio payload, trailing byte will be skipped"
+        );
+    }
     bytes
         .chunks_exact(2)
         .map(|chunk| {
