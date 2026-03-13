@@ -533,7 +533,12 @@ pub(crate) async fn execute_tool(
             // Pre-check automation permission for System Events
             if let Some(bundle_id) = aura_bridge::automation::app_name_to_bundle_id("System Events")
             {
-                let perm = aura_bridge::automation::check_automation_permission(bundle_id);
+                let bundle = bundle_id.to_string();
+                let perm = tokio::task::spawn_blocking(move || {
+                    aura_bridge::automation::check_automation_permission(&bundle)
+                })
+                .await
+                .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
                 if perm == aura_bridge::automation::AutomationPermission::Denied {
                     return serde_json::json!({
                         "success": false,
@@ -672,6 +677,12 @@ pub(crate) async fn execute_tool(
                             "clicked_item": item.label,
                         })
                     } else {
+                        // Dismiss the stale context menu before returning an error
+                        let _ = aura_input::keyboard::press_key(
+                            aura_input::keyboard::keycode_from_name("escape").unwrap_or(53),
+                            &[],
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         serde_json::json!({
                             "success": false,
                             "error": "Found menu item but it has no bounds",
@@ -679,6 +690,12 @@ pub(crate) async fn execute_tool(
                     }
                 }
                 None => {
+                    // Dismiss the stale context menu before returning an error
+                    let _ = aura_input::keyboard::press_key(
+                        aura_input::keyboard::keycode_from_name("escape").unwrap_or(53),
+                        &[],
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     serde_json::json!({
                         "success": false,
                         "error": format!("Menu item '{}' not found in context menu", item_label),
