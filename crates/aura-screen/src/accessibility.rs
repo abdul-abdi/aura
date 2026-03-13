@@ -613,6 +613,31 @@ pub(crate) fn find_ax_raw_nth(
 
 // ── Public AX write functions ─────────────────────────────────────────────────
 
+/// Attempt to scroll an element into view using the AXScrollToVisible action.
+/// Returns `true` if the action was accepted by the accessibility server.
+pub(crate) fn ax_scroll_to_visible(element_ref: &CfRef) -> bool {
+    let action_key = cf_string_from_str("AXScrollToVisible");
+    let ret = unsafe { AXUIElementPerformAction(element_ref.as_raw(), action_key.as_raw()) };
+    ret == AX_ERROR_SUCCESS
+}
+
+/// Find the Nth element matching label/role, scroll it into view, then return
+/// the updated `UIElement` (with refreshed bounds). Returns `None` if the
+/// element cannot be found or still has no bounds after scrolling.
+pub fn scroll_to_visible_and_get_element(
+    label: Option<&str>,
+    role: Option<&str>,
+    index: usize,
+) -> Option<UIElement> {
+    let (raw_ref, _el) = find_ax_raw_nth(label, role, index)?;
+    ax_scroll_to_visible(&raw_ref);
+    // Give the scroll animation time to settle before re-querying bounds.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Re-query the element to pick up updated position/size after scrolling.
+    let (_raw2, el) = find_ax_raw_nth(label, role, index)?;
+    Some(el)
+}
+
 /// Perform an AX action (e.g. "AXPress") on the element matching `label`/`role`.
 pub fn ax_perform_action(label: Option<&str>, role: Option<&str>, action: &str) -> AXActionResult {
     ax_perform_action_nth(label, role, action, 0)
@@ -716,6 +741,69 @@ pub fn ax_set_focused(label: Option<&str>, role: Option<&str>) -> AXActionResult
                 "AXUIElementSetAttributeValue(AXFocused) returned {ret}"
             )),
         }
+    }
+}
+
+/// Collect AXMenuItem elements from the frontmost app's AX tree.
+pub fn get_menu_items() -> Vec<UIElement> {
+    let pid = match crate::macos::get_frontmost_pid() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Vec::new();
+    }
+    let app_ref = CfRef::new(app);
+    let mut elements = Vec::new();
+    let start = std::time::Instant::now();
+    collect_menu_items(app_ref.as_raw(), 0, &mut elements, &start);
+    elements
+}
+
+fn collect_menu_items(
+    element: CFTypeRef,
+    depth: usize,
+    elements: &mut Vec<UIElement>,
+    start_time: &std::time::Instant,
+) {
+    if depth > 8 || elements.len() >= 30 || start_time.elapsed().as_millis() >= 500 {
+        return;
+    }
+    let role = match get_ax_string(element, "AXRole") {
+        Some(r) => r,
+        None => return,
+    };
+    if role == "AXMenuItem" {
+        let label = get_ax_string(element, "AXTitle")
+            .filter(|s| !s.is_empty())
+            .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
+        let enabled = get_ax_bool(element, "AXEnabled");
+        let bounds = match (get_ax_position(element), get_ax_size(element)) {
+            (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            }),
+            _ => None,
+        };
+        elements.push(UIElement {
+            role,
+            label,
+            value: None,
+            bounds,
+            enabled,
+            focused: false,
+        });
+        return;
+    }
+    let children = get_ax_children(element);
+    for child in &children {
+        collect_menu_items(*child, depth + 1, elements, start_time);
+    }
+    for child in &children {
+        unsafe { CFRelease(*child) };
     }
 }
 

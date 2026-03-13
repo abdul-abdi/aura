@@ -119,19 +119,33 @@ pub(crate) fn click_element_inner(
         "AXPress failed, trying PID-targeted click"
     );
 
-    let bounds = match &target.bounds {
-        Some(b) => b,
-        None => {
-            return serde_json::json!({
-                "success": false,
-                "error": "Element found but has no bounds (may be offscreen or hidden)",
-                "element": {
-                    "role": target.role,
-                    "label": target.label,
-                },
-            });
+    // If the element has no bounds it may be offscreen — try AXScrollToVisible first.
+    let scrolled_target: aura_screen::context::UIElement;
+    let effective_target: &aura_screen::context::UIElement;
+    if target.bounds.is_some() {
+        effective_target = &target;
+    } else {
+        tracing::debug!("Element has no bounds — attempting AXScrollToVisible");
+        match aura_screen::accessibility::scroll_to_visible_and_get_element(label, role, index) {
+            Some(refreshed) if refreshed.bounds.is_some() => {
+                scrolled_target = refreshed;
+                effective_target = &scrolled_target;
+            }
+            _ => {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "Element found but has no bounds (offscreen or hidden). \
+                              AXScrollToVisible was attempted but the element remains \
+                              invisible. Try scrolling the element into view manually.",
+                    "element": {
+                        "role": target.role,
+                        "label": target.label,
+                    },
+                });
+            }
         }
-    };
+    }
+    let bounds = effective_target.bounds.as_ref().unwrap();
 
     // AX bounds are already in logical screen coordinates — no FrameDims conversion needed
     let (center_x, center_y) = bounds.center();
@@ -149,8 +163,8 @@ pub(crate) fn click_element_inner(
                 "success": true,
                 "method": "pid_click",
                 "element": {
-                    "role": target.role,
-                    "label": target.label,
+                    "role": effective_target.role,
+                    "label": effective_target.label,
                 },
                 "clicked_at": {
                     "x": center_x,
@@ -167,8 +181,8 @@ pub(crate) fn click_element_inner(
             "success": true,
             "method": "hid_click",
             "element": {
-                "role": target.role,
-                "label": target.label,
+                "role": effective_target.role,
+                "label": effective_target.label,
             },
             "clicked_at": {
                 "x": center_x,
@@ -324,9 +338,11 @@ pub(crate) fn is_state_changing_tool(name: &str) -> bool {
             | "press_key"
             | "scroll"
             | "drag"
+            | "key_state"
             | "click_element"
             | "activate_app"
             | "click_menu_item"
+            | "context_menu_click"
             | "run_applescript"
     )
 }
