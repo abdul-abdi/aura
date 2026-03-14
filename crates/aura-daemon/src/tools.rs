@@ -33,6 +33,7 @@ pub(crate) async fn execute_tool(
     executor: &ScriptExecutor,
     screen_reader: &MacOSScreenReader,
     dims: FrameDims,
+    vision_oracle: Option<&aura_gemini::vision_oracle::VisionOracle>,
 ) -> serde_json::Value {
     match name {
         "run_applescript" => {
@@ -217,8 +218,8 @@ pub(crate) async fn execute_tool(
                 Some(v) => v,
                 None => return serde_json::json!({"error": "missing required parameter: y"}),
             };
-            let x = dims.to_logical_x(raw_x);
-            let y = dims.to_logical_y(raw_y);
+            let mut x = dims.to_logical_x(raw_x);
+            let mut y = dims.to_logical_y(raw_y);
             let button = args
                 .get("button")
                 .and_then(|v| v.as_str())
@@ -230,6 +231,116 @@ pub(crate) async fn execute_tool(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1) as u32;
             let count = count.clamp(1, CLICK_COUNT_MAX);
+
+            // AX hit-test: find the interactive element at the target coordinates
+            // and snap to its center for improved accuracy.
+            let hit_x = x;
+            let hit_y = y;
+            let ax_hit = tokio::task::spawn_blocking(move || {
+                aura_screen::accessibility::element_at_position(hit_x, hit_y)
+            })
+            .await
+            .ok()
+            .flatten();
+
+            let mut targeting_info = serde_json::json!({});
+            if let Some(ref el) = ax_hit {
+                if let Some(ref bounds) = el.bounds {
+                    let (cx, cy) = bounds.center();
+                    tracing::debug!(
+                        original_x = x,
+                        original_y = y,
+                        snapped_x = cx,
+                        snapped_y = cy,
+                        role = %el.role,
+                        label = ?el.label,
+                        "Snapping click to element center"
+                    );
+                    x = cx;
+                    y = cy;
+                    targeting_info = serde_json::json!({
+                        "element_at_target": el.summary(),
+                        "snapped_to_center": true,
+                        "original_coords": [hit_x, hit_y],
+                        "snapped_coords": [cx, cy],
+                    });
+                } else {
+                    targeting_info = serde_json::json!({
+                        "element_at_target": el.summary(),
+                        "snapped_to_center": false,
+                        "targeting_hint": "Element found but has no bounds — clicking original coordinates",
+                    });
+                }
+            } else {
+                // AX miss — try vision oracle for precise coordinates
+                if let Some(oracle) = vision_oracle {
+                    tracing::info!(x, y, "AX miss — querying vision oracle");
+                    match tokio::task::spawn_blocking(|| {
+                        aura_screen::capture::capture_screen_high_res()
+                    })
+                    .await
+                    {
+                        Ok(Ok(frame)) => {
+                            match oracle
+                                .find_element_coordinates(
+                                    &frame.jpeg_base64,
+                                    x,
+                                    y,
+                                    frame.width,
+                                    frame.height,
+                                    frame.logical_width,
+                                    frame.logical_height,
+                                )
+                                .await
+                            {
+                                Ok((ox, oy)) => {
+                                    tracing::info!(
+                                        original_x = x,
+                                        original_y = y,
+                                        oracle_x = ox,
+                                        oracle_y = oy,
+                                        "Vision oracle refined coordinates"
+                                    );
+                                    x = ox;
+                                    y = oy;
+                                    targeting_info = serde_json::json!({
+                                        "vision_oracle": true,
+                                        "original_coords": [hit_x, hit_y],
+                                        "oracle_coords": [ox, oy],
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Vision oracle failed, using raw coordinates"
+                                    );
+                                    targeting_info = serde_json::json!({
+                                        "element_at_target": null,
+                                        "snapped_to_center": false,
+                                        "vision_oracle_error": format!("{e}"),
+                                        "targeting_hint": "Vision oracle failed — using original coordinates",
+                                    });
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::warn!("Failed to capture screenshot for vision oracle");
+                            targeting_info = serde_json::json!({
+                                "element_at_target": null,
+                                "snapped_to_center": false,
+                                "targeting_hint": "No interactive element found — screenshot capture failed",
+                            });
+                        }
+                    }
+                } else {
+                    targeting_info = serde_json::json!({
+                        "element_at_target": null,
+                        "snapped_to_center": false,
+                        "targeting_hint": "No interactive element found at coordinates — click may miss",
+                    });
+                }
+            }
+
             // Pre-move cursor to click target so apps register hover state
             // before receiving the click event.
             let pre_x = x;
@@ -244,7 +355,7 @@ pub(crate) async fn execute_tool(
             let modifiers = crate::tool_helpers::parse_modifiers(args);
             let btn = button.clone();
             let mods = modifiers.clone();
-            run_with_pid_fallback(
+            let mut result = run_with_pid_fallback(
                 move |pid| {
                     let mod_refs: Vec<&str> = mods.iter().map(|s| s.as_str()).collect();
                     aura_input::mouse::click_pid(x, y, &btn, count, &mod_refs, pid)
@@ -256,7 +367,17 @@ pub(crate) async fn execute_tool(
                 },
                 "hid_click",
             )
-            .await
+            .await;
+
+            // Merge targeting info into click result
+            if let Some(obj) = result.as_object_mut() {
+                if let Some(ti) = targeting_info.as_object() {
+                    for (k, v) in ti {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            result
         }
         "type_text" => {
             let text = args

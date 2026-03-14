@@ -67,6 +67,22 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     // Screen reader for context gathering
     let screen_reader = MacOSScreenReader::new().context("Failed to initialize screen reader")?;
 
+    // Vision oracle for AI-assisted click coordinate refinement
+    let vision_oracle: Option<std::sync::Arc<aura_gemini::vision_oracle::VisionOracle>> = {
+        match aura_gemini::config::GeminiConfig::from_env() {
+            Ok(cfg) => {
+                tracing::info!("Vision oracle initialized with Gemini 3 Flash");
+                Some(std::sync::Arc::new(
+                    aura_gemini::vision_oracle::VisionOracle::new(&cfg.api_key),
+                ))
+            }
+            Err(_) => {
+                tracing::warn!("No API key found — vision oracle disabled");
+                None
+            }
+        }
+    };
+
     // Screen capture loop: 1 FPS JPEG screenshots with change detection
     let capture_trigger = CaptureTrigger::new();
     let cap_notify = Arc::new(tokio::sync::Notify::new());
@@ -423,6 +439,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             logical_w: frame_logical_w.load(Ordering::Acquire),
                             logical_h: frame_logical_h.load(Ordering::Acquire),
                         };
+                        let tool_vision_oracle = vision_oracle.clone();
 
                         // Create a cancellation token and register it before spawning
                         let tool_cancel = CancellationToken::new();
@@ -480,7 +497,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             };
 
                             let mut response = tokio::select! {
-                                result = tools::execute_tool(&name, &args, &tool_executor, &tool_screen_reader, tool_dims) => result,
+                                result = tools::execute_tool(&name, &args, &tool_executor, &tool_screen_reader, tool_dims, tool_vision_oracle.as_deref()) => result,
                                 _ = tool_cancel.cancelled() => {
                                     tracing::info!(tool = %name, "Tool execution cancelled");
                                     serde_json::json!({
@@ -612,7 +629,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             let mut retry_args = args.clone();
                                             retry_args["x"] = serde_json::json!(retry_x);
                                             retry_args["y"] = serde_json::json!(retry_y);
-                                            let _ = tools::execute_tool(&name, &retry_args, &tool_executor, &tool_screen_reader, tool_dims).await;
+                                            let _ = tools::execute_tool(&name, &retry_args, &tool_executor, &tool_screen_reader, tool_dims, tool_vision_oracle.as_deref()).await;
 
                                             // Brief settle + single hash check
                                             tokio::time::sleep(Duration::from_millis(80)).await;

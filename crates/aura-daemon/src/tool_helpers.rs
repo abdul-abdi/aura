@@ -452,7 +452,7 @@ pub(crate) fn point_in_denormalized_bounds(
 }
 
 /// Pixel radius for spiral retry offsets.
-pub(crate) const SPIRAL_RADIUS: i32 = 15;
+pub(crate) const SPIRAL_RADIUS: i32 = 40;
 
 /// Try PID-targeted input first, fall back to global HID.
 pub(crate) async fn run_with_pid_fallback<F1, F2>(
