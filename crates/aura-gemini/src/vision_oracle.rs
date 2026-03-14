@@ -71,12 +71,16 @@ impl VisionOracle {
             "contents": [{
                 "parts": [
                     { "text": prompt },
-                    { "inline_data": { "mime_type": "image/jpeg", "data": screenshot_b64 } }
+                    {
+                        "inline_data": { "mime_type": "image/jpeg", "data": screenshot_b64 },
+                        "media_resolution": { "level": "MEDIA_RESOLUTION_HIGH" }
+                    }
                 ]
             }],
             "generationConfig": {
                 "temperature": 0.0,
-                "maxOutputTokens": 50
+                "maxOutputTokens": 50,
+                "mediaResolution": "MEDIA_RESOLUTION_HIGH"
             }
         });
 
