@@ -4,8 +4,8 @@ WORKDIR /app
 
 RUN adduser --disabled-password --gecos '' --uid 1001 aura
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY config.py agent.py tools.py server.py ./
 
