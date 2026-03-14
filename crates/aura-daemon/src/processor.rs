@@ -364,13 +364,35 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 tracing::warn!("Failed to send greeting context to Gemini: {e}");
                             }
                         } else {
-                            // Reconnection: send brief context restoration
+                            // Reconnection: enrich with memory agent context so
+                            // Gemini can pick up where we left off even when session
+                            // resumption fails and a fresh session starts.
                             let now = Local::now();
+                            let time_context = format!(
+                                "Current time: {} ({}). Date: {}.",
+                                now.format("%I:%M %p"),
+                                now.format("%Z"),
+                                now.format("%A, %B %-d, %Y"),
+                            );
+
+                            let cloud_memories = if let (Some(url), Some(token), Some(did)) =
+                                (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
+                            {
+                                query_memory_agent(url, token, did, "session reconnecting").await
+                            } else {
+                                None
+                            };
+
+                            let memory_section = match cloud_memories {
+                                Some(ref mem) => format!(" Context from recent sessions:\n{mem}"),
+                                None => String::new(),
+                            };
+
                             let context_msg = format!(
-                                "[System: Session reconnected at {}. Continuing previous conversation. Do not re-greet the user.]",
+                                "[System: Session reconnected at {}. {time_context}{memory_section} Continue the previous conversation naturally. Do not re-greet the user.]",
                                 now.format("%I:%M %p"),
                             );
-                            tracing::info!("Reconnection — sending context restoration");
+                            tracing::info!("Reconnection — sending enriched context restoration");
 
                             if let Err(e) = session.send_text(&context_msg) {
                                 tracing::warn!("Failed to send reconnection context: {e}");
