@@ -53,7 +53,9 @@ async fn query_memory_agent(
     }
 
     let json: serde_json::Value = resp.json().await.ok()?;
-    json.get("context").and_then(|c| c.as_str()).map(String::from)
+    json.get("context")
+        .and_then(|c| c.as_str())
+        .map(String::from)
 }
 
 /// Send session transcript to the memory agent for ingestion.
@@ -71,7 +73,12 @@ async fn ingest_to_memory_agent(
 
     let msg_json: Vec<serde_json::Value> = messages
         .iter()
-        .filter(|m| matches!(m.role, aura_memory::MessageRole::User | aura_memory::MessageRole::ToolCall))
+        .filter(|m| {
+            matches!(
+                m.role,
+                aura_memory::MessageRole::User | aura_memory::MessageRole::ToolCall
+            )
+        })
         .map(|m| {
             serde_json::json!({
                 "role": match m.role {
@@ -110,7 +117,11 @@ async fn ingest_to_memory_agent(
     }
 
     let json: serde_json::Value = resp.json().await.ok()?;
-    let summary = json.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let summary = json
+        .get("summary")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
     let facts: Vec<aura_memory::consolidate::ExtractedFact> = json
         .get("facts")
         .and_then(|f| serde_json::from_value(f.clone()).ok())
