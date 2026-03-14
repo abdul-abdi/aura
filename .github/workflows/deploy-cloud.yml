@@ -114,6 +114,7 @@ jobs:
             --min-instances 0 \
             --max-instances 10 \
             --timeout 3600 \
+            --no-cpu-throttling \
             --set-secrets="AURA_PROXY_AUTH_TOKEN=aura-proxy-auth-token:latest" \
             --quiet
 
@@ -166,6 +167,7 @@ jobs:
             --cpu 1 \
             --min-instances 0 \
             --max-instances 5 \
+            --timeout 600 \
             --quiet
 
       - name: Health check
@@ -174,8 +176,10 @@ jobs:
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --format "value(status.url)")
+          # Service uses --no-allow-unauthenticated, so we need an identity token
+          TOKEN=$(gcloud auth print-identity-token --audiences="${URL}")
           for i in $(seq 1 10); do
-            if curl -sf "${URL}/health"; then
+            if curl -sf -H "Authorization: Bearer ${TOKEN}" "${URL}/health"; then
               echo "Health check passed"
               exit 0
             fi

@@ -279,7 +279,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: uv pip install --system -r infrastructure/memory-agent/requirements.txt
+        run: uv pip install --system -r infrastructure/memory-agent/requirements-dev.txt
       - name: Run tests
         shell: bash
         run: |
