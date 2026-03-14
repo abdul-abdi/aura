@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import uuid
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -108,7 +109,7 @@ async def _run_agent(runner: InMemoryRunner, user_id: str, message: str) -> str:
     parts: list[str] = []
     async for event in runner.run_async(
         user_id=user_id,
-        session_id=f"req-{id(message)}",
+        session_id=f"req-{uuid.uuid4().hex}",
         new_message=types.UserContent(parts=[types.Part(text=message)]),
     ):
         if event.is_final_response() and event.content:
@@ -255,9 +256,15 @@ async def consolidate(
                 detail={"status": "error", "error": str(exc), "code": 500},
             )
 
-        # Parse optional counts from result text
+        # Try to parse structured counts from agent response
         memories_consolidated = 0
         insights_generated = 0
+        try:
+            parsed = json.loads(result)
+            memories_consolidated = parsed.get("memories_processed", 0)
+            insights_generated = 1 if parsed.get("insight") else 0
+        except (json.JSONDecodeError, AttributeError):
+            pass  # Agent returned free-text — counts stay 0
 
         return {
             "status": "ok",

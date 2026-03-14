@@ -162,15 +162,20 @@ async def mark_consolidated(memory_ids: list[str], device_id: str) -> dict:
         device_id: The user's device identifier.
 
     Returns:
-        dict with count of marked memories.
+        dict with count of successfully marked memories and any failures.
     """
     validate_id(device_id, "device_id")
-    batch = get_db().batch()
+    marked = 0
+    failed = 0
     for mid in memory_ids:
         ref = _user_ref(device_id).collection("memories").document(mid)
-        batch.update(ref, {"consolidated": True})
-    await batch.commit()
-    return {"status": "marked", "count": len(memory_ids)}
+        try:
+            await ref.update({"consolidated": True})
+            marked += 1
+        except Exception:
+            # Document may not exist (hallucinated ID from agent)
+            failed += 1
+    return {"status": "marked", "count": marked, "failed": failed}
 
 
 async def read_consolidation_history(device_id: str) -> dict:
