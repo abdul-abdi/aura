@@ -239,25 +239,59 @@ jobs:
 
           exit $EXIT_CODE
 
-  # ── Python lint & test ─────────────────────────────────────────────────
-  python:
-    name: Python Lint & Test
+  # ── Python formatting (seconds) ───────────────────────────────────────
+  python-format:
+    name: Python Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: astral-sh/setup-uv@6b9c6063abd6010835c3544bf6e43e73418c388b # v7
+        with:
+          version: "0.10.9"
+      - name: Check formatting
+        run: uvx ruff format --check infrastructure/memory-agent/
+
+  # ── Python linting ──────────────────────────────────────────────────
+  python-lint:
+    name: Python Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: astral-sh/setup-uv@6b9c6063abd6010835c3544bf6e43e73418c388b # v7
+        with:
+          version: "0.10.9"
+      - name: Lint
+        run: uvx ruff check infrastructure/memory-agent/
+
+  # ── Python tests ────────────────────────────────────────────────────
+  python-test:
+    name: Python Tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: astral-sh/setup-uv@6b9c6063abd6010835c3544bf6e43e73418c388b # v7
+        with:
+          version: "0.10.9"
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5
         with:
           python-version: '3.12'
       - name: Install dependencies
+        run: uv pip install --system -r infrastructure/memory-agent/requirements.txt
+      - name: Run tests
+        shell: bash
         run: |
-          cd infrastructure/memory-agent
-          pip install -r requirements.txt
-          pip install ruff
-      - name: Lint
-        run: ruff check infrastructure/memory-agent/
-      - name: Test
-        run: cd infrastructure/memory-agent && python -m pytest tests/ -v
+          set -o pipefail
+          cd infrastructure/memory-agent && python -m pytest tests/ -v 2>&1 | tee /tmp/py-test-output.txt
+      - name: Summarize results
+        if: always()
+        run: |
+          echo "## Python Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -5 /tmp/py-test-output.txt >> "$GITHUB_STEP_SUMMARY" || echo "No results found" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   # ── PR size warning ────────────────────────────────────────────────────
   pr-size:
@@ -274,8 +308,8 @@ jobs:
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
 
-          ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$1} END {print s+0}')
-          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' | awk '{s+=$2} END {print s+0}')
+          ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' '*.py' | awk '{s+=$1} END {print s+0}')
+          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' '*.py' | awk '{s+=$2} END {print s+0}')
           TOTAL=$((ADDITIONS + DELETIONS))
           FILES=$(git diff --name-only "${BASE}..${HEAD}" | wc -l | tr -d ' ')
 
@@ -310,19 +344,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [format, lint, test, build, audit, coverage, docker, commits, python]
+    needs: [format, lint, test, build, audit, coverage, docker, commits, python-format, python-lint, python-test]
     steps:
       - name: Check required jobs
         run: |
-          echo "format:   ${{ needs.format.result }}"
-          echo "lint:     ${{ needs.lint.result }}"
-          echo "test:     ${{ needs.test.result }}"
-          echo "build:    ${{ needs.build.result }}"
-          echo "audit:    ${{ needs.audit.result }}"
-          echo "coverage: ${{ needs.coverage.result }}"
-          echo "docker:   ${{ needs.docker.result }}"
-          echo "python:   ${{ needs.python.result }}"
-          echo "commits:  ${{ needs.commits.result }}"
+          echo "=== Rust ==="
+          echo "format:        ${{ needs.format.result }}"
+          echo "lint:          ${{ needs.lint.result }}"
+          echo "test:          ${{ needs.test.result }}"
+          echo "build:         ${{ needs.build.result }}"
+          echo "audit:         ${{ needs.audit.result }}"
+          echo "coverage:      ${{ needs.coverage.result }}"
+          echo ""
+          echo "=== Python ==="
+          echo "python-format: ${{ needs.python-format.result }}"
+          echo "python-lint:   ${{ needs.python-lint.result }}"
+          echo "python-test:   ${{ needs.python-test.result }}"
+          echo ""
+          echo "=== Shared ==="
+          echo "docker:        ${{ needs.docker.result }}"
+          echo "commits:       ${{ needs.commits.result }}"
 
           # commits is skipped on push (only runs on PRs) — that's OK.
           if [[ "${{ needs.format.result }}" != "success" ]] || \
@@ -332,7 +373,9 @@ jobs:
              [[ "${{ needs.audit.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
              [[ "${{ needs.docker.result }}" != "success" ]] || \
-             [[ "${{ needs.python.result }}" != "success" ]]; then
+             [[ "${{ needs.python-format.result }}" != "success" ]] || \
+             [[ "${{ needs.python-lint.result }}" != "success" ]] || \
+             [[ "${{ needs.python-test.result }}" != "success" ]]; then
             echo "::error::One or more required checks failed"
             exit 1
           fi
