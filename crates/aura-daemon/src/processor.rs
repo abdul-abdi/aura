@@ -21,6 +21,41 @@ use aura_screen::macos::MacOSScreenReader;
 use super::cloud::memory_op;
 use super::tools;
 
+/// Query the memory agent for relevant context on fresh activation.
+async fn query_memory_agent(
+    cloud_run_url: &str,
+    cloud_run_auth_token: &str,
+    device_id: &str,
+    screen_context: &str,
+) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let url = format!("{cloud_run_url}/query");
+    let body = serde_json::json!({
+        "device_id": device_id,
+        "context": screen_context,
+    });
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(cloud_run_auth_token)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        tracing::warn!("Memory agent /query returned {}", resp.status());
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("context").and_then(|c| c.as_str()).map(String::from)
+}
+
 /// Minimum allowed calibrated threshold — prevents the gate from being set
 /// so low that speaker bleed-through triggers a false barge-in.
 /// Set above the typical speaker-to-mic bleed range (0.005-0.03 RMS at
@@ -177,6 +212,24 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 }
                             };
 
+                            // Query memory agent for cross-session context (3s timeout, fallback to local)
+                            let cloud_memories = if let (Some(url), Some(token), Some(did)) =
+                                (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
+                            {
+                                match query_memory_agent(url, token, did, &greeting_context).await {
+                                    Some(ctx) => {
+                                        tracing::info!("Got cloud memory context ({} chars)", ctx.len());
+                                        Some(ctx)
+                                    }
+                                    None => {
+                                        tracing::info!("Memory agent unavailable, using local context only");
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
                             let now = Local::now();
                             let time_context = format!(
                                 "Current time: {} ({}). Date: {}.",
@@ -190,8 +243,13 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 None => String::new(),
                             };
 
+                            let memory_section = match cloud_memories {
+                                Some(ref mem) => format!("\n\nRelevant memories from past sessions:\n{mem}"),
+                                None => String::new(),
+                            };
+
                             let context_msg = format!(
-                                "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}{history_section}]"
+                                "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}{history_section}{memory_section}]"
                             );
 
                             let ctx_sid = session_id.clone();
