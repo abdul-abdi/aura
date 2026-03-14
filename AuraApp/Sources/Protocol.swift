@@ -9,6 +9,7 @@ enum DaemonEvent: Decodable {
     case transcript(TranscriptUpdate)
     case toolStatus(ToolStatusUpdate)
     case status(StatusUpdate)
+    case recentSessions(RecentSessionsUpdate)
     case shutdown
 
     private enum CodingKeys: String, CodingKey {
@@ -20,6 +21,7 @@ enum DaemonEvent: Decodable {
         case transcript
         case toolStatus = "tool_status"
         case status
+        case recentSessions = "recent_sessions"
         case shutdown
     }
 
@@ -36,6 +38,8 @@ enum DaemonEvent: Decodable {
             self = .toolStatus(try ToolStatusUpdate(from: decoder))
         case .status:
             self = .status(try StatusUpdate(from: decoder))
+        case .recentSessions:
+            self = .recentSessions(try RecentSessionsUpdate(from: decoder))
         case .shutdown:
             self = .shutdown
         }
@@ -97,6 +101,49 @@ enum ToolRunStatus: String, Decodable {
 
 struct StatusUpdate: Decodable {
     let message: String
+}
+
+struct RecentSessionsUpdate: Decodable {
+    let sessions: [RecentSession]
+}
+
+struct RecentSession: Decodable, Identifiable {
+    let sessionId: String
+    let summary: String
+    let createdAt: String
+
+    var id: String { sessionId }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case summary
+        case createdAt = "created_at"
+    }
+
+    /// Format the timestamp for display (e.g., "Today, 2:30 PM" or "Yesterday").
+    var displayTime: String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = formatter.date(from: createdAt) ?? ISO8601DateFormatter().date(from: createdAt) else {
+            return createdAt
+        }
+
+        let calendar = Calendar.current
+
+        if calendar.isDateInToday(date) {
+            let timeFormatter = DateFormatter()
+            timeFormatter.dateFormat = "h:mm a"
+            return "Today, \(timeFormatter.string(from: date))"
+        } else if calendar.isDateInYesterday(date) {
+            let timeFormatter = DateFormatter()
+            timeFormatter.dateFormat = "h:mm a"
+            return "Yesterday, \(timeFormatter.string(from: date))"
+        } else {
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "MMM d, h:mm a"
+            return dateFormatter.string(from: date)
+        }
+    }
 }
 
 // MARK: - UI -> Daemon Commands

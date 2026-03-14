@@ -6,6 +6,7 @@ struct ConversationView: View {
     let events: [ActivityEvent]
     let connectionState: AppState.ConnectionState
     let isThinking: Bool
+    let recentSessions: [RecentSession]
     let onReconnect: () -> Void
 
     var body: some View {
@@ -20,7 +21,7 @@ struct ConversationView: View {
                         if events.isEmpty && !isThinking {
                             emptyState
                         } else {
-                            LazyVStack(spacing: 4) {
+                            LazyVStack(spacing: 6) {
                                 ForEach(events) { event in
                                     ActivityRow(event: event)
                                         .id(event.id)
@@ -60,6 +61,34 @@ struct ConversationView: View {
                 }
             }
         }
+    }
+
+    private func sessionCard(_ session: RecentSession) -> some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(Color.secondary.opacity(0.15))
+                .frame(width: 28, height: 28)
+                .overlay(
+                    Image(systemName: "clock")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.displayTime)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(session.summary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
     }
 
     private var reconnectBanner: some View {
@@ -108,9 +137,27 @@ struct ConversationView: View {
                 Image(systemName: "waveform")
                     .font(.system(size: 32, weight: .ultraLight))
                     .foregroundStyle(.tertiary)
-                Text("Say something or type a message")
-                    .font(.caption)
+                Text("Say something or type below")
+                    .font(.system(size: 12))
                     .foregroundStyle(.tertiary)
+
+                // Recent sessions
+                if !recentSessions.isEmpty {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Recent")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.quaternary)
+                            .textCase(.uppercase)
+                            .tracking(0.5)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 6)
+
+                        ForEach(recentSessions, id: \.sessionId) { session in
+                            sessionCard(session)
+                        }
+                    }
+                    .padding(.top, 16)
+                }
             }
 
             Spacer()

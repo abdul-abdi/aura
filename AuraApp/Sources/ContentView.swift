@@ -46,12 +46,21 @@ struct ContentView: View {
                 statusMessage: appState.statusMessage
             )
 
-            Divider()
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.08), Color.white.opacity(0.02)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(height: 0.5)
 
             ConversationView(
                 events: appState.events,
                 connectionState: appState.connectionState,
                 isThinking: appState.isThinking,
+                recentSessions: appState.recentSessions,
                 onReconnect: { appState.requestReconnect() }
             )
             .frame(maxHeight: .infinity)
