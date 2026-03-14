@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
 const REST_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /// Denormalize Gemini's 0-1000 coordinates to logical screen pixels.

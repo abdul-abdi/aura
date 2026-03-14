@@ -281,7 +281,7 @@ pub(crate) async fn execute_tool(
                     .await
                     {
                         Ok(Ok(frame)) => {
-                            match oracle
+                            let mut oracle_result = oracle
                                 .find_element_coordinates(
                                     &frame.jpeg_base64,
                                     x,
@@ -291,8 +291,25 @@ pub(crate) async fn execute_tool(
                                     frame.logical_width,
                                     frame.logical_height,
                                 )
-                                .await
-                            {
+                                .await;
+
+                            // Single retry on failure
+                            if oracle_result.is_err() {
+                                tracing::warn!("Vision oracle attempt 1 failed, retrying");
+                                oracle_result = oracle
+                                    .find_element_coordinates(
+                                        &frame.jpeg_base64,
+                                        x,
+                                        y,
+                                        frame.width,
+                                        frame.height,
+                                        frame.logical_width,
+                                        frame.logical_height,
+                                    )
+                                    .await;
+                            }
+
+                            match oracle_result {
                                 Ok((ox, oy)) => {
                                     tracing::info!(
                                         original_x = x,
@@ -312,7 +329,7 @@ pub(crate) async fn execute_tool(
                                 Err(e) => {
                                     tracing::warn!(
                                         error = %e,
-                                        "Vision oracle failed, using raw coordinates"
+                                        "Vision oracle failed after retry, using raw coordinates"
                                     );
                                     targeting_info = serde_json::json!({
                                         "element_at_target": null,
