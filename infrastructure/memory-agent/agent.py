@@ -78,5 +78,10 @@ query_agent = Agent(
         "Focus on actionable context: what was the user doing, what do they care about, "
         "what patterns are relevant right now."
     ),
-    tools=[read_all_memories, read_consolidation_history, search_memories, get_memory_stats],
+    tools=[
+        read_all_memories,
+        read_consolidation_history,
+        search_memories,
+        get_memory_stats,
+    ],
 )

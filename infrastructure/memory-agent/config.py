@@ -27,7 +27,11 @@ _ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 def validate_id(value: str, field_name: str) -> str:
     """Validate a string is safe for Firestore document paths."""
     if not value or len(value) > MAX_ID_LENGTH:
-        raise ValueError(f"{field_name} must be 1-{MAX_ID_LENGTH} characters, got {len(value)}")
+        raise ValueError(
+            f"{field_name} must be 1-{MAX_ID_LENGTH} characters, got {len(value)}"
+        )
     if not _ID_PATTERN.match(value):
-        raise ValueError(f"{field_name} must be alphanumeric, hyphens, underscores only")
+        raise ValueError(
+            f"{field_name} must be alphanumeric, hyphens, underscores only"
+        )
     return value

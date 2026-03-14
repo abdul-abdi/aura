@@ -89,7 +89,9 @@ async def read_recent_memories(device_id: str, limit: int = 5) -> dict:
     """
     validate_id(device_id, "device_id")
     ref = _user_ref(device_id).collection("memories")
-    query = ref.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
+    query = ref.order_by("created_at", direction=firestore.Query.DESCENDING).limit(
+        limit
+    )
     docs = []
     async for doc in query.stream():
         data = doc.to_dict()
@@ -151,7 +153,11 @@ async def store_consolidation(
     }
     ref = _user_ref(device_id).collection("consolidations")
     await ref.add(doc_data)
-    return {"status": "consolidated", "memories_processed": len(source_ids), "insight": insight}
+    return {
+        "status": "consolidated",
+        "memories_processed": len(source_ids),
+        "insight": insight,
+    }
 
 
 async def mark_consolidated(memory_ids: list[str], device_id: str) -> dict:
@@ -213,7 +219,9 @@ async def read_all_memories(device_id: str, limit: int = 20) -> dict:
     """
     validate_id(device_id, "device_id")
     ref = _user_ref(device_id).collection("memories")
-    query = ref.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
+    query = ref.order_by("created_at", direction=firestore.Query.DESCENDING).limit(
+        limit
+    )
     docs = []
     async for doc in query.stream():
         data = doc.to_dict()
