@@ -98,34 +98,6 @@ pub(crate) async fn run_daemon(
             .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
     }
 
-    // On fresh session start, load facts from Firestore and inject into system prompt.
-    // This is optional — daemon works fine without Firestore configured.
-    if matches!(session_mode, SessionMode::Fresh)
-        && let (Some(project_id), Some(device_id)) = (
-            &gemini_config.firestore_project_id,
-            &gemini_config.device_id,
-        )
-    {
-        if let Some(firebase_api_key) = &gemini_config.firebase_api_key {
-            match cloud::load_firestore_facts(project_id, device_id, firebase_api_key).await {
-                Ok(facts_context) if !facts_context.is_empty() => {
-                    gemini_config
-                        .system_prompt
-                        .push_str("\n\nMemory from past sessions:\n");
-                    gemini_config.system_prompt.push_str(&facts_context);
-                    tracing::info!(
-                        chars = facts_context.len(),
-                        "Injected Firestore facts into system prompt"
-                    );
-                }
-                Ok(_) => tracing::debug!("No Firestore facts found for this device"),
-                Err(e) => tracing::warn!("Failed to load Firestore facts: {e}"),
-            }
-        } else {
-            tracing::debug!("Skipping Firestore facts load: firebase_api_key not configured");
-        }
-    }
-
     // Flush any pending Firestore syncs from previous sessions that failed.
     if let (Some(project_id), Some(device_id)) = (
         &gemini_config.firestore_project_id,
