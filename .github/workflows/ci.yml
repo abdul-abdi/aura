@@ -246,7 +246,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: astral-sh/setup-uv@6b9c6063abd6010835c3544bf6e43e73418c388b # v7
+      - uses: astral-sh/setup-uv@b75dde52aef63a238519e7aecbbe79a4a52e4315 # v7
         with:
           version: "0.10.9"
       - name: Check formatting
@@ -259,7 +259,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: astral-sh/setup-uv@6b9c6063abd6010835c3544bf6e43e73418c388b # v7
+      - uses: astral-sh/setup-uv@b75dde52aef63a238519e7aecbbe79a4a52e4315 # v7
         with:
           version: "0.10.9"
       - name: Lint
@@ -272,7 +272,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: astral-sh/setup-uv@6b9c6063abd6010835c3544bf6e43e73418c388b # v7
+      - uses: astral-sh/setup-uv@b75dde52aef63a238519e7aecbbe79a4a52e4315 # v7
         with:
           version: "0.10.9"
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5
