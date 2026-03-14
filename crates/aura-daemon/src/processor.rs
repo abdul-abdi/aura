@@ -56,6 +56,69 @@ async fn query_memory_agent(
     json.get("context").and_then(|c| c.as_str()).map(String::from)
 }
 
+/// Send session transcript to the memory agent for ingestion.
+async fn ingest_to_memory_agent(
+    cloud_run_url: &str,
+    cloud_run_auth_token: &str,
+    device_id: &str,
+    session_id: &str,
+    messages: &[aura_memory::Message],
+) -> Option<aura_memory::consolidate::ConsolidationResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let msg_json: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| matches!(m.role, aura_memory::MessageRole::User | aura_memory::MessageRole::ToolCall))
+        .map(|m| {
+            serde_json::json!({
+                "role": match m.role {
+                    aura_memory::MessageRole::User => "user",
+                    aura_memory::MessageRole::ToolCall => "tool_call",
+                    _ => "other",
+                },
+                "content": m.content,
+                "timestamp": m.timestamp,
+            })
+        })
+        .collect();
+
+    if msg_json.is_empty() {
+        return None;
+    }
+
+    let url = format!("{cloud_run_url}/ingest");
+    let body = serde_json::json!({
+        "device_id": device_id,
+        "session_id": session_id,
+        "messages": msg_json,
+    });
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(cloud_run_auth_token)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        tracing::warn!("Memory agent /ingest returned {}", resp.status());
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let summary = json.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    let facts: Vec<aura_memory::consolidate::ExtractedFact> = json
+        .get("facts")
+        .and_then(|f| serde_json::from_value(f.clone()).ok())
+        .unwrap_or_default();
+
+    Some(aura_memory::consolidate::ConsolidationResponse { summary, facts })
+}
+
 /// Minimum allowed calibrated threshold — prevents the gate from being set
 /// so low that speaker bleed-through triggers a false barge-in.
 /// Set above the typical speaker-to-mic bleed range (0.005-0.03 RMS at
@@ -1041,14 +1104,50 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }).await;
 
                             if let Some(messages) = messages {
-                                match aura_memory::consolidate::consolidate_session(
-                                    &es_key,
-                                    &messages,
-                                    cloud_run_url.as_deref(),
-                                    cloud_run_auth_token.as_deref(),
-                                    cloud_run_device_id.as_deref(),
-                                    Some(&es_sid),
-                                ).await {
+                                // Try memory agent first, fall back to existing consolidation
+                                let consolidation_result = if let (Some(url), Some(token), Some(did)) =
+                                    (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
+                                {
+                                    match ingest_to_memory_agent(url, token, did, &es_sid, &messages).await {
+                                        Some(resp) => {
+                                            tracing::info!("Memory agent ingested session successfully");
+                                            // Fire-and-forget consolidation trigger
+                                            let consolidate_url = format!("{url}/consolidate");
+                                            let consolidate_token = token.clone();
+                                            let consolidate_did = did.clone();
+                                            tokio::spawn(async move {
+                                                let client = reqwest::Client::builder()
+                                                    .timeout(std::time::Duration::from_secs(30))
+                                                    .build();
+                                                if let Ok(client) = client {
+                                                    let _ = client
+                                                        .post(&consolidate_url)
+                                                        .bearer_auth(&consolidate_token)
+                                                        .json(&serde_json::json!({"device_id": consolidate_did}))
+                                                        .send()
+                                                        .await;
+                                                }
+                                            });
+                                            Ok(resp)
+                                        }
+                                        None => {
+                                            tracing::info!("Memory agent unavailable, falling back to local consolidation");
+                                            aura_memory::consolidate::consolidate_session(
+                                                &es_key, &messages,
+                                                cloud_run_url.as_deref(),
+                                                cloud_run_auth_token.as_deref(),
+                                                cloud_run_device_id.as_deref(),
+                                                Some(&es_sid),
+                                            ).await
+                                        }
+                                    }
+                                } else {
+                                    aura_memory::consolidate::consolidate_session(
+                                        &es_key, &messages, None, None, None, Some(&es_sid),
+                                    ).await
+                                };
+
+                                match consolidation_result {
                                     Ok(response) => {
                                         if !response.summary.is_empty() || !response.facts.is_empty() {
                                             let summary = response.summary.clone();
