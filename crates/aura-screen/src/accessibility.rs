@@ -88,6 +88,12 @@ unsafe extern "C" {
     ) -> i32;
     fn AXUIElementPerformAction(element: CFTypeRef, action: CFTypeRef) -> i32;
     fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
+    fn AXUIElementCopyElementAtPosition(
+        application: CFTypeRef,
+        x: f32,
+        y: f32,
+        element: *mut CFTypeRef,
+    ) -> i32;
 }
 
 // ── RAII wrapper for CFTypeRef ───────────────────────────────────────────────
@@ -518,6 +524,91 @@ pub fn get_focused_element() -> Option<UIElement> {
         _ => None,
     };
 
+    Some(UIElement {
+        role,
+        label,
+        value,
+        bounds,
+        enabled,
+        focused,
+        parent_label: None,
+    })
+}
+
+/// Hit-test the screen at logical coordinates `(x, y)` and return the UI element
+/// at that position. If the element directly under the cursor is not interactive
+/// (e.g. AXGroup, AXScrollArea), walks up the parent chain to find the nearest
+/// interactive ancestor.
+///
+/// Coordinates are in macOS logical points (same as CGEvent coordinates).
+/// Returns `None` if no element is found or Accessibility permission is denied.
+pub fn element_at_position(x: f64, y: f64) -> Option<UIElement> {
+    let pid = crate::macos::get_frontmost_pid()?;
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return None;
+    }
+    let app_ref = CfRef::new(app);
+    unsafe { AXUIElementSetMessagingTimeout(app_ref.as_raw(), 0.5) };
+
+    let mut hit_ref: CFTypeRef = std::ptr::null();
+    let ret = unsafe {
+        AXUIElementCopyElementAtPosition(app_ref.as_raw(), x as f32, y as f32, &mut hit_ref)
+    };
+    if ret != AX_ERROR_SUCCESS || hit_ref.is_null() {
+        return None;
+    }
+    let hit = CfRef::new(hit_ref);
+
+    // Try the hit element first; if not interactive, walk up parents
+    if let Some(el) = build_ui_element(hit.as_raw())
+        && INTERACTIVE_ROLES.contains(&el.role.as_str())
+    {
+        return Some(el);
+    }
+
+    // Walk up the parent chain (max 8 levels) to find an interactive ancestor
+    let mut current = hit.as_raw();
+    unsafe { CFRetain(current) };
+    for _ in 0..8 {
+        let attr_key = cf_string_from_str("AXParent");
+        let mut parent: CFTypeRef = std::ptr::null();
+        let ret = unsafe { AXUIElementCopyAttributeValue(current, attr_key.as_raw(), &mut parent) };
+        unsafe { CFRelease(current) };
+        if ret != AX_ERROR_SUCCESS || parent.is_null() {
+            return None;
+        }
+        current = parent;
+
+        if let Some(el) = build_ui_element(current)
+            && INTERACTIVE_ROLES.contains(&el.role.as_str())
+        {
+            unsafe { CFRelease(current) };
+            return Some(el);
+        }
+    }
+    unsafe { CFRelease(current) };
+    None
+}
+
+/// Build a UIElement from a raw AXUIElement ref without walking children.
+fn build_ui_element(element: CFTypeRef) -> Option<UIElement> {
+    let role = get_ax_string(element, "AXRole")?;
+    let label = get_ax_string(element, "AXTitle")
+        .filter(|s| !s.is_empty())
+        .or_else(|| get_ax_string(element, "AXDescription").filter(|s| !s.is_empty()));
+    let value = get_ax_string(element, "AXValue").filter(|s| !s.is_empty());
+    let enabled = get_ax_bool(element, "AXEnabled");
+    let focused = get_ax_bool(element, "AXFocused");
+    let bounds = match (get_ax_position(element), get_ax_size(element)) {
+        (Some((x, y)), Some((w, h))) => Some(ElementBounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }),
+        _ => None,
+    };
     Some(UIElement {
         role,
         label,

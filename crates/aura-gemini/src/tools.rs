@@ -512,7 +512,7 @@ mod tests {
         // No required params — both label and role are optional
         let required = ce.parameters.get("required");
         assert!(
-            required.is_none() || required.unwrap().as_array().map_or(true, |a| a.is_empty()),
+            required.is_none() || required.unwrap().as_array().is_none_or(|a| a.is_empty()),
             "click_element should have no required params"
         );
     }

@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn prompt_contains_conversation_markers() {
-        let messages = vec![
+        let messages = [
             make_message(MessageRole::User, "search for Rust docs"),
             make_message(MessageRole::ToolCall, "type_text: Rust docs"),
         ];

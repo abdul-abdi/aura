@@ -21,5 +21,6 @@ tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 base64 = "0.22"
 futures-util = "0.3"
 tokio-util = "0.7"
+reqwest.workspace = true
 dirs = "6"
 toml = "0.8"
