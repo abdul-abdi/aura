@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use aura_bridge::script::ScriptExecutor;
 use aura_daemon::context::{CloudConfig, DaemonContext, SharedFlags};
 use aura_daemon::event::AuraEvent;
-use aura_daemon::protocol::{DaemonEvent, DotColorName, Role, ToolRunStatus};
+use aura_daemon::protocol::{DaemonEvent, DotColorName, RecentSessionInfo, Role, ToolRunStatus};
 use aura_gemini::session::GeminiEvent;
 use aura_memory::MessageRole;
 use aura_menubar::app::MenuBarMessage;
@@ -267,6 +267,33 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         });
 
                         if is_first {
+                            // Send recent sessions to UI for empty state display
+                            let recent_sessions: Vec<RecentSessionInfo> =
+                                memory_op(&memory, |mem| {
+                                    mem.list_sessions(5).map(|sessions| {
+                                        sessions
+                                            .into_iter()
+                                            .filter_map(|s| {
+                                                let summary = s.summary.as_deref().unwrap_or("").to_string();
+                                                if summary.is_empty() { return None; }
+                                                Some(RecentSessionInfo {
+                                                    session_id: s.id,
+                                                    summary,
+                                                    created_at: s.started_at,
+                                                })
+                                            })
+                                            .collect()
+                                    })
+                                })
+                                .await
+                                .unwrap_or_default();
+
+                            if !recent_sessions.is_empty() {
+                                let _ = ipc_tx.send(DaemonEvent::RecentSessions {
+                                    sessions: recent_sessions,
+                                });
+                            }
+
                             // Inject recent session history for cross-session memory
                             let recent_summary: Option<String> =
                                 memory_op(&memory, |mem| mem.get_recent_summary(3))
