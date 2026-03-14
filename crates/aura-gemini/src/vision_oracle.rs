@@ -45,6 +45,7 @@ impl VisionOracle {
     /// - `screen_w`, `screen_h`: logical screen dimensions (macOS points)
     ///
     /// Returns `Ok((logical_x, logical_y))` on success.
+    #[allow(clippy::too_many_arguments)]
     pub async fn find_element_coordinates(
         &self,
         screenshot_b64: &str,
@@ -112,8 +113,9 @@ impl VisionOracle {
 
         let elapsed = start.elapsed();
 
-        let (norm_y, norm_x) = parse_normalized_coords(text)
-            .context(format!("Vision oracle returned unparseable coords: {text:?}"))?;
+        let (norm_y, norm_x) = parse_normalized_coords(text).context(format!(
+            "Vision oracle returned unparseable coords: {text:?}"
+        ))?;
 
         // Note: denormalize takes (norm_x, norm_y) — swap from Gemini's [y,x] to standard (x,y)
         let (logical_x, logical_y) = denormalize(norm_x, norm_y, screen_w, screen_h);
@@ -137,18 +139,18 @@ impl VisionOracle {
 /// Returns (norm_y, norm_x) both in 0.0..=1000.0 range, or None on failure.
 fn parse_normalized_coords(text: &str) -> Option<(f64, f64)> {
     // Strategy 1: Try to find bracketed [y, x] pattern first (most reliable)
-    if let Some(start) = text.find('[') {
-        if let Some(end) = text[start..].find(']') {
-            let inner = &text[start + 1..start + end];
-            let nums: Vec<f64> = inner
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse::<f64>().ok())
-                .collect();
-            if nums.len() >= 2 {
-                return validate_coords(nums[0], nums[1]);
-            }
+    if let Some(start) = text.find('[')
+        && let Some(end) = text[start..].find(']')
+    {
+        let inner = &text[start + 1..start + end];
+        let nums: Vec<f64> = inner
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if nums.len() >= 2 {
+            return validate_coords(nums[0], nums[1]);
         }
     }
 

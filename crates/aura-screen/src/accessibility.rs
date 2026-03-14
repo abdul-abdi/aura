@@ -561,10 +561,10 @@ pub fn element_at_position(x: f64, y: f64) -> Option<UIElement> {
     let hit = CfRef::new(hit_ref);
 
     // Try the hit element first; if not interactive, walk up parents
-    if let Some(el) = build_ui_element(hit.as_raw()) {
-        if INTERACTIVE_ROLES.contains(&el.role.as_str()) {
-            return Some(el);
-        }
+    if let Some(el) = build_ui_element(hit.as_raw())
+        && INTERACTIVE_ROLES.contains(&el.role.as_str())
+    {
+        return Some(el);
     }
 
     // Walk up the parent chain (max 8 levels) to find an interactive ancestor
@@ -573,19 +573,18 @@ pub fn element_at_position(x: f64, y: f64) -> Option<UIElement> {
     for _ in 0..8 {
         let attr_key = cf_string_from_str("AXParent");
         let mut parent: CFTypeRef = std::ptr::null();
-        let ret =
-            unsafe { AXUIElementCopyAttributeValue(current, attr_key.as_raw(), &mut parent) };
+        let ret = unsafe { AXUIElementCopyAttributeValue(current, attr_key.as_raw(), &mut parent) };
         unsafe { CFRelease(current) };
         if ret != AX_ERROR_SUCCESS || parent.is_null() {
             return None;
         }
         current = parent;
 
-        if let Some(el) = build_ui_element(current) {
-            if INTERACTIVE_ROLES.contains(&el.role.as_str()) {
-                unsafe { CFRelease(current) };
-                return Some(el);
-            }
+        if let Some(el) = build_ui_element(current)
+            && INTERACTIVE_ROLES.contains(&el.role.as_str())
+        {
+            unsafe { CFRelease(current) };
+            return Some(el);
         }
     }
     unsafe { CFRelease(current) };

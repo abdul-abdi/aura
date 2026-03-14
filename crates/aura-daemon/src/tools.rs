@@ -370,11 +370,11 @@ pub(crate) async fn execute_tool(
             .await;
 
             // Merge targeting info into click result
-            if let Some(obj) = result.as_object_mut() {
-                if let Some(ti) = targeting_info.as_object() {
-                    for (k, v) in ti {
-                        obj.insert(k.clone(), v.clone());
-                    }
+            if let Some(obj) = result.as_object_mut()
+                && let Some(ti) = targeting_info.as_object()
+            {
+                for (k, v) in ti {
+                    obj.insert(k.clone(), v.clone());
                 }
             }
             result
