@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aura Memory Agent")
 
+# Validate required config at import time (tests set env vars before import)
+if not AUTH_TOKEN:
+    raise RuntimeError(
+        "AURA_AUTH_TOKEN environment variable must be set. "
+        "The memory agent refuses to start without authentication configured."
+    )
+
 # Rate-limiting semaphore
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 

@@ -159,7 +159,7 @@ jobs:
             --source infrastructure/memory-agent/ \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
-            --allow-unauthenticated \
+            --no-allow-unauthenticated \
             --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
             --set-env-vars="GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
             --memory 512Mi \
