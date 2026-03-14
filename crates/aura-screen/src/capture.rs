@@ -345,18 +345,24 @@ mod tests {
 
     #[test]
     fn high_res_constants_are_larger_than_streaming() {
-        assert!(
-            ONDEMAND_MAX_WIDTH > MAX_WIDTH,
-            "On-demand should be higher res than streaming"
-        );
-        assert!(
-            ONDEMAND_JPEG_QUALITY > JPEG_QUALITY,
-            "On-demand should be higher quality than streaming"
-        );
-        assert!(
-            ONDEMAND_MAX_WIDTH <= 2560,
-            "On-demand should not exceed 2560px"
-        );
+        const {
+            assert!(
+                ONDEMAND_MAX_WIDTH > MAX_WIDTH,
+                "On-demand should be higher res than streaming"
+            );
+        }
+        const {
+            assert!(
+                ONDEMAND_JPEG_QUALITY > JPEG_QUALITY,
+                "On-demand should be higher quality than streaming"
+            );
+        }
+        const {
+            assert!(
+                ONDEMAND_MAX_WIDTH <= 2560,
+                "On-demand should not exceed 2560px"
+            );
+        }
     }
 
     #[test]

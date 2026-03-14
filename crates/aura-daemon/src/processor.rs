@@ -1157,13 +1157,8 @@ mod tests {
     #[test]
     fn test_calibrate_moderate_ambient_noise() {
         // Mean=0.03, stddev=0.01 → threshold = 0.03 + 0.03 = 0.06
-        let mut samples = Vec::with_capacity(100);
-        for _ in 0..50 {
-            samples.push(0.02);
-        }
-        for _ in 0..50 {
-            samples.push(0.04);
-        }
+        let mut samples = vec![0.02; 50];
+        samples.extend(std::iter::repeat_n(0.04, 50));
         let threshold = calibrate_barge_in_threshold(&samples);
         // mean = 0.03, stddev = 0.01, expected = 0.06
         assert!(threshold > CALIBRATION_THRESHOLD_MIN);

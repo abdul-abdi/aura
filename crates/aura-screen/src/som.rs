@@ -292,6 +292,6 @@ mod tests {
     #[test]
     fn max_marks_cap() {
         // Even if we detect many regions, cap at MAX_MARKS
-        assert!(MAX_MARKS <= 30);
+        const { assert!(MAX_MARKS <= 30) };
     }
 }
