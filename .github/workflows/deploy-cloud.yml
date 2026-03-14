@@ -160,7 +160,7 @@ jobs:
             --source infrastructure/memory-agent/ \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
-            --no-allow-unauthenticated \
+            --allow-unauthenticated \
             --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
             --set-env-vars="GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
             --memory 512Mi \
@@ -176,10 +176,8 @@ jobs:
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --format "value(status.url)")
-          # Service uses --no-allow-unauthenticated, so we need an identity token
-          TOKEN=$(gcloud auth print-identity-token --audiences="${URL}")
           for i in $(seq 1 10); do
-            if curl -sf -H "Authorization: Bearer ${TOKEN}" "${URL}/health"; then
+            if curl -sf "${URL}/health"; then
               echo "Health check passed"
               exit 0
             fi

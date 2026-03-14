@@ -112,7 +112,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --source infrastructure/memory-agent/ \
     --project "$PROJECT_ID" \
     --region "$REGION" \
-    --no-allow-unauthenticated \
+    --allow-unauthenticated \
     --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
     --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID" \
     --memory 512Mi \
