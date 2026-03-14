@@ -21,6 +21,115 @@ use aura_screen::macos::MacOSScreenReader;
 use super::cloud::memory_op;
 use super::tools;
 
+/// Query the memory agent for relevant context on fresh activation.
+async fn query_memory_agent(
+    cloud_run_url: &str,
+    cloud_run_auth_token: &str,
+    device_id: &str,
+    screen_context: &str,
+) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let url = format!("{cloud_run_url}/query");
+    let body = serde_json::json!({
+        "device_id": device_id,
+        "context": screen_context,
+    });
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(cloud_run_auth_token)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        tracing::warn!("Memory agent /query returned {}", resp.status());
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("context")
+        .and_then(|c| c.as_str())
+        .map(String::from)
+}
+
+/// Send session transcript to the memory agent for ingestion.
+async fn ingest_to_memory_agent(
+    cloud_run_url: &str,
+    cloud_run_auth_token: &str,
+    device_id: &str,
+    session_id: &str,
+    messages: &[aura_memory::Message],
+) -> Option<aura_memory::consolidate::ConsolidationResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+
+    let msg_json: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.role,
+                aura_memory::MessageRole::User | aura_memory::MessageRole::ToolCall
+            )
+        })
+        .map(|m| {
+            serde_json::json!({
+                "role": match m.role {
+                    aura_memory::MessageRole::User => "user",
+                    aura_memory::MessageRole::ToolCall => "tool_call",
+                    _ => "other",
+                },
+                "content": m.content,
+                "timestamp": m.timestamp,
+            })
+        })
+        .collect();
+
+    if msg_json.is_empty() {
+        return None;
+    }
+
+    let url = format!("{cloud_run_url}/ingest");
+    let body = serde_json::json!({
+        "device_id": device_id,
+        "session_id": session_id,
+        "messages": msg_json,
+    });
+
+    let resp = client
+        .post(&url)
+        .bearer_auth(cloud_run_auth_token)
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        tracing::warn!("Memory agent /ingest returned {}", resp.status());
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let summary = json
+        .get("summary")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let facts: Vec<aura_memory::consolidate::ExtractedFact> = json
+        .get("facts")
+        .and_then(|f| serde_json::from_value(f.clone()).ok())
+        .unwrap_or_default();
+
+    Some(aura_memory::consolidate::ConsolidationResponse { summary, facts })
+}
+
 /// Minimum allowed calibrated threshold — prevents the gate from being set
 /// so low that speaker bleed-through triggers a false barge-in.
 /// Set above the typical speaker-to-mic bleed range (0.005-0.03 RMS at
@@ -193,6 +302,24 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 }
                             };
 
+                            // Query memory agent for cross-session context (3s timeout, fallback to local)
+                            let cloud_memories = if let (Some(url), Some(token), Some(did)) =
+                                (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
+                            {
+                                match query_memory_agent(url, token, did, &greeting_context).await {
+                                    Some(ctx) => {
+                                        tracing::info!("Got cloud memory context ({} chars)", ctx.len());
+                                        Some(ctx)
+                                    }
+                                    None => {
+                                        tracing::info!("Memory agent unavailable, using local context only");
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
                             let now = Local::now();
                             let time_context = format!(
                                 "Current time: {} ({}). Date: {}.",
@@ -206,8 +333,13 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 None => String::new(),
                             };
 
+                            let memory_section = match cloud_memories {
+                                Some(ref mem) => format!("\n\nRelevant memories from past sessions:\n{mem}"),
+                                None => String::new(),
+                            };
+
                             let context_msg = format!(
-                                "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}{history_section}]"
+                                "[System: User just activated Aura. {time_context} Current screen context:\n{greeting_context}{history_section}{memory_section}]"
                             );
 
                             let ctx_sid = session_id.clone();
@@ -1000,14 +1132,52 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }).await;
 
                             if let Some(messages) = messages {
-                                match aura_memory::consolidate::consolidate_session(
-                                    &es_key,
-                                    &messages,
-                                    cloud_run_url.as_deref(),
-                                    cloud_run_auth_token.as_deref(),
-                                    cloud_run_device_id.as_deref(),
-                                    Some(&es_sid),
-                                ).await {
+                                // Try memory agent first, fall back to existing consolidation
+                                let mut memory_agent_handled = false;
+                                let consolidation_result = if let (Some(url), Some(token), Some(did)) =
+                                    (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
+                                {
+                                    match ingest_to_memory_agent(url, token, did, &es_sid, &messages).await {
+                                        Some(resp) => {
+                                            tracing::info!("Memory agent ingested session successfully");
+                                            memory_agent_handled = true;
+                                            // Fire-and-forget consolidation trigger
+                                            let consolidate_url = format!("{url}/consolidate");
+                                            let consolidate_token = token.clone();
+                                            let consolidate_did = did.clone();
+                                            tokio::spawn(async move {
+                                                let client = reqwest::Client::builder()
+                                                    .timeout(std::time::Duration::from_secs(30))
+                                                    .build();
+                                                if let Ok(client) = client {
+                                                    let _ = client
+                                                        .post(&consolidate_url)
+                                                        .bearer_auth(&consolidate_token)
+                                                        .json(&serde_json::json!({"device_id": consolidate_did}))
+                                                        .send()
+                                                        .await;
+                                                }
+                                            });
+                                            Ok(resp)
+                                        }
+                                        None => {
+                                            tracing::info!("Memory agent unavailable, falling back to local consolidation");
+                                            aura_memory::consolidate::consolidate_session(
+                                                &es_key, &messages,
+                                                cloud_run_url.as_deref(),
+                                                cloud_run_auth_token.as_deref(),
+                                                cloud_run_device_id.as_deref(),
+                                                Some(&es_sid),
+                                            ).await
+                                        }
+                                    }
+                                } else {
+                                    aura_memory::consolidate::consolidate_session(
+                                        &es_key, &messages, None, None, None, Some(&es_sid),
+                                    ).await
+                                };
+
+                                match consolidation_result {
                                     Ok(response) => {
                                         if !response.summary.is_empty() || !response.facts.is_empty() {
                                             let summary = response.summary.clone();
@@ -1041,7 +1211,8 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             tracing::info!("Session consolidation complete");
 
                                             // Sync facts to Firestore if config is available
-                                            if let (Some(project_id), Some(device_id), Some(fb_key)) =
+                                            // Skip if memory agent already handled it (avoids dual writes)
+                                            if !memory_agent_handled && let (Some(project_id), Some(device_id), Some(fb_key)) =
                                                 (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
                                                 && let Err(e) = super::cloud::sync_session_to_firestore(
                                                     &response.facts,

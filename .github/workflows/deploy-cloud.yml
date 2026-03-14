@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, prod]
     paths:
-      - 'infrastructure/**'
+      - 'infrastructure/memory-agent/**'
       - 'crates/aura-proxy/**'
       - '.github/workflows/deploy-cloud.yml'
   workflow_dispatch:
@@ -16,7 +16,7 @@ on:
         options:
           - all
           - proxy
-          - consolidation
+          - memory_agent
       environment:
         description: 'Target environment'
         required: true
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       proxy: ${{ steps.changes.outputs.proxy }}
-      consolidation: ${{ steps.changes.outputs.consolidation }}
+      memory_agent: ${{ steps.changes.outputs.memory_agent }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -60,7 +60,7 @@ jobs:
           fi
           if [[ -z "$BASE" ]]; then
             echo "proxy=true" >> "$GITHUB_OUTPUT"
-            echo "consolidation=true" >> "$GITHUB_OUTPUT"
+            echo "memory_agent=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           CHANGED=$(git diff --name-only "$BASE" HEAD)
@@ -69,17 +69,17 @@ jobs:
           else
             echo "proxy=false" >> "$GITHUB_OUTPUT"
           fi
-          if echo "$CHANGED" | grep -q 'infrastructure/'; then
-            echo "consolidation=true" >> "$GITHUB_OUTPUT"
+          if echo "$CHANGED" | grep -q 'infrastructure/memory-agent/'; then
+            echo "memory_agent=true" >> "$GITHUB_OUTPUT"
           else
-            echo "consolidation=false" >> "$GITHUB_OUTPUT"
+            echo "memory_agent=false" >> "$GITHUB_OUTPUT"
           fi
 
   deploy-proxy:
     name: Deploy Proxy
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [detect-changes, deploy-consolidation]
+    needs: [detect-changes, deploy-memory-agent]
     if: |
       always() &&
       (needs.detect-changes.outputs.proxy == 'true' ||
@@ -114,6 +114,7 @@ jobs:
             --min-instances 0 \
             --max-instances 10 \
             --timeout 3600 \
+            --no-cpu-throttling \
             --set-secrets="AURA_PROXY_AUTH_TOKEN=aura-proxy-auth-token:latest" \
             --quiet
 
@@ -133,15 +134,15 @@ jobs:
           done
           echo "Health check failed after 10 attempts!" && exit 1
 
-  deploy-consolidation:
-    name: Deploy Consolidation
+  deploy-memory-agent:
+    name: Deploy Memory Agent
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: detect-changes
     if: |
-      needs.detect-changes.outputs.consolidation == 'true' ||
+      needs.detect-changes.outputs.memory_agent == 'true' ||
       github.event.inputs.service == 'all' ||
-      github.event.inputs.service == 'consolidation'
+      github.event.inputs.service == 'memory_agent'
     environment:
       name: ${{ (github.event.inputs.environment == 'production' || github.ref == 'refs/heads/prod') && 'production' || 'staging' }}
     steps:
@@ -155,22 +156,23 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy aura-consolidation-${{ env.ENV_SUFFIX }} \
-            --source infrastructure/ \
+          gcloud run deploy aura-memory-agent-${{ env.ENV_SUFFIX }} \
+            --source infrastructure/memory-agent/ \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --allow-unauthenticated \
             --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
             --set-env-vars="GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
-            --memory 256Mi \
+            --memory 512Mi \
             --cpu 1 \
             --min-instances 0 \
-            --max-instances 3 \
+            --max-instances 5 \
+            --timeout 600 \
             --quiet
 
       - name: Health check
         run: |
-          URL=$(gcloud run services describe aura-consolidation-${{ env.ENV_SUFFIX }} \
+          URL=$(gcloud run services describe aura-memory-agent-${{ env.ENV_SUFFIX }} \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --format "value(status.url)")

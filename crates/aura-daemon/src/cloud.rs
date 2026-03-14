@@ -40,6 +40,9 @@ where
 
 /// Load facts from Firestore for a given device and format them as a context string.
 /// Returns an empty string when there are no facts or Firestore is unavailable.
+/// NOTE: Currently unused — memory agent /query endpoint replaces this at startup.
+/// Kept as fallback if memory agent is removed.
+#[allow(dead_code)]
 pub(crate) async fn load_firestore_facts(
     project_id: &str,
     device_id: &str,

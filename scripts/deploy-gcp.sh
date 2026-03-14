@@ -36,7 +36,7 @@ case "$ENVIRONMENT" in
     staging)         ENV_SUFFIX="staging" ;;
     *) echo "Error: --environment must be 'staging' or 'production'" >&2; exit 1 ;;
 esac
-SERVICE_NAME="aura-consolidation-${ENV_SUFFIX}"
+SERVICE_NAME="aura-memory-agent-${ENV_SUFFIX}"
 
 echo "==> Pre-flight checks..."
 
@@ -109,16 +109,16 @@ done
 
 echo "==> Building and deploying Cloud Run service..."
 gcloud run deploy "$SERVICE_NAME" \
-    --source infrastructure/ \
+    --source infrastructure/memory-agent/ \
     --project "$PROJECT_ID" \
     --region "$REGION" \
     --allow-unauthenticated \
     --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
     --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID" \
-    --memory 256Mi \
+    --memory 512Mi \
     --cpu 1 \
     --min-instances 0 \
-    --max-instances 3
+    --max-instances 5
 
 echo "==> Granting Firestore IAM permissions to Cloud Run service account..."
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
