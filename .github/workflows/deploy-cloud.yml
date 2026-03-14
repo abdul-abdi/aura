@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, prod]
     paths:
-      - 'infrastructure/**'
+      - 'infrastructure/memory-agent/**'
       - 'crates/aura-proxy/**'
       - '.github/workflows/deploy-cloud.yml'
   workflow_dispatch:
@@ -69,7 +69,7 @@ jobs:
           else
             echo "proxy=false" >> "$GITHUB_OUTPUT"
           fi
-          if echo "$CHANGED" | grep -q 'infrastructure/'; then
+          if echo "$CHANGED" | grep -q 'infrastructure/memory-agent/'; then
             echo "consolidation=true" >> "$GITHUB_OUTPUT"
           else
             echo "consolidation=false" >> "$GITHUB_OUTPUT"
@@ -155,22 +155,22 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
-          gcloud run deploy aura-consolidation-${{ env.ENV_SUFFIX }} \
-            --source infrastructure/ \
+          gcloud run deploy aura-memory-agent-${{ env.ENV_SUFFIX }} \
+            --source infrastructure/memory-agent/ \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --allow-unauthenticated \
             --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,AURA_AUTH_TOKEN=aura-consolidation-auth-token:latest" \
             --set-env-vars="GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
-            --memory 256Mi \
+            --memory 512Mi \
             --cpu 1 \
             --min-instances 0 \
-            --max-instances 3 \
+            --max-instances 5 \
             --quiet
 
       - name: Health check
         run: |
-          URL=$(gcloud run services describe aura-consolidation-${{ env.ENV_SUFFIX }} \
+          URL=$(gcloud run services describe aura-memory-agent-${{ env.ENV_SUFFIX }} \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --region "${{ vars.GCP_REGION }}" \
             --format "value(status.url)")
