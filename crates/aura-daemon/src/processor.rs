@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use aura_bridge::script::ScriptExecutor;
 use aura_daemon::context::{CloudConfig, DaemonContext, SharedFlags};
 use aura_daemon::event::AuraEvent;
-use aura_daemon::protocol::{DaemonEvent, DotColorName, Role, ToolRunStatus};
+use aura_daemon::protocol::{DaemonEvent, DotColorName, RecentSessionInfo, Role, ToolRunStatus};
 use aura_gemini::session::GeminiEvent;
 use aura_memory::MessageRole;
 use aura_menubar::app::MenuBarMessage;
@@ -283,6 +283,33 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         });
 
                         if is_first {
+                            // Send recent sessions to UI for empty state display
+                            let recent_sessions: Vec<RecentSessionInfo> =
+                                memory_op(&memory, |mem| {
+                                    mem.list_sessions(5).map(|sessions| {
+                                        sessions
+                                            .into_iter()
+                                            .filter_map(|s| {
+                                                let summary = s.summary.as_deref().unwrap_or("").to_string();
+                                                if summary.is_empty() { return None; }
+                                                Some(RecentSessionInfo {
+                                                    session_id: s.id,
+                                                    summary,
+                                                    created_at: s.started_at,
+                                                })
+                                            })
+                                            .collect()
+                                    })
+                                })
+                                .await
+                                .unwrap_or_default();
+
+                            if !recent_sessions.is_empty() {
+                                let _ = ipc_tx.send(DaemonEvent::RecentSessions {
+                                    sessions: recent_sessions,
+                                });
+                            }
+
                             // Inject recent session history for cross-session memory
                             let recent_summary: Option<String> =
                                 memory_op(&memory, |mem| mem.get_recent_summary(3))
@@ -353,13 +380,35 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 tracing::warn!("Failed to send greeting context to Gemini: {e}");
                             }
                         } else {
-                            // Reconnection: send brief context restoration
+                            // Reconnection: enrich with memory agent context so
+                            // Gemini can pick up where we left off even when session
+                            // resumption fails and a fresh session starts.
                             let now = Local::now();
+                            let time_context = format!(
+                                "Current time: {} ({}). Date: {}.",
+                                now.format("%I:%M %p"),
+                                now.format("%Z"),
+                                now.format("%A, %B %-d, %Y"),
+                            );
+
+                            let cloud_memories = if let (Some(url), Some(token), Some(did)) =
+                                (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
+                            {
+                                query_memory_agent(url, token, did, "session reconnecting").await
+                            } else {
+                                None
+                            };
+
+                            let memory_section = match cloud_memories {
+                                Some(ref mem) => format!(" Context from recent sessions:\n{mem}"),
+                                None => String::new(),
+                            };
+
                             let context_msg = format!(
-                                "[System: Session reconnected at {}. Continuing previous conversation. Do not re-greet the user.]",
+                                "[System: Session reconnected at {}. {time_context}{memory_section} Continue the previous conversation naturally. Do not re-greet the user.]",
                                 now.format("%I:%M %p"),
                             );
-                            tracing::info!("Reconnection — sending context restoration");
+                            tracing::info!("Reconnection — sending enriched context restoration");
 
                             if let Err(e) = session.send_text(&context_msg) {
                                 tracing::warn!("Failed to send reconnection context: {e}");

@@ -293,8 +293,17 @@ async fn connection_loop(
         match stream_result {
             Ok(go_away) => {
                 if go_away {
-                    // goAway — reconnect immediately without counting as failure
-                    tracing::info!("Server sent goAway, reconnecting immediately");
+                    // goAway — server is rotating, session is done.
+                    // Clear resumption handle so we start fresh instead of
+                    // wasting attempts on a stale handle.
+                    {
+                        let mut handle = state.resumption_handle.lock().await;
+                        if handle.is_some() {
+                            tracing::info!("Clearing resumption handle after goAway");
+                            *handle = None;
+                        }
+                    }
+                    tracing::info!("Server sent goAway, reconnecting with fresh session");
                     continue;
                 }
                 // Clean disconnect
@@ -307,6 +316,19 @@ async fn connection_loop(
                 if outcome.was_connected
                     && outcome.connected_duration.as_secs() >= MIN_STABLE_CONNECTION_SECS
                 {
+                    // Connection was stable — the session likely expired.
+                    // Clear the resumption handle so we don't waste attempts
+                    // on a stale handle during reconnection.
+                    {
+                        let mut handle = state.resumption_handle.lock().await;
+                        if handle.is_some() {
+                            tracing::info!("Clearing resumption handle after stable session ended");
+                            *handle = None;
+                            let _ = event_tx.send(GeminiEvent::SessionHandle {
+                                handle: String::new(),
+                            });
+                        }
+                    }
                     attempt = 0;
                 }
 

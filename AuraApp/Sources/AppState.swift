@@ -39,6 +39,10 @@ final class AppState {
     var events: [ActivityEvent] = []
     var isThinking: Bool = false
 
+    // MARK: - Recent Sessions
+
+    var recentSessions: [RecentSession] = []
+
     // MARK: - Status
 
     var statusMessage: String = "Disconnected"
@@ -147,6 +151,11 @@ final class AppState {
 
         case .status(let update):
             statusMessage = update.message
+
+        case .recentSessions(let update):
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                recentSessions = update.sessions
+            }
 
         case .shutdown:
             statusMessage = "Daemon shutting down"

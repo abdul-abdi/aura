@@ -37,6 +37,9 @@ pub enum DaemonEvent {
     /// Status message update.
     Status { message: String },
 
+    /// Recent session summaries for the UI empty state.
+    RecentSessions { sessions: Vec<RecentSessionInfo> },
+
     /// The daemon is shutting down.
     Shutdown,
 }
@@ -85,6 +88,14 @@ pub enum UICommand {
 
     /// Request a graceful shutdown.
     Shutdown,
+}
+
+/// A recent session summary for display in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentSessionInfo {
+    pub session_id: String,
+    pub summary: String,
+    pub created_at: String,
 }
 
 fn default_source() -> String {
