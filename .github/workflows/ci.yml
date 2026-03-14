@@ -164,9 +164,9 @@ jobs:
           - name: proxy
             context: .
             dockerfile: crates/aura-proxy/Dockerfile
-          - name: consolidation
-            context: infrastructure/
-            dockerfile: infrastructure/Dockerfile
+          - name: memory-agent
+            context: infrastructure/memory-agent/
+            dockerfile: infrastructure/memory-agent/Dockerfile
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Build ${{ matrix.name }} Docker image
@@ -239,6 +239,26 @@ jobs:
 
           exit $EXIT_CODE
 
+  # ── Python lint & test ─────────────────────────────────────────────────
+  python:
+    name: Python Lint & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          cd infrastructure/memory-agent
+          pip install -r requirements.txt
+          pip install ruff
+      - name: Lint
+        run: ruff check infrastructure/memory-agent/
+      - name: Test
+        run: cd infrastructure/memory-agent && python -m pytest tests/ -v
+
   # ── PR size warning ────────────────────────────────────────────────────
   pr-size:
     name: PR Size
@@ -290,7 +310,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [format, lint, test, build, audit, coverage, docker, commits]
+    needs: [format, lint, test, build, audit, coverage, docker, commits, python]
     steps:
       - name: Check required jobs
         run: |
@@ -301,6 +321,7 @@ jobs:
           echo "audit:    ${{ needs.audit.result }}"
           echo "coverage: ${{ needs.coverage.result }}"
           echo "docker:   ${{ needs.docker.result }}"
+          echo "python:   ${{ needs.python.result }}"
           echo "commits:  ${{ needs.commits.result }}"
 
           # commits is skipped on push (only runs on PRs) — that's OK.
@@ -310,7 +331,8 @@ jobs:
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.audit.result }}" != "success" ]] || \
              [[ "${{ needs.coverage.result }}" != "success" ]] || \
-             [[ "${{ needs.docker.result }}" != "success" ]]; then
+             [[ "${{ needs.docker.result }}" != "success" ]] || \
+             [[ "${{ needs.python.result }}" != "success" ]]; then
             echo "::error::One or more required checks failed"
             exit 1
           fi
