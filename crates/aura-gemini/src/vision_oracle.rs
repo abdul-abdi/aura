@@ -80,15 +80,13 @@ impl VisionOracle {
             }
         });
 
-        let url = format!(
-            "{}/{}:generateContent?key={}",
-            REST_BASE, self.model, self.api_key
-        );
+        let url = format!("{}/{}:generateContent", REST_BASE, self.model);
 
         let start = std::time::Instant::now();
-        let resp = self
+        let resp: reqwest::Response = self
             .client
             .post(&url)
+            .query(&[("key", &self.api_key)])
             .json(&body)
             .send()
             .await
@@ -96,8 +94,13 @@ impl VisionOracle {
 
         let status = resp.status();
         if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Vision oracle got HTTP {status}: {err_body}");
+            let err_body: String = resp.text().await.unwrap_or_default();
+            let err_body_safe = if err_body.len() > 200 {
+                &err_body[..200]
+            } else {
+                &err_body
+            };
+            anyhow::bail!("Vision oracle got HTTP {status}: {err_body_safe}");
         }
 
         let json: Value = resp
@@ -108,7 +111,7 @@ impl VisionOracle {
         // Extract text from response: candidates[0].content.parts[0].text
         let text = json
             .pointer("/candidates/0/content/parts/0/text")
-            .and_then(|v| v.as_str())
+            .and_then(|v: &Value| v.as_str())
             .context("Vision oracle response missing text field")?;
 
         let elapsed = start.elapsed();
@@ -252,5 +255,47 @@ mod tests {
         let (lx, ly) = denormalize(1000.0, 1000.0, 1920, 1080);
         assert!((lx - 1920.0).abs() < 0.1);
         assert!((ly - 1080.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn parse_decimal_coords() {
+        assert_eq!(
+            parse_normalized_coords("[456.5, 723.2]"),
+            Some((456.5, 723.2))
+        );
+    }
+
+    #[test]
+    fn parse_zero_y_nonzero_x() {
+        assert_eq!(parse_normalized_coords("[0, 500]"), Some((0.0, 500.0)));
+    }
+
+    #[test]
+    fn parse_nonzero_y_zero_x() {
+        assert_eq!(parse_normalized_coords("[500, 0]"), Some((500.0, 0.0)));
+    }
+
+    #[test]
+    fn parse_max_boundary() {
+        assert_eq!(
+            parse_normalized_coords("[1000, 1000]"),
+            Some((1000.0, 1000.0))
+        );
+    }
+
+    #[test]
+    fn parse_first_bracket_pair_wins() {
+        let text = "First [100, 200] then [456, 723]";
+        assert_eq!(parse_normalized_coords(text), Some((100.0, 200.0)));
+    }
+
+    #[test]
+    fn reject_empty_brackets() {
+        assert_eq!(parse_normalized_coords("[]"), None);
+    }
+
+    #[test]
+    fn reject_whitespace_brackets() {
+        assert_eq!(parse_normalized_coords("[  ,  ]"), None);
     }
 }

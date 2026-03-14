@@ -629,7 +629,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             let mut retry_args = args.clone();
                                             retry_args["x"] = serde_json::json!(retry_x);
                                             retry_args["y"] = serde_json::json!(retry_y);
-                                            let _ = tools::execute_tool(&name, &retry_args, &tool_executor, &tool_screen_reader, tool_dims, tool_vision_oracle.as_deref()).await;
+                                            let _ = tools::execute_tool(&name, &retry_args, &tool_executor, &tool_screen_reader, tool_dims, None).await;
 
                                             // Brief settle + single hash check
                                             tokio::time::sleep(Duration::from_millis(80)).await;
