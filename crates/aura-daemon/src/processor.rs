@@ -24,7 +24,7 @@ use super::tools;
 /// Query the memory agent for relevant context on fresh activation.
 async fn query_memory_agent(
     cloud_run_url: &str,
-    cloud_run_auth_token: &str,
+    device_token: &str,
     device_id: &str,
     screen_context: &str,
 ) -> Option<String> {
@@ -41,7 +41,7 @@ async fn query_memory_agent(
 
     let resp = client
         .post(&url)
-        .bearer_auth(cloud_run_auth_token)
+        .bearer_auth(device_token)
         .json(&body)
         .send()
         .await
@@ -61,7 +61,7 @@ async fn query_memory_agent(
 /// Send session transcript to the memory agent for ingestion.
 async fn ingest_to_memory_agent(
     cloud_run_url: &str,
-    cloud_run_auth_token: &str,
+    device_token: &str,
     device_id: &str,
     session_id: &str,
     messages: &[aura_memory::Message],
@@ -105,7 +105,7 @@ async fn ingest_to_memory_agent(
 
     let resp = client
         .post(&url)
-        .bearer_auth(cloud_run_auth_token)
+        .bearer_auth(device_token)
         .json(&body)
         .send()
         .await
@@ -163,7 +163,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let CloudConfig {
         gemini_api_key,
         cloud_run_url,
-        cloud_run_auth_token,
+        device_token: cloud_run_auth_token,
         cloud_run_device_id,
         firestore_project_id,
         firebase_api_key,

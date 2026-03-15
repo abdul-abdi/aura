@@ -874,12 +874,11 @@ mod tests {
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
             proxy_url: None,
-            proxy_auth_token: None,
             firestore_project_id: None,
             firebase_api_key: None,
             device_id: None,
             cloud_run_url: None,
-            cloud_run_auth_token: None,
+            device_token: None,
         };
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
@@ -898,12 +897,11 @@ mod tests {
             system_prompt: "Test prompt".into(),
             temperature: 0.9,
             proxy_url: None,
-            proxy_auth_token: None,
             firestore_project_id: None,
             firebase_api_key: None,
             device_id: None,
             cloud_run_url: None,
-            cloud_run_auth_token: None,
+            device_token: None,
         };
         let msg = build_setup_message(&config, Some("tok_resume_123".into()));
         let json = serde_json::to_string(&msg).unwrap();

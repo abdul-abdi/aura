@@ -16,7 +16,7 @@ use crate::protocol::DaemonEvent;
 pub struct CloudConfig {
     pub gemini_api_key: String,
     pub cloud_run_url: Option<String>,
-    pub cloud_run_auth_token: Option<String>,
+    pub device_token: Option<String>,
     pub cloud_run_device_id: Option<String>,
     pub firestore_project_id: Option<String>,
     pub firebase_api_key: Option<String>,
