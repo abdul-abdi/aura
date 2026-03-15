@@ -232,130 +232,171 @@ pub(crate) async fn execute_tool(
                 .unwrap_or(1) as u32;
             let count = count.clamp(1, CLICK_COUNT_MAX);
 
-            // AX hit-test: find the interactive element at the target coordinates
-            // and snap to its center for improved accuracy.
-            let hit_x = x;
-            let hit_y = y;
-            let ax_hit = tokio::task::spawn_blocking(move || {
-                aura_screen::accessibility::element_at_position(hit_x, hit_y)
+            // Extract target description for vision oracle
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Oracle-first coordinate refinement with 4s total budget
+            let mut targeting_info = serde_json::json!({});
+            let raw_x = x;
+            let raw_y = y;
+
+            /// Maximum distance (logical px) the oracle can move coords from the hint.
+            /// Beyond this, the oracle result is discarded as unreliable.
+            const MAX_ORACLE_DELTA: f64 = 150.0;
+
+            /// Total time budget for oracle refinement (capture + API call + retry).
+            const ORACLE_BUDGET: Duration = Duration::from_secs(4);
+
+            // Get display origin for multi-monitor (used by BOTH oracle and fallback paths)
+            let display_origin = tokio::task::spawn_blocking(|| {
+                aura_screen::capture::get_active_display_origin()
             })
             .await
             .ok()
-            .flatten();
+            .flatten()
+            .unwrap_or((0.0, 0.0));
 
-            let mut targeting_info = serde_json::json!({});
-            if let Some(ref el) = ax_hit {
-                if let Some(ref bounds) = el.bounds {
-                    let (cx, cy) = bounds.center();
-                    tracing::debug!(
-                        original_x = x,
-                        original_y = y,
-                        snapped_x = cx,
-                        snapped_y = cy,
-                        role = %el.role,
-                        label = ?el.label,
-                        "Snapping click to element center"
-                    );
-                    x = cx;
-                    y = cy;
-                    targeting_info = serde_json::json!({
-                        "element_at_target": el.summary(),
-                        "snapped_to_center": true,
-                        "original_coords": [hit_x, hit_y],
-                        "snapped_coords": [cx, cy],
-                    });
-                } else {
-                    targeting_info = serde_json::json!({
-                        "element_at_target": el.summary(),
-                        "snapped_to_center": false,
-                        "targeting_hint": "Element found but has no bounds — clicking original coordinates",
-                    });
-                }
-            } else {
-                // AX miss — try vision oracle for precise coordinates
-                if let Some(oracle) = vision_oracle {
-                    tracing::info!(x, y, "AX miss — querying vision oracle");
-                    match tokio::task::spawn_blocking(|| {
+            if let Some(oracle) = vision_oracle.filter(|o| o.is_available()) {
+                let oracle_start = std::time::Instant::now();
+                tracing::info!(x, y, target = ?target, "Querying vision oracle");
+
+                let oracle_result = tokio::time::timeout(ORACLE_BUDGET, async {
+                    let frame = tokio::task::spawn_blocking(|| {
                         aura_screen::capture::capture_screen_high_res()
                     })
                     .await
-                    {
-                        Ok(Ok(frame)) => {
-                            let mut oracle_result = oracle
-                                .find_element_coordinates(
-                                    &frame.jpeg_base64,
-                                    x,
-                                    y,
-                                    frame.width,
-                                    frame.height,
-                                    frame.logical_width,
-                                    frame.logical_height,
-                                )
-                                .await;
+                    .map_err(|e| anyhow::anyhow!("Screenshot task panicked: {e}"))?
+                    .map_err(|e| anyhow::anyhow!("Screenshot capture failed: {e}"))?;
 
-                            // Single retry on failure
-                            if oracle_result.is_err() {
-                                tracing::warn!("Vision oracle attempt 1 failed, retrying");
-                                oracle_result = oracle
-                                    .find_element_coordinates(
-                                        &frame.jpeg_base64,
-                                        x,
-                                        y,
-                                        frame.width,
-                                        frame.height,
-                                        frame.logical_width,
-                                        frame.logical_height,
-                                    )
-                                    .await;
-                            }
+                    let target_ref = target.as_deref();
+                    let mut result = oracle
+                        .find_element_coordinates(
+                            &frame.jpeg_base64,
+                            x, y,
+                            frame.width, frame.height,
+                            frame.logical_width, frame.logical_height,
+                            target_ref,
+                            frame.display_origin_x, frame.display_origin_y,
+                        )
+                        .await;
 
-                            match oracle_result {
-                                Ok((ox, oy)) => {
-                                    tracing::info!(
-                                        original_x = x,
-                                        original_y = y,
-                                        oracle_x = ox,
-                                        oracle_y = oy,
-                                        "Vision oracle refined coordinates"
-                                    );
-                                    x = ox;
-                                    y = oy;
-                                    targeting_info = serde_json::json!({
-                                        "vision_oracle": true,
-                                        "original_coords": [hit_x, hit_y],
-                                        "oracle_coords": [ox, oy],
-                                    });
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Vision oracle failed after retry, using raw coordinates"
-                                    );
-                                    targeting_info = serde_json::json!({
-                                        "element_at_target": null,
-                                        "snapped_to_center": false,
-                                        "vision_oracle_error": format!("{e}"),
-                                        "targeting_hint": "Vision oracle failed — using original coordinates",
-                                    });
-                                }
-                            }
-                        }
-                        _ => {
-                            tracing::warn!("Failed to capture screenshot for vision oracle");
+                    // Single retry on failure (Err only, not Ok(None))
+                    if result.is_err() {
+                        tracing::warn!("Vision oracle attempt 1 failed, retrying");
+                        result = oracle
+                            .find_element_coordinates(
+                                &frame.jpeg_base64,
+                                x, y,
+                                frame.width, frame.height,
+                                frame.logical_width, frame.logical_height,
+                                target_ref,
+                                frame.display_origin_x, frame.display_origin_y,
+                            )
+                            .await;
+                    }
+
+                    result
+                })
+                .await;
+
+                let elapsed_ms = oracle_start.elapsed().as_millis() as u64;
+
+                match oracle_result {
+                    // Oracle found the target
+                    Ok(Ok(Some((ox, oy)))) => {
+                        let delta = ((ox - raw_x).powi(2) + (oy - raw_y).powi(2)).sqrt();
+                        if delta > MAX_ORACLE_DELTA {
+                            tracing::warn!(
+                                delta = format!("{:.1}", delta),
+                                max = MAX_ORACLE_DELTA,
+                                "Oracle delta too large — discarding, using raw coords"
+                            );
+                            oracle.record_success(); // API worked, just result was weird
+                            // Apply display origin to raw coords (multi-monitor fix)
+                            x = raw_x + display_origin.0;
+                            y = raw_y + display_origin.1;
                             targeting_info = serde_json::json!({
-                                "element_at_target": null,
-                                "snapped_to_center": false,
-                                "targeting_hint": "No interactive element found — screenshot capture failed",
+                                "vision_oracle": false,
+                                "raw_coords": [raw_x, raw_y],
+                                "oracle_coords": [ox, oy],
+                                "delta_px": (delta * 10.0).round() / 10.0,
+                                "elapsed_ms": elapsed_ms,
+                                "targeting_hint": "Oracle delta exceeded threshold — using raw coords",
+                            });
+                        } else {
+                            oracle.record_success();
+                            x = ox; // Already includes display origin from oracle
+                            y = oy;
+                            targeting_info = serde_json::json!({
+                                "vision_oracle": true,
+                                "raw_coords": [raw_x, raw_y],
+                                "oracle_coords": [ox, oy],
+                                "delta_px": (delta * 10.0).round() / 10.0,
+                                "elapsed_ms": elapsed_ms,
                             });
                         }
                     }
-                } else {
-                    targeting_info = serde_json::json!({
-                        "element_at_target": null,
-                        "snapped_to_center": false,
-                        "targeting_hint": "No interactive element found at coordinates — click may miss",
-                    });
+                    // Oracle says target not visible (NotFound) — NOT a failure
+                    Ok(Ok(None)) => {
+                        oracle.record_success(); // API worked correctly
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
+                        tracing::info!(elapsed_ms, "Vision oracle: target not visible, using raw coords");
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_not_found": true,
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle: target not visible — using raw coordinates",
+                        });
+                    }
+                    // Real API/parse failure — increments circuit breaker
+                    Ok(Err(e)) => {
+                        oracle.record_failure();
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
+                        tracing::warn!(error = %e, elapsed_ms, "Vision oracle failed");
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_error": format!("{e}"),
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle failed — using raw coordinates",
+                        });
+                    }
+                    Err(_) => {
+                        // Timeout — increments circuit breaker
+                        oracle.record_failure();
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
+                        tracing::warn!("Vision oracle timed out after 4s");
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_error": "timeout",
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle timed out — using raw coordinates",
+                        });
+                    }
                 }
+            } else {
+                // Oracle unavailable (not configured or circuit breaker tripped)
+                // Apply display origin to raw coords (multi-monitor fix)
+                x = raw_x + display_origin.0;
+                y = raw_y + display_origin.1;
+                let reason = if vision_oracle.is_some() { "circuit_breaker" } else { "not_configured" };
+                targeting_info = serde_json::json!({
+                    "vision_oracle": false,
+                    "raw_coords": [raw_x, raw_y],
+                    "oracle_skipped": reason,
+                    "targeting_hint": "Oracle unavailable — using raw coordinates",
+                });
             }
 
             // Pre-move cursor to click target so apps register hover state
