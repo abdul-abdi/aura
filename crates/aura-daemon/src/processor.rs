@@ -1195,14 +1195,12 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                             if let Some(messages) = messages {
                                 // Try memory agent first, fall back to existing consolidation
-                                let mut memory_agent_handled = false;
                                 let consolidation_result = if let (Some(url), Some(token), Some(did)) =
                                     (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
                                 {
                                     match ingest_to_memory_agent(url, token, did, &es_sid, &messages).await {
                                         Some(resp) => {
                                             tracing::info!("Memory agent ingested session successfully");
-                                            memory_agent_handled = true;
                                             // Fire-and-forget consolidation trigger
                                             let consolidate_url = format!("{url}/consolidate");
                                             let consolidate_token = token.clone();
