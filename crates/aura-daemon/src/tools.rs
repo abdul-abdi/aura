@@ -1023,6 +1023,91 @@ pub(crate) async fn execute_tool(
                 }
             }
         }
+        "select_text" => {
+            let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("all");
+
+            match method {
+                "all" => {
+                    // Cmd+A
+                    let keycode = aura_input::keyboard::keycode_from_name("a").unwrap();
+                    run_with_pid_fallback(
+                        move |pid| aura_input::keyboard::press_key_pid(keycode, &["cmd"], pid),
+                        "select_all_pid",
+                        move || aura_input::keyboard::press_key(keycode, &["cmd"]),
+                        "select_all_hid",
+                    )
+                    .await
+                }
+                "word" => {
+                    let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let lx = dims.to_logical_x(raw_x);
+                    let ly = dims.to_logical_y(raw_y);
+                    // Double-click to select word
+                    run_with_pid_fallback(
+                        move |pid| aura_input::mouse::click_pid(lx, ly, "left", 2, &[], pid),
+                        "word_select_pid",
+                        move || aura_input::mouse::click(lx, ly, "left", 2, &[]),
+                        "word_select_hid",
+                    )
+                    .await
+                }
+                "line" => {
+                    let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let lx = dims.to_logical_x(raw_x);
+                    let ly = dims.to_logical_y(raw_y);
+                    // Triple-click to select line
+                    run_with_pid_fallback(
+                        move |pid| aura_input::mouse::click_pid(lx, ly, "left", 3, &[], pid),
+                        "line_select_pid",
+                        move || aura_input::mouse::click(lx, ly, "left", 3, &[]),
+                        "line_select_hid",
+                    )
+                    .await
+                }
+                "to_start" => {
+                    // Cmd+Shift+Up to select from cursor to document start
+                    let keycode = aura_input::keyboard::keycode_from_name("up").unwrap();
+                    run_with_pid_fallback(
+                        move |pid| {
+                            aura_input::keyboard::press_key_pid(
+                                keycode,
+                                &["cmd", "shift"],
+                                pid,
+                            )
+                        },
+                        "select_to_start_pid",
+                        move || aura_input::keyboard::press_key(keycode, &["cmd", "shift"]),
+                        "select_to_start_hid",
+                    )
+                    .await
+                }
+                "to_end" => {
+                    // Cmd+Shift+Down to select from cursor to document end
+                    let keycode = aura_input::keyboard::keycode_from_name("down").unwrap();
+                    run_with_pid_fallback(
+                        move |pid| {
+                            aura_input::keyboard::press_key_pid(
+                                keycode,
+                                &["cmd", "shift"],
+                                pid,
+                            )
+                        },
+                        "select_to_end_pid",
+                        move || aura_input::keyboard::press_key(keycode, &["cmd", "shift"]),
+                        "select_to_end_hid",
+                    )
+                    .await
+                }
+                other => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Unknown select_text method: {other}. Use: all, word, line, to_start, to_end"),
+                    })
+                }
+            }
+        }
         "run_javascript" => {
             let app = args.get("app").and_then(|v| v.as_str()).unwrap_or("Safari");
             let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
