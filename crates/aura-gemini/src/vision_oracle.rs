@@ -4,9 +4,12 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
 const REST_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -21,6 +24,8 @@ pub struct VisionOracle {
     client: reqwest::Client,
     api_key: String,
     model: String,
+    consecutive_failures: AtomicU32,
+    tripped_until: AtomicU64, // epoch millis
 }
 
 impl VisionOracle {
@@ -33,6 +38,8 @@ impl VisionOracle {
             client,
             api_key: api_key.to_string(),
             model: DEFAULT_MODEL.to_string(),
+            consecutive_failures: AtomicU32::new(0),
+            tripped_until: AtomicU64::new(0),
         }
     }
 
@@ -139,6 +146,37 @@ impl VisionOracle {
         );
 
         Ok((logical_x, logical_y))
+    }
+
+    pub fn is_available(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now >= self.tripped_until.load(Ordering::Acquire)
+    }
+
+    pub fn record_failure(&self) {
+        let prev = self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
+        if prev + 1 >= CIRCUIT_BREAKER_THRESHOLD {
+            let trip_until = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+                + CIRCUIT_BREAKER_COOLDOWN_SECS * 1000;
+            self.tripped_until.store(trip_until, Ordering::Release);
+            tracing::warn!(
+                cooldown_secs = CIRCUIT_BREAKER_COOLDOWN_SECS,
+                "Vision oracle circuit breaker tripped"
+            );
+        }
+    }
+
+    pub fn record_success(&self) {
+        let prev = self.consecutive_failures.swap(0, Ordering::AcqRel);
+        if prev >= CIRCUIT_BREAKER_THRESHOLD {
+            tracing::info!("Vision oracle circuit breaker recovered");
+        }
     }
 }
 
@@ -301,5 +339,31 @@ mod tests {
     #[test]
     fn reject_whitespace_brackets() {
         assert_eq!(parse_normalized_coords("[  ,  ]"), None);
+    }
+
+    #[test]
+    fn circuit_breaker_initially_available() {
+        let oracle = VisionOracle::new("fake-key");
+        assert!(oracle.is_available());
+    }
+
+    #[test]
+    fn circuit_breaker_trips_after_threshold() {
+        let oracle = VisionOracle::new("fake-key");
+        oracle.record_failure();
+        oracle.record_failure();
+        oracle.record_failure();
+        assert!(!oracle.is_available());
+    }
+
+    #[test]
+    fn circuit_breaker_resets_on_success() {
+        let oracle = VisionOracle::new("fake-key");
+        oracle.record_failure();
+        oracle.record_failure();
+        oracle.record_success();
+        assert!(oracle.is_available());
+        oracle.record_failure();
+        assert!(oracle.is_available()); // only 1 failure, not 3
     }
 }
