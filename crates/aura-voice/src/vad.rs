@@ -9,7 +9,7 @@ use webrtc_vad::{SampleRate, Vad, VadMode};
 pub const VAD_FRAME_SIZE: usize = 480;
 
 const PRE_ROLL_FRAMES: usize = 5; // 150ms pre-roll buffer
-const HANGOVER_FRAMES: usize = 10; // 300ms hangover after speech
+const HANGOVER_FRAMES: usize = 15; // 450ms hangover after speech
 
 pub struct VoiceDetector {
     vad: Vad,
@@ -20,7 +20,7 @@ pub struct VoiceDetector {
 
 impl VoiceDetector {
     pub fn new() -> Result<Self, String> {
-        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Quality);
+        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::VeryAggressive);
         Ok(Self {
             vad,
             pre_roll: Vec::with_capacity(PRE_ROLL_FRAMES),

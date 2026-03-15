@@ -45,7 +45,7 @@ const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.8;
 /// threshold before we forward audio during playback.  Prevents transient
 /// loud passages in the AI's speech from triggering a false barge-in.
 /// At ~5 ms per chunk, 3 chunks ≈ 15 ms of sustained speech.
-const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 3;
+const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 5;
 
 /// Destructive action guardrail injected into the system prompt.
 pub(crate) const DESTRUCTIVE_ACTION_GUARDRAIL: &str = "\n\nSafety — Destructive Actions:\
