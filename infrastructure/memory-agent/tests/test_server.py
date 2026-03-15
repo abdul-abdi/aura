@@ -191,3 +191,33 @@ def test_ingest_empty_messages():
     assert response.status_code == 200
     data = response.json()
     assert data["memories_stored"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Device token auth
+# ---------------------------------------------------------------------------
+
+
+def test_device_token_auth_with_mock():
+    """Device token validated via mocked Firestore."""
+    with patch("server._validate_device_token", return_value=True):
+        with patch("server._run_agent") as mock_run:
+            mock_run.return_value = "User prefers dark mode."
+            resp = client.post(
+                "/query",
+                headers={"Authorization": "Bearer device-token-123"},
+                json={"device_id": "dev-test", "context": "what's on screen"},
+            )
+            assert resp.status_code == 200
+
+
+def test_legacy_disabled_rejects_shared_token():
+    """When legacy disabled and device validation fails, reject."""
+    with patch("server.config.LEGACY_AUTH_ENABLED", False):
+        with patch("server._validate_device_token", return_value=False):
+            resp = client.post(
+                "/query",
+                headers={"Authorization": "Bearer wrong-token"},
+                json={"device_id": "dev-test", "context": "test"},
+            )
+            assert resp.status_code == 401

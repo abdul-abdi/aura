@@ -267,7 +267,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                         "properties": {
                             "name": {
                                 "type": "string",
-                                "description": "Application name, e.g. 'Safari', 'Terminal', 'Slack', 'Visual Studio Code'"
+                                "description": "Application name, e.g. 'Safari', 'Slack', 'Visual Studio Code', 'Finder'"
                             }
                         },
                         "required": ["name"]

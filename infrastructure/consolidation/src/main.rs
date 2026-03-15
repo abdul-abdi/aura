@@ -42,8 +42,9 @@ const MAX_CONCURRENT_REQUESTS: usize = 10;
 
 struct AppState {
     gemini_api_key: String,
-    auth_token: String,
-    gcp_project_id: String,
+    auth_token: Option<String>,
+    legacy_auth_enabled: bool,
+    gcp_project_id: Option<String>,
     consolidation_model: String,
     http: reqwest::Client,
     semaphore: Semaphore,
@@ -103,10 +104,12 @@ async fn main() -> Result<()> {
 
     let gemini_api_key =
         std::env::var("GEMINI_API_KEY").context("GEMINI_API_KEY env var is required")?;
-    let auth_token =
-        std::env::var("AURA_AUTH_TOKEN").context("AURA_AUTH_TOKEN env var is required")?;
-    let gcp_project_id =
-        std::env::var("GCP_PROJECT_ID").context("GCP_PROJECT_ID env var is required")?;
+    let auth_token = std::env::var("AURA_AUTH_TOKEN").ok();
+    let legacy_auth_enabled = std::env::var("LEGACY_AUTH_ENABLED")
+        .unwrap_or_else(|_| "true".to_string())
+        .to_lowercase()
+        == "true";
+    let gcp_project_id = std::env::var("GCP_PROJECT_ID").ok();
     let consolidation_model = std::env::var("CONSOLIDATION_MODEL")
         .unwrap_or_else(|_| DEFAULT_CONSOLIDATION_MODEL.to_string());
     let port: u16 = std::env::var("PORT")
@@ -114,9 +117,14 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
+    if auth_token.is_none() && gcp_project_id.is_none() {
+        panic!("Either AURA_AUTH_TOKEN or GCP_PROJECT_ID must be set");
+    }
+
     let state = Arc::new(AppState {
         gemini_api_key,
         auth_token,
+        legacy_auth_enabled,
         gcp_project_id,
         consolidation_model,
         http: reqwest::Client::builder()
@@ -163,14 +171,8 @@ async fn consolidate(
         )
     })?;
 
-    // Auth check (constant-time via SHA-256 comparison).
-    let provided = extract_bearer(&headers).unwrap_or_default();
-    if !constant_time_eq(provided, &state.auth_token) {
-        warn!("consolidate: unauthorized request");
-        return Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()));
-    }
-
-    // Validate device_id and session_id to prevent Firestore path traversal.
+    // Validate device_id and session_id to prevent Firestore path traversal
+    // before the device_id is used in any backend lookup.
     validate_device_id(&req.device_id).map_err(|e| {
         warn!("consolidate: invalid device_id: {e}");
         (StatusCode::BAD_REQUEST, format!("Invalid device_id: {e}"))
@@ -179,6 +181,27 @@ async fn consolidate(
         warn!("consolidate: invalid session_id: {e}");
         (StatusCode::BAD_REQUEST, format!("Invalid session_id: {e}"))
     })?;
+
+    // Auth check — try legacy shared token first, then device token via Firestore.
+    let bearer_token = extract_bearer(&headers).unwrap_or_default();
+
+    let mut authenticated = false;
+
+    if state.legacy_auth_enabled
+        && let Some(ref expected) = state.auth_token
+        && constant_time_eq(bearer_token, expected)
+    {
+        authenticated = true;
+    }
+
+    if !authenticated {
+        authenticated = validate_device_token(&state, &req.device_id, bearer_token).await;
+    }
+
+    if !authenticated {
+        warn!("consolidate: unauthorized request");
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()));
+    }
 
     info!(
         "consolidate: device={} session={} messages={}",
@@ -229,6 +252,91 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     let ha = Sha256::digest(a.as_bytes());
     let hb = Sha256::digest(b.as_bytes());
     ha.ct_eq(&hb).into()
+}
+
+// ---------------------------------------------------------------------------
+// Device token auth (Firestore-backed, with in-memory cache)
+// ---------------------------------------------------------------------------
+
+/// In-memory cache mapping device_id -> (token_hash, cached_at).
+static DEVICE_CACHE: std::sync::LazyLock<
+    tokio::sync::RwLock<std::collections::HashMap<String, (String, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+const DEVICE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn validate_device_token(state: &AppState, device_id: &str, token: &str) -> bool {
+    let provided_hash = {
+        let mut h = Sha256::new();
+        h.update(token.as_bytes());
+        hex::encode(h.finalize())
+    };
+
+    // Fast path: check in-memory cache.
+    {
+        let cache = DEVICE_CACHE.read().await;
+        if let Some((cached_hash, cached_at)) = cache.get(device_id)
+            && cached_at.elapsed() < DEVICE_CACHE_TTL
+        {
+            use subtle::ConstantTimeEq;
+            return provided_hash
+                .as_bytes()
+                .ct_eq(cached_hash.as_bytes())
+                .into();
+        }
+    }
+
+    // Cache miss — look up in Firestore.
+    let project_id = match &state.gcp_project_id {
+        Some(p) => p,
+        None => return false,
+    };
+
+    let access_token = match get_gcp_token(&state.http).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to get GCP token for device auth: {e}");
+            return false;
+        }
+    };
+
+    let url = format!(
+        "https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/devices/{device_id}"
+    );
+
+    let resp = match state.http.get(&url).bearer_auth(&access_token).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Firestore device lookup failed: {e}");
+            return false;
+        }
+    };
+
+    if !resp.status().is_success() {
+        return false;
+    }
+
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(_) => return false,
+    };
+
+    let stored_hash = json["fields"]["token_hash"]["stringValue"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    // Populate cache so subsequent requests within TTL skip Firestore.
+    DEVICE_CACHE
+        .write()
+        .await
+        .insert(device_id.to_string(), (stored_hash.clone(), std::time::Instant::now()));
+
+    use subtle::ConstantTimeEq;
+    provided_hash
+        .as_bytes()
+        .ct_eq(stored_hash.as_bytes())
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -370,9 +478,12 @@ async fn write_to_firestore(
     session_id: &str,
     result: &ConsolidationResult,
 ) -> Result<()> {
+    let project_id = state
+        .gcp_project_id
+        .as_deref()
+        .context("GCP_PROJECT_ID not configured")?;
     let base = format!(
-        "{FIRESTORE_BASE}/{}/databases/(default)/documents/users/{device_id}",
-        state.gcp_project_id
+        "{FIRESTORE_BASE}/{project_id}/databases/(default)/documents/users/{device_id}"
     );
 
     // Write all facts concurrently.

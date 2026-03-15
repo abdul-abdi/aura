@@ -254,7 +254,25 @@ struct WelcomeView: View {
         )
 
         let configFile = configDir.appendingPathComponent("config.toml")
-        let content = "api_key = \"\(apiKey)\"\n"
+
+        // Preserve existing device_id or generate a new one
+        let deviceId = readConfigValue("device_id") ?? UUID().uuidString.lowercased()
+
+        // Preserve any extra config lines that are not api_key or device_id
+        let existingLines: [String]
+        if let existing = try? String(contentsOf: configFile, encoding: .utf8) {
+            existingLines = existing.components(separatedBy: "\n").filter { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                return !trimmed.hasPrefix("api_key") && !trimmed.hasPrefix("device_id") && !trimmed.isEmpty
+            }
+        } else {
+            existingLines = []
+        }
+
+        var lines = ["api_key = \"\(apiKey)\"", "device_id = \"\(deviceId)\""]
+        lines.append(contentsOf: existingLines)
+        let content = lines.joined(separator: "\n") + "\n"
+
         do {
             try content.write(to: configFile, atomically: true, encoding: .utf8)
             try? fm.setAttributes(
@@ -266,7 +284,79 @@ struct WelcomeView: View {
             return
         }
 
+        // Kick off device registration in the background — non-blocking
+        let keySnapshot = apiKey
+        let idSnapshot = deviceId
+        Task {
+            await registerDevice(apiKey: keySnapshot, deviceId: idSnapshot)
+        }
+
         onContinue()
+    }
+
+    // MARK: - Device Registration
+
+    private func registerDevice(apiKey: String, deviceId: String) async {
+        let proxyBase = readProxyBaseURL() ?? "https://aura-proxy-prod-877110560858.us-central1.run.app"
+        guard let url = URL(string: "\(proxyBase)/register") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "device_id": deviceId,
+            "gemini_api_key": apiKey,
+        ])
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResp = response as? HTTPURLResponse, httpResp.statusCode == 200 else {
+                print("[Aura] Device registration failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                return
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let token = json["device_token"] as? String else { return }
+            if KeychainHelper.saveString(account: "device_token", value: token) {
+                print("[Aura] Device registered successfully")
+            }
+        } catch {
+            print("[Aura] Device registration error: \(error.localizedDescription)")
+        }
+    }
+
+    private func readProxyBaseURL() -> String? {
+        let configPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/aura/config.toml")
+        guard let content = try? String(contentsOf: configPath, encoding: .utf8) else { return nil }
+        for line in content.components(separatedBy: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 && parts[0].trimmingCharacters(in: .whitespaces) == "proxy_url" {
+                let raw = parts[1].trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: "\"", with: "")
+                // Convert wss://...run.app/ws  ->  https://...run.app
+                return raw.replacingOccurrences(of: "wss://", with: "https://")
+                          .replacingOccurrences(of: "/ws", with: "")
+            }
+        }
+        return nil
+    }
+
+    private func readConfigValue(_ key: String) -> String? {
+        let configFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/aura/config.toml")
+        guard let contents = try? String(contentsOf: configFile, encoding: .utf8) else { return nil }
+        for line in contents.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix(key) {
+                let parts = trimmed.components(separatedBy: "=")
+                guard parts.count >= 2 else { continue }
+                let value = parts.dropFirst().joined(separator: "=")
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                if !value.isEmpty { return value }
+            }
+        }
+        return nil
     }
 }
 

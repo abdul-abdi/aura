@@ -144,7 +144,7 @@ pub(crate) async fn run_daemon(
     // Save API key and Cloud Run fields before gemini_config is moved into the session
     let gemini_api_key = gemini_config.api_key.clone();
     let gemini_cloud_run_url = gemini_config.cloud_run_url.clone();
-    let gemini_cloud_run_auth_token = gemini_config.cloud_run_auth_token.clone();
+    let gemini_cloud_run_auth_token = gemini_config.device_token.clone();
     let gemini_device_id = gemini_config.device_id.clone();
     let gemini_firestore_project_id = gemini_config.firestore_project_id.clone();
     let gemini_firebase_api_key = gemini_config.firebase_api_key.clone();
@@ -480,7 +480,7 @@ pub(crate) async fn run_daemon(
         cloud: CloudConfig {
             gemini_api_key,
             cloud_run_url: gemini_cloud_run_url,
-            cloud_run_auth_token: gemini_cloud_run_auth_token,
+            device_token: gemini_cloud_run_auth_token,
             cloud_run_device_id: gemini_device_id,
             firestore_project_id: gemini_firestore_project_id,
             firebase_api_key: gemini_firebase_api_key,

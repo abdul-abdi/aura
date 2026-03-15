@@ -24,3 +24,4 @@ tokio-util = "0.7"
 reqwest.workspace = true
 dirs = "6"
 toml = "0.8"
+security-framework = "3"

@@ -68,6 +68,20 @@ const BLOCKED_TERMINAL_APPS: &[&str] = &[
     "ghostty",
 ];
 
+/// Bundle IDs for blocked terminal apps — covers `open -b <bundle_id>` bypass.
+const BLOCKED_TERMINAL_BUNDLES: &[&str] = &[
+    "com.apple.terminal",
+    "com.googlecode.iterm2",
+    "net.kovidgoyal.kitty",
+    "io.alacritty",
+    "dev.warp.warp-stable",
+    "co.zeit.hyper",
+    "com.github.nicehash.tabby",
+    "com.raphaelamorim.rio",
+    "com.github.wez.wezterm",
+    "com.mitchellh.ghostty",
+];
+
 pub(crate) async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
@@ -1146,7 +1160,13 @@ pub(crate) async fn execute_tool(
             // Resolve browser name for AppleScript targeting
             let (script_app, bundle_hint) = match app {
                 "Chrome" => ("Google Chrome", "com.google.Chrome"),
-                _ => ("Safari", "com.apple.Safari"),
+                "Safari" => ("Safari", "com.apple.Safari"),
+                other => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Unsupported browser: '{other}'. Only 'Safari' and 'Chrome' are supported."),
+                    });
+                }
             };
 
             // Pre-check Automation permission
@@ -1280,17 +1300,30 @@ pub(crate) async fn execute_tool(
                 }
             }
 
-            // Block `open -a <terminal>` — same safety gate as activate_app
-            if command == "open" && cmd_args.len() >= 2 && cmd_args[0] == "-a" {
-                let app_lower = cmd_args[1].to_lowercase();
-                if BLOCKED_TERMINAL_APPS
-                    .iter()
-                    .any(|b| app_lower == *b || app_lower.contains(b))
-                {
-                    return serde_json::json!({
-                        "success": false,
-                        "error": "Cannot open terminal apps via run_shell_command for safety. Ask the user to open it manually.",
-                    });
+            // Block `open` with terminal apps — covers all flag forms:
+            //   open -a Terminal, open -na Terminal, open -b com.apple.Terminal, etc.
+            if command == "open" {
+                let mut i = 0;
+                while i < cmd_args.len() {
+                    let flag = cmd_args[i].as_str();
+                    let is_app_flag = flag == "-a" || flag == "-b";
+                    let has_embedded_app_flag =
+                        flag.starts_with('-') && (flag.contains('a') || flag.contains('b'));
+                    if (is_app_flag || has_embedded_app_flag) && i + 1 < cmd_args.len() {
+                        let target = cmd_args[i + 1].to_lowercase();
+                        let blocked_by_name = BLOCKED_TERMINAL_APPS
+                            .iter()
+                            .any(|b| target == *b || target.contains(b));
+                        let blocked_by_bundle =
+                            BLOCKED_TERMINAL_BUNDLES.iter().any(|b| target == *b);
+                        if blocked_by_name || blocked_by_bundle {
+                            return serde_json::json!({
+                                "success": false,
+                                "error": "Cannot open terminal apps via run_shell_command for safety. Ask the user to open it manually.",
+                            });
+                        }
+                    }
+                    i += 1;
                 }
             }
 

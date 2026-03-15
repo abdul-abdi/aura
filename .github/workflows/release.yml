@@ -50,9 +50,7 @@ jobs:
       - name: Build Rust daemon (release)
         env:
           AURA_PROD_PROXY_URL: ${{ secrets.AURA_PROD_PROXY_URL }}
-          AURA_PROD_PROXY_AUTH_TOKEN: ${{ secrets.AURA_PROD_PROXY_AUTH_TOKEN }}
           AURA_PROD_CLOUD_RUN_URL: ${{ secrets.AURA_PROD_CLOUD_RUN_URL }}
-          AURA_PROD_CLOUD_RUN_AUTH_TOKEN: ${{ secrets.AURA_PROD_CLOUD_RUN_AUTH_TOKEN }}
         run: cargo build --release --locked -p aura-daemon
 
       - name: Bundle Aura.app

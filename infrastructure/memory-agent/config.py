@@ -11,6 +11,9 @@ QUERY_MODEL: str = os.getenv("QUERY_MODEL", "gemini-3.1-flash-lite-preview")
 # Auth
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 AUTH_TOKEN: str = os.environ.get("AURA_AUTH_TOKEN", "")
+LEGACY_AUTH_ENABLED: bool = (
+    os.environ.get("LEGACY_AUTH_ENABLED", "true").lower() == "true"
+)
 
 # GCP
 GCP_PROJECT_ID: str = os.environ.get("GCP_PROJECT_ID", "")
