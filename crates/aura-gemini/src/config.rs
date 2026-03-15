@@ -417,15 +417,20 @@ fn read_config_value_from_path(path: &std::path::Path, key: &str) -> Option<Stri
     table.get(key)?.as_str().map(String::from)
 }
 
-/// Read the per-device token from the macOS Keychain.
-/// Service: `com.aura.desktop`, account: `device_token`.
-/// Returns `None` if the entry does not exist or is not valid UTF-8.
+/// Read the per-device token from the macOS Keychain via the `security` CLI.
+/// Uses `security find-generic-password` which reads from the data protection
+/// keychain without per-app ACL prompts.
 fn read_keychain_token() -> Option<String> {
-    use security_framework::passwords::get_generic_password;
-    match get_generic_password("com.aura.desktop", "device_token") {
-        Ok(bytes) => String::from_utf8(bytes.to_vec()).ok(),
-        Err(_) => None,
+    let output = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", "com.aura.desktop", "-a", "device_token", "-w"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
+    let token = String::from_utf8(output.stdout).ok()?;
+    let token = token.trim();
+    if token.is_empty() { None } else { Some(token.to_string()) }
 }
 
 #[cfg(test)]

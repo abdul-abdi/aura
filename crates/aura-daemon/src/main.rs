@@ -28,6 +28,27 @@ use orchestrator::SessionMode;
 const EVENT_BUS_CAPACITY: usize = 256;
 const IPC_BROADCAST_CAPACITY: usize = 256;
 
+/// Save device token to the macOS Keychain via the `security` CLI.
+/// Uses `security add-generic-password` with `-U` (update if exists)
+/// which writes to the data protection keychain without ACL issues.
+fn save_keychain_token(token: &str) -> Result<(), String> {
+    let status = std::process::Command::new("security")
+        .args([
+            "add-generic-password",
+            "-s", "com.aura.desktop",
+            "-a", "device_token",
+            "-w", token,
+            "-U", // Update if exists
+        ])
+        .status()
+        .map_err(|e| format!("Failed to run security command: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("security add-generic-password failed with {status}"))
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "aura", about = "Voice-first AI desktop companion")]
 struct Cli {
@@ -158,9 +179,7 @@ fn main() -> Result<()> {
                     }
                 };
                 if let Some(token) = json.get("device_token").and_then(|v| v.as_str()) {
-                    use security_framework::passwords::set_generic_password;
-                    match set_generic_password("com.aura.desktop", "device_token", token.as_bytes())
-                    {
+                    match save_keychain_token(token) {
                         Ok(_) => {
                             tracing::info!("Device registered and token stored in Keychain")
                         }
