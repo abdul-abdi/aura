@@ -154,8 +154,7 @@ async fn check_auth_dual(
 
     // Try legacy auth first (if enabled and a token was provided).
     if state.legacy_auth_enabled
-        && let (Some(provided), Some(expected)) =
-            (legacy_token, state.legacy_auth_token.as_deref())
+        && let (Some(provided), Some(expected)) = (legacy_token, state.legacy_auth_token.as_deref())
         && check_auth(Some(provided), expected)
     {
         return true;
@@ -173,7 +172,9 @@ async fn check_auth_dual(
 fn validate_device_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -282,9 +283,11 @@ async fn register_handler(
         .await
     {
         Ok(device_token) => Json(RegisterResponse { device_token }).into_response(),
-        Err(firestore::RegisterError::KeyMismatch) => {
-            (StatusCode::FORBIDDEN, "Gemini key mismatch for existing device").into_response()
-        }
+        Err(firestore::RegisterError::KeyMismatch) => (
+            StatusCode::FORBIDDEN,
+            "Gemini key mismatch for existing device",
+        )
+            .into_response(),
         Err(firestore::RegisterError::BackendError(msg)) => {
             tracing::error!(device_id = %req.device_id, error = %msg, "device store backend error");
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
@@ -324,9 +327,7 @@ pub async fn run_server(port: u16) -> Result<()> {
     }
 
     // Prevent disabling Gemini key validation in production (when GCP is configured).
-    if std::env::var("SKIP_GEMINI_VALIDATION").is_ok()
-        && std::env::var("GCP_PROJECT_ID").is_ok()
-    {
+    if std::env::var("SKIP_GEMINI_VALIDATION").is_ok() && std::env::var("GCP_PROJECT_ID").is_ok() {
         panic!(
             "FATAL: SKIP_GEMINI_VALIDATION must not be set when GCP_PROJECT_ID is configured (production)"
         );

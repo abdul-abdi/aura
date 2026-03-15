@@ -107,9 +107,7 @@ fn main() -> Result<()> {
     {
         let api_key = gemini_config.api_key.clone();
         let device_id = gemini_config.device_id.clone().unwrap();
-        let proxy_base = proxy_url
-            .replace("/ws", "")
-            .replace("wss://", "https://");
+        let proxy_base = proxy_url.replace("/ws", "").replace("wss://", "https://");
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -149,10 +147,7 @@ fn main() -> Result<()> {
                     }
                 };
                 if !resp.status().is_success() {
-                    tracing::warn!(
-                        "Background registration returned {}",
-                        resp.status()
-                    );
+                    tracing::warn!("Background registration returned {}", resp.status());
                     return;
                 }
                 let json: serde_json::Value = match resp.json().await {
@@ -164,20 +159,13 @@ fn main() -> Result<()> {
                 };
                 if let Some(token) = json.get("device_token").and_then(|v| v.as_str()) {
                     use security_framework::passwords::set_generic_password;
-                    match set_generic_password(
-                        "com.aura.desktop",
-                        "device_token",
-                        token.as_bytes(),
-                    ) {
+                    match set_generic_password("com.aura.desktop", "device_token", token.as_bytes())
+                    {
                         Ok(_) => {
-                            tracing::info!(
-                                "Device registered and token stored in Keychain"
-                            )
+                            tracing::info!("Device registered and token stored in Keychain")
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "Failed to store device token in Keychain: {e}"
-                            )
+                            tracing::warn!("Failed to store device token in Keychain: {e}")
                         }
                     }
                 }

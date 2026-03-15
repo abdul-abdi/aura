@@ -10,7 +10,7 @@ import uuid
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
@@ -221,7 +221,6 @@ async def ingest(
     await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
-
         # Filter to user / tool-call messages only
         relevant_roles = {"user", "tool_call"}
         filtered = [m for m in body.messages if m.role.lower() in relevant_roles]

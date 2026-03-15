@@ -461,7 +461,11 @@ async fn test_ws_auth_with_device_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(auth_resp.status(), 200, "valid device token should be accepted");
+    assert_eq!(
+        auth_resp.status(),
+        200,
+        "valid device token should be accepted"
+    );
 
     // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
     unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
@@ -495,7 +499,11 @@ async fn test_ws_auth_rejects_invalid_device_token() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "invalid device token should be rejected");
+    assert_eq!(
+        resp.status(),
+        401,
+        "invalid device token should be rejected"
+    );
 
     // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
     unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };

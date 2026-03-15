@@ -104,8 +104,7 @@ impl FirestoreBackend {
 
     /// Fetch the GCP service account access token from the metadata server.
     async fn get_access_token(&self) -> Result<String, String> {
-        const METADATA_URL: &str =
-            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+        const METADATA_URL: &str = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
         let response = self
             .client
