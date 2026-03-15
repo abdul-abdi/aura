@@ -326,7 +326,9 @@ async fn connection_loop(
                     }
                     DisconnectReason::Rotate => {
                         // Proactive rotation — keep resumption handle for seamless resume.
-                        tracing::info!("Session rotation: reconnecting to prevent latency degradation");
+                        tracing::info!(
+                            "Session rotation: reconnecting to prevent latency degradation"
+                        );
                         attempt = 0;
                         continue;
                     }
@@ -599,7 +601,8 @@ async fn connect_and_stream_inner(
 
     // Proactive session rotation timer — prevents latency degradation
     // that occurs in long-lived Gemini audio sessions.
-    let rotation_deadline = tokio::time::Instant::now() + Duration::from_secs(SESSION_ROTATION_SECS);
+    let rotation_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(SESSION_ROTATION_SECS);
 
     loop {
         tokio::select! {

@@ -424,7 +424,14 @@ fn read_config_value_from_path(path: &std::path::Path, key: &str) -> Option<Stri
 /// keychain without per-app ACL prompts.
 fn read_keychain_token() -> Option<String> {
     let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", "com.aura.desktop", "-a", "device_token", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "com.aura.desktop",
+            "-a",
+            "device_token",
+            "-w",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -432,7 +439,11 @@ fn read_keychain_token() -> Option<String> {
     }
     let token = String::from_utf8(output.stdout).ok()?;
     let token = token.trim();
-    if token.is_empty() { None } else { Some(token.to_string()) }
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
 }
 
 #[cfg(test)]

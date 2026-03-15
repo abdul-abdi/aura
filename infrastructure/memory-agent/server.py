@@ -42,9 +42,15 @@ _semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 # One runner per agent, with shared session service
 _session_service = InMemorySessionService()
 _APP_NAME = "aura-memory-agent"
-_ingest_runner = Runner(agent=ingest_agent, app_name=_APP_NAME, session_service=_session_service)
-_consolidate_runner = Runner(agent=consolidate_agent, app_name=_APP_NAME, session_service=_session_service)
-_query_runner = Runner(agent=query_agent, app_name=_APP_NAME, session_service=_session_service)
+_ingest_runner = Runner(
+    agent=ingest_agent, app_name=_APP_NAME, session_service=_session_service
+)
+_consolidate_runner = Runner(
+    agent=consolidate_agent, app_name=_APP_NAME, session_service=_session_service
+)
+_query_runner = Runner(
+    agent=query_agent, app_name=_APP_NAME, session_service=_session_service
+)
 
 # ---------------------------------------------------------------------------
 # Device token cache
