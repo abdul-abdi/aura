@@ -41,8 +41,9 @@ RUN set -e; \
     printf '' > crates/aura-daemon/src/lib.rs; \
     printf 'fn main() {}' > crates/aura-daemon/src/main.rs; \
     mkdir -p crates/aura-proxy/src; \
-    printf 'pub mod relay;\n' > crates/aura-proxy/src/lib.rs; \
+    printf 'pub mod relay;\npub mod firestore;\n' > crates/aura-proxy/src/lib.rs; \
     printf '' > crates/aura-proxy/src/relay.rs; \
+    printf '' > crates/aura-proxy/src/firestore.rs; \
     printf 'fn main() {}\n' > crates/aura-proxy/src/main.rs
 
 # Build dependencies only — cached until Cargo.toml/Cargo.lock changes.
@@ -65,7 +66,7 @@ RUN cargo build --release --locked -p aura-proxy
 # ════════════════════════════════════════════════════════════════════════════════
 # Stage 2 — Runtime
 # ════════════════════════════════════════════════════════════════════════════════
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # ca-certificates is required for TLS connections to Gemini (wss://).
 # curl is needed for the HEALTHCHECK (must be installed before switching user).
