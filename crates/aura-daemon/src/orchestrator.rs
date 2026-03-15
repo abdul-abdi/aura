@@ -447,18 +447,22 @@ pub(crate) async fn run_daemon(
         }
     });
 
-    // Run until either processor exits, Ctrl+C, or IPC shutdown
+    // Run until either processor exits, Ctrl+C, or IPC shutdown.
+    // We need processor_handle after the select to await graceful shutdown,
+    // so track whether the processor already finished naturally.
     let ipc_session = Arc::clone(&session);
     let ipc_bus = bus.clone();
-    let ipc_cancel = cancel.clone();
+    let _ipc_cancel = cancel.clone();
+    let mut processor_done = false;
+    let mut processor_handle = processor_handle;
     tokio::select! {
-        _ = processor_handle => {
+        _ = &mut processor_handle => {
             tracing::info!("Processor finished, ending session");
+            processor_done = true;
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Ctrl+C received, shutting down");
             bus.send(AuraEvent::Shutdown);
-            cancel.cancel();
         }
         _ = async {
             while let Some(cmd) = ipc_cmd_rx.recv().await {
@@ -466,7 +470,6 @@ pub(crate) async fn run_daemon(
                     UICommand::Shutdown => {
                         tracing::info!("Shutdown requested via IPC");
                         ipc_bus.send(AuraEvent::Shutdown);
-                        ipc_cancel.cancel();
                     }
                     UICommand::SendText { text } => {
                         tracing::info!(len = text.len(), "Text input via IPC");
@@ -488,11 +491,21 @@ pub(crate) async fn run_daemon(
         }
     }
 
-    // Shutdown
+    // Graceful shutdown: disconnect the WebSocket, which triggers the
+    // Disconnected event in the processor. The processor then runs
+    // end-of-session consolidation + memory agent ingest before exiting.
     let _ = ipc_tx.send(DaemonEvent::Shutdown);
     cancel.cancel();
     mic_shutdown.store(true, Ordering::Release);
     session.disconnect();
+
+    if !processor_done {
+        tracing::info!("Waiting for processor to finish end-of-session consolidation...");
+        match tokio::time::timeout(Duration::from_secs(15), processor_handle).await {
+            Ok(_) => tracing::info!("Processor finished gracefully"),
+            Err(_) => tracing::warn!("Processor timed out after 15s, exiting anyway"),
+        }
+    }
 
     Ok(())
 }

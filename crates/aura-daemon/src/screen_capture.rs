@@ -100,7 +100,7 @@ pub(crate) fn spawn_screen_capture(
 
             // Check for censorship periodically (not every frame — it's expensive).
             // Decodes base64→JPEG→pixels. Check first 3 frames then every 20th.
-            if (frame_count <= 3 || frame_count % 20 == 0)
+            if (frame_count <= 3 || frame_count.is_multiple_of(20))
                 && let Ok(jpeg_bytes) = base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &frame.jpeg_base64,
