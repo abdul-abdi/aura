@@ -1,3 +1,4 @@
+pub mod firestore;
 pub mod relay;
 
 use std::collections::HashMap;

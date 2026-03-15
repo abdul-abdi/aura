@@ -18,11 +18,15 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 subtle = "2"
 sha2 = "0.10"
+chrono = "0.4"
+rand = "0.9"
+hex = "0.4"
+async-trait = "0.1"
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json"] }

@@ -1,3 +1,4 @@
+use aura_proxy::firestore::DeviceStore;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -256,4 +257,92 @@ async fn test_auth_via_headers_wrong_token_rejected() {
     // SAFETY: Serialized by ENV_MUTEX.
     unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
     handle.abort();
+}
+
+// ── DeviceStore unit tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_device_store_register_and_validate() {
+    let store = DeviceStore::new_in_memory();
+    let gemini_key_hash =
+        "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab".to_string();
+
+    let token = store
+        .register_device("device-001", gemini_key_hash.clone())
+        .await
+        .expect("registration should succeed");
+
+    // Correct token should validate
+    assert!(
+        store.validate_token("device-001", &token).await,
+        "correct token should be valid"
+    );
+
+    // Wrong token should fail
+    assert!(
+        !store.validate_token("device-001", "wrong-token").await,
+        "wrong token should be invalid"
+    );
+
+    // Unknown device should fail
+    assert!(
+        !store.validate_token("unknown-device", &token).await,
+        "unknown device should be invalid"
+    );
+}
+
+#[tokio::test]
+async fn test_device_store_reregister_key_mismatch() {
+    use aura_proxy::firestore::RegisterError;
+
+    let store = DeviceStore::new_in_memory();
+    let gemini_key_hash_a =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    let gemini_key_hash_b =
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+
+    store
+        .register_device("device-002", gemini_key_hash_a)
+        .await
+        .expect("first registration should succeed");
+
+    let err = store
+        .register_device("device-002", gemini_key_hash_b)
+        .await
+        .expect_err("re-registration with different key should fail");
+
+    assert!(
+        matches!(err, RegisterError::KeyMismatch),
+        "expected KeyMismatch, got {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_device_store_reregister_same_key_invalidates_old() {
+    let store = DeviceStore::new_in_memory();
+    let gemini_key_hash =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
+
+    let old_token = store
+        .register_device("device-003", gemini_key_hash.clone())
+        .await
+        .expect("first registration should succeed");
+
+    let new_token = store
+        .register_device("device-003", gemini_key_hash)
+        .await
+        .expect("re-registration with same key should succeed");
+
+    // New token should work
+    assert!(
+        store.validate_token("device-003", &new_token).await,
+        "new token should be valid"
+    );
+
+    // Old token should be invalid
+    assert!(
+        !store.validate_token("device-003", &old_token).await,
+        "old token should be invalidated after re-registration"
+    );
 }
