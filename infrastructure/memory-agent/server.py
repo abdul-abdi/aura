@@ -208,18 +208,19 @@ async def ingest(
     body: IngestRequest,
     request: Request,
 ) -> dict[str, Any]:
+    try:
+        validate_id(body.device_id, "device_id")
+        validate_id(body.session_id, "session_id")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "error": str(exc), "code": 400},
+        )
+
     token = _extract_bearer_token(request)
     await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
-        try:
-            validate_id(body.device_id, "device_id")
-            validate_id(body.session_id, "session_id")
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={"status": "error", "error": str(exc), "code": 400},
-            )
 
         # Filter to user / tool-call messages only
         relevant_roles = {"user", "tool_call"}
@@ -279,18 +280,18 @@ async def query(
     body: QueryRequest,
     request: Request,
 ) -> dict[str, Any]:
+    try:
+        validate_id(body.device_id, "device_id")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "error": str(exc), "code": 400},
+        )
+
     token = _extract_bearer_token(request)
     await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
-        try:
-            validate_id(body.device_id, "device_id")
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={"status": "error", "error": str(exc), "code": 400},
-            )
-
         prompt = f"Device: {body.device_id}\n\nContext:\n{body.context}"
 
         try:
@@ -310,18 +311,18 @@ async def consolidate(
     body: ConsolidateRequest,
     request: Request,
 ) -> dict[str, Any]:
+    try:
+        validate_id(body.device_id, "device_id")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"status": "error", "error": str(exc), "code": 400},
+        )
+
     token = _extract_bearer_token(request)
     await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
-        try:
-            validate_id(body.device_id, "device_id")
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail={"status": "error", "error": str(exc), "code": 400},
-            )
-
         prompt = f"Consolidate memories for device: {body.device_id}"
 
         try:

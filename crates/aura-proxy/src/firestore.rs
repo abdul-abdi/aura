@@ -411,7 +411,7 @@ impl DeviceStore {
                 // Re-read to avoid clobbering concurrent writes.
                 if let Some(current) = backend.get_device(&device_id_owned).await {
                     // Only update if the token hash still matches (no rotation race).
-                    if current.token_hash == updated.token_hash {
+                    if constant_time_eq_str(&current.token_hash, &updated.token_hash) {
                         updated.last_seen = chrono::Utc::now().to_rfc3339();
                         backend.set_device(&device_id_owned, updated).await;
                     }

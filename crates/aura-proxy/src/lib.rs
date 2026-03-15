@@ -145,6 +145,13 @@ async fn check_auth_dual(
     device_id: Option<&str>,
     device_token: Option<&str>,
 ) -> bool {
+    // Validate device_id format before any backend lookup.
+    if let Some(did) = device_id
+        && !validate_device_id(did)
+    {
+        return false;
+    }
+
     // Try legacy auth first (if enabled and a token was provided).
     if state.legacy_auth_enabled
         && let (Some(provided), Some(expected)) =
@@ -253,21 +260,15 @@ async fn register_handler(
         .unwrap_or(false);
 
     if !skip_validation {
-        let validation_url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
-            req.gemini_api_key
-        );
-        let client = reqwest::Client::new();
-        match client.get(&validation_url).send().await {
-            Ok(resp) if resp.status().is_success() => {} // key is valid
-            Ok(_) => {
-                return (StatusCode::UNAUTHORIZED, "Invalid Gemini API key").into_response();
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Gemini key validation request failed");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Key validation failed")
-                    .into_response();
-            }
+        let key_valid = reqwest::Client::new()
+            .get("https://generativelanguage.googleapis.com/v1beta/models")
+            .header("x-goog-api-key", &req.gemini_api_key)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if !key_valid {
+            return (StatusCode::UNAUTHORIZED, "Invalid Gemini API key").into_response();
         }
     }
 
@@ -315,11 +316,19 @@ pub async fn run_server(port: u16) -> Result<()> {
     };
 
     // Require at least one auth mechanism.
-    if legacy_auth_enabled && legacy_auth_token.is_none() && std::env::var("GCP_PROJECT_ID").is_err()
-    {
+    if legacy_auth_token.is_none() && std::env::var("GCP_PROJECT_ID").is_err() {
         panic!(
             "FATAL: Neither AURA_PROXY_AUTH_TOKEN nor GCP_PROJECT_ID is set. \
-             Refusing to start without an authentication mechanism."
+             At least one auth mechanism must be configured."
+        );
+    }
+
+    // Prevent disabling Gemini key validation in production (when GCP is configured).
+    if std::env::var("SKIP_GEMINI_VALIDATION").is_ok()
+        && std::env::var("GCP_PROJECT_ID").is_ok()
+    {
+        panic!(
+            "FATAL: SKIP_GEMINI_VALIDATION must not be set when GCP_PROJECT_ID is configured (production)"
         );
     }
 

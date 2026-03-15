@@ -105,75 +105,84 @@ fn main() -> Result<()> {
         && gemini_config.device_token.is_none()
         && let Some(ref proxy_url) = gemini_config.proxy_url
     {
-            let api_key = gemini_config.api_key.clone();
-            let device_id = gemini_config.device_id.clone().unwrap();
-            let proxy_base = proxy_url
-                .replace("/ws", "")
-                .replace("wss://", "https://");
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.spawn(async move {
-                    tracing::info!("Device token missing, attempting background registration");
-                    let client = match reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(10))
-                        .build()
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!("Background registration: failed to build client: {e}");
-                            return;
-                        }
-                    };
-                    let resp = match client
-                        .post(format!("{proxy_base}/register"))
-                        .json(&serde_json::json!({
-                            "device_id": device_id,
-                            "gemini_api_key": api_key,
-                        }))
-                        .send()
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            tracing::warn!("Background registration failed: {e}");
-                            return;
-                        }
-                    };
-                    if !resp.status().is_success() {
-                        tracing::warn!(
-                            "Background registration returned {}",
-                            resp.status()
-                        );
+        let api_key = gemini_config.api_key.clone();
+        let device_id = gemini_config.device_id.clone().unwrap();
+        let proxy_base = proxy_url
+            .replace("/ws", "")
+            .replace("wss://", "https://");
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!("Background registration: failed to build runtime: {e}");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                tracing::info!("Device token missing, attempting background registration");
+                let client = match reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Background registration: failed to build client: {e}");
                         return;
                     }
-                    let json: serde_json::Value = match resp.json().await {
-                        Ok(j) => j,
-                        Err(e) => {
-                            tracing::warn!("Background registration bad response: {e}");
-                            return;
+                };
+                let resp = match client
+                    .post(format!("{proxy_base}/register"))
+                    .json(&serde_json::json!({
+                        "device_id": device_id,
+                        "gemini_api_key": api_key,
+                    }))
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("Background registration failed: {e}");
+                        return;
+                    }
+                };
+                if !resp.status().is_success() {
+                    tracing::warn!(
+                        "Background registration returned {}",
+                        resp.status()
+                    );
+                    return;
+                }
+                let json: serde_json::Value = match resp.json().await {
+                    Ok(j) => j,
+                    Err(e) => {
+                        tracing::warn!("Background registration bad response: {e}");
+                        return;
+                    }
+                };
+                if let Some(token) = json.get("device_token").and_then(|v| v.as_str()) {
+                    use security_framework::passwords::set_generic_password;
+                    match set_generic_password(
+                        "com.aura.desktop",
+                        "device_token",
+                        token.as_bytes(),
+                    ) {
+                        Ok(_) => {
+                            tracing::info!(
+                                "Device registered and token stored in Keychain"
+                            )
                         }
-                    };
-                    if let Some(token) = json.get("device_token").and_then(|v| v.as_str()) {
-                        use security_framework::passwords::set_generic_password;
-                        match set_generic_password(
-                            "com.aura.desktop",
-                            "device_token",
-                            token.as_bytes(),
-                        ) {
-                            Ok(_) => {
-                                tracing::info!(
-                                    "Device registered and token stored in Keychain"
-                                )
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to store device token in Keychain: {e}"
-                                )
-                            }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to store device token in Keychain: {e}"
+                            )
                         }
                     }
-                });
+                }
             });
+        });
     }
 
     // First-run setup

@@ -26,3 +26,21 @@ firebase-debug.log
 
 # Remotion promo video project (only the rendered output is committed)
 promo/
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+
+# Swift
+.swiftpm/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDEs
+.idea/
+.vscode/

@@ -171,6 +171,17 @@ async fn consolidate(
         )
     })?;
 
+    // Validate device_id and session_id to prevent Firestore path traversal
+    // before the device_id is used in any backend lookup.
+    validate_device_id(&req.device_id).map_err(|e| {
+        warn!("consolidate: invalid device_id: {e}");
+        (StatusCode::BAD_REQUEST, format!("Invalid device_id: {e}"))
+    })?;
+    validate_document_id(&req.session_id).map_err(|e| {
+        warn!("consolidate: invalid session_id: {e}");
+        (StatusCode::BAD_REQUEST, format!("Invalid session_id: {e}"))
+    })?;
+
     // Auth check — try legacy shared token first, then device token via Firestore.
     let bearer_token = extract_bearer(&headers).unwrap_or_default();
 
@@ -191,16 +202,6 @@ async fn consolidate(
         warn!("consolidate: unauthorized request");
         return Err((StatusCode::UNAUTHORIZED, "Unauthorized".into()));
     }
-
-    // Validate device_id and session_id to prevent Firestore path traversal.
-    validate_device_id(&req.device_id).map_err(|e| {
-        warn!("consolidate: invalid device_id: {e}");
-        (StatusCode::BAD_REQUEST, format!("Invalid device_id: {e}"))
-    })?;
-    validate_document_id(&req.session_id).map_err(|e| {
-        warn!("consolidate: invalid session_id: {e}");
-        (StatusCode::BAD_REQUEST, format!("Invalid session_id: {e}"))
-    })?;
 
     info!(
         "consolidate: device={} session={} messages={}",

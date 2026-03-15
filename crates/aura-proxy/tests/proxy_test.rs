@@ -429,7 +429,8 @@ async fn test_ws_auth_with_device_token() {
     let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
     // No legacy token — device auth only.
-    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    // Set a dummy auth token solely to satisfy the startup guard (legacy auth is disabled below).
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "dummy-for-startup-guard") };
     unsafe { std::env::set_var("LEGACY_AUTH_ENABLED", "false") };
     unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
 
@@ -463,6 +464,7 @@ async fn test_ws_auth_with_device_token() {
     assert_eq!(auth_resp.status(), 200, "valid device token should be accepted");
 
     // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
     unsafe { std::env::remove_var("LEGACY_AUTH_ENABLED") };
     unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
     handle.abort();
@@ -475,7 +477,8 @@ async fn test_ws_auth_rejects_invalid_device_token() {
     let _guard = REGISTER_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
-    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    // Set a dummy auth token solely to satisfy the startup guard (legacy auth is disabled below).
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "dummy-for-startup-guard") };
     unsafe { std::env::set_var("LEGACY_AUTH_ENABLED", "false") };
     unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
 
@@ -495,6 +498,7 @@ async fn test_ws_auth_rejects_invalid_device_token() {
     assert_eq!(resp.status(), 401, "invalid device token should be rejected");
 
     // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
     unsafe { std::env::remove_var("LEGACY_AUTH_ENABLED") };
     unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
     handle.abort();
