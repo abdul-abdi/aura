@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "release" to confirm'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -14,6 +20,7 @@ jobs:
     name: Build and Release
     runs-on: macos-15
     timeout-minutes: 45
+    if: github.event_name == 'push' || github.event.inputs.confirm == 'release'
 
     steps:
       - name: Checkout
@@ -21,24 +28,46 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract version from tag
+      - name: Determine version
         id: version
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          if [[ -z "$TAG" ]]; then
-            echo "::error::Could not extract version from tag"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Triggered by tag push — extract version from tag
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            # Triggered manually — read version from Cargo.toml
+            VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+          fi
+          if [[ -z "$VERSION" ]]; then
+            echo "::error::Could not determine version"
             exit 1
           fi
-          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "### Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify Cargo.toml matches tag
+      - name: Verify Cargo.toml matches version
         run: |
           CARGO_VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
           TAG_VERSION="${{ steps.version.outputs.version }}"
           if [[ "$CARGO_VERSION" != "$TAG_VERSION" ]]; then
-            echo "::error::Cargo.toml version ($CARGO_VERSION) does not match tag (v$TAG_VERSION). Update Cargo.toml first."
+            echo "::error::Cargo.toml version ($CARGO_VERSION) does not match release version (v$TAG_VERSION). Update Cargo.toml first."
             exit 1
           fi
+
+      - name: Check tag does not already exist
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if git tag -l "v${VERSION}" | grep -q .; then
+            echo "::error::Tag v${VERSION} already exists. Bump the version in Cargo.toml."
+            exit 1
+          fi
+
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -117,7 +146,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'deploy-cloud.yml',
-              ref: context.ref,
+              ref: 'prod',
               inputs: {
                 service: 'all',
                 environment: 'production'
