@@ -238,7 +238,7 @@ The device token for Cloud Run proxy authentication is stored in the **macOS log
 └───────────────────────────────────────────────────────────────────────────┘
        │                                                        │
        ▼                                                        ▼
-┌─ GOOGLE CLOUD (optional) ─────────────────────────────────────────────────┐
+┌─ GOOGLE CLOUD ────────────────────────────────────────────────────────────┐
 │  aura-proxy (Cloud Run)     memory-agent (Cloud Run)     Firestore       │
 │  WebSocket relay            Gemini-powered session       facts & sessions│
 │  per-device auth            consolidation via ADK        per device      │
