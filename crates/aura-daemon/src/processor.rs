@@ -799,7 +799,15 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             args.get("y").and_then(|v| v.as_f64()),
                                         )
                                     {
-                                        let offsets = tools::spiral_offsets(tools::SPIRAL_RADIUS);
+                                        // Bug 7: Scale spiral radius from logical pixels to image pixels
+                                        // so offsets produce ~40 logical-pixel steps after to_logical conversion
+                                        let img_scale = if tool_dims.logical_w > 0 {
+                                            tool_dims.img_w as f64 / tool_dims.logical_w as f64
+                                        } else {
+                                            1.0
+                                        };
+                                        let scaled_radius = (tools::SPIRAL_RADIUS as f64 * img_scale).round() as i32;
+                                        let offsets = tools::spiral_offsets(scaled_radius);
                                         // Skip offset[0] (0,0) — that's the original click we already tried
                                         for (i, &(dx, dy)) in offsets.iter().skip(1).take(tools::MAX_CLICK_RETRIES).enumerate() {
                                             let retry_x = orig_x + dx as f64;
