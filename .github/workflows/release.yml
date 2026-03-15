@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - prod
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -20,6 +20,25 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          if [[ -z "$TAG" ]]; then
+            echo "::error::Could not extract version from tag"
+            exit 1
+          fi
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Cargo.toml matches tag
+        run: |
+          CARGO_VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [[ "$CARGO_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::Cargo.toml version ($CARGO_VERSION) does not match tag (v$TAG_VERSION). Update Cargo.toml first."
+            exit 1
+          fi
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -56,24 +75,6 @@ jobs:
       - name: Bundle Aura.app
         run: bash scripts/bundle.sh --strict
 
-      - name: Extract version
-        id: version
-        run: |
-          VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
-          if [[ -z "$VERSION" ]]; then
-            echo "::error::Could not extract version from Cargo.toml"
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Check for duplicate release tag
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          if git tag -l "v${VERSION}" | grep -q .; then
-            echo "::error::Tag v${VERSION} already exists. Bump the version in Cargo.toml before releasing."
-            exit 1
-          fi
-
       - name: Create DMG
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -106,7 +107,7 @@ jobs:
           body_path: /tmp/release-notes.md
           files: target/release/Aura-${{ steps.version.outputs.version }}.dmg
 
-      # After GitHub Release creation, trigger cloud deploy
+      # After GitHub Release creation, trigger cloud deploy to production
       - name: Deploy cloud services
         if: success()
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -116,7 +117,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'deploy-cloud.yml',
-              ref: 'prod',
+              ref: context.ref,
               inputs: {
                 service: 'all',
                 environment: 'production'
