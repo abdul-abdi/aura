@@ -1,4 +1,4 @@
-name: Auto Tag
+name: Auto Tag & Release
 
 on:
   push:
@@ -6,10 +6,11 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
-  tag:
-    name: Create version tag
+  tag-and-release:
+    name: Create version tag and trigger release
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -18,16 +19,34 @@ jobs:
           fetch-depth: 0
 
       - name: Read version and create tag if missing
+        id: tag
         run: |
           VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
           TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "Tag $TAG already exists, skipping"
+            echo "created=false" >> "$GITHUB_OUTPUT"
             echo "### Tag $TAG already exists — no release needed" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Creating tag $TAG"
             git tag "$TAG"
             git push origin "$TAG"
-            echo "### Created tag $TAG — release workflow will trigger" >> "$GITHUB_STEP_SUMMARY"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+            echo "### Created tag $TAG — triggering release" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Trigger release workflow
+        if: steps.tag.outputs.created == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'release.yml',
+              ref: 'prod',
+              inputs: { confirm: 'release' }
+            });
