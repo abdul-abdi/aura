@@ -5,26 +5,33 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 import uuid
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 from pydantic import BaseModel
 
+import config
 from agent import consolidate_agent, ingest_agent, query_agent
-from config import AUTH_TOKEN, MAX_BODY_BYTES, MAX_CONCURRENT_REQUESTS, validate_id
+from config import MAX_BODY_BYTES, MAX_CONCURRENT_REQUESTS, validate_id
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Aura Memory Agent")
 
 # Validate required config at import time (tests set env vars before import)
-if not AUTH_TOKEN:
+if not config.LEGACY_AUTH_ENABLED and not config.GCP_PROJECT_ID:
     raise RuntimeError(
-        "AURA_AUTH_TOKEN environment variable must be set. "
+        "Either LEGACY_AUTH_ENABLED with AURA_AUTH_TOKEN or GCP_PROJECT_ID must be configured"
+    )
+if config.LEGACY_AUTH_ENABLED and not config.AUTH_TOKEN:
+    raise RuntimeError(
+        "AURA_AUTH_TOKEN environment variable must be set when LEGACY_AUTH_ENABLED is true. "
         "The memory agent refuses to start without authentication configured."
     )
 
@@ -35,6 +42,13 @@ _semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 _ingest_runner = InMemoryRunner(agent=ingest_agent)
 _consolidate_runner = InMemoryRunner(agent=consolidate_agent)
 _query_runner = InMemoryRunner(agent=query_agent)
+
+# ---------------------------------------------------------------------------
+# Device token cache
+# ---------------------------------------------------------------------------
+
+_device_cache: dict[str, tuple[str, float]] = {}  # device_id -> (token_hash, timestamp)
+CACHE_TTL = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -80,13 +94,14 @@ async def check_body_size(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
-# Auth helper
+# Auth helpers
 # ---------------------------------------------------------------------------
 
 
-def _check_auth(authorization: str | None) -> None:
-    """Constant-time Bearer token check. Raises 401 on failure."""
-    if not authorization or not authorization.startswith("Bearer "):
+def _extract_bearer_token(request: Request) -> str:
+    """Extract Bearer token from Authorization header. Raises 401 if missing."""
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
             detail={
@@ -95,15 +110,67 @@ def _check_auth(authorization: str | None) -> None:
                 "code": 401,
             },
         )
-    token = authorization.removeprefix("Bearer ")
-    # Constant-time comparison via SHA-256 digests
-    expected_digest = hashlib.sha256(AUTH_TOKEN.encode()).digest()
-    actual_digest = hashlib.sha256(token.encode()).digest()
-    if not hmac.compare_digest(expected_digest, actual_digest):
-        raise HTTPException(
-            status_code=401,
-            detail={"status": "error", "error": "Invalid token", "code": 401},
+    return auth[7:]
+
+
+async def _validate_device_token(device_id: str, token: str) -> bool:
+    """Validate device token against Firestore devices collection."""
+    now = time.time()
+
+    # Check cache
+    if device_id in _device_cache:
+        cached_hash, cached_at = _device_cache[device_id]
+        if now - cached_at < CACHE_TTL:
+            provided_hash = hashlib.sha256(token.encode()).hexdigest()
+            return hmac.compare_digest(provided_hash, cached_hash)
+
+    # Cache miss — read from Firestore using ADC
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        credentials, _ = google.auth.default()
+        credentials.refresh(google.auth.transport.requests.Request())
+
+        url = (
+            f"https://firestore.googleapis.com/v1/projects/{config.GCP_PROJECT_ID}"
+            f"/databases/(default)/documents/devices/{device_id}"
         )
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {credentials.token}"},
+                timeout=5.0,
+            )
+        if resp.status_code != 200:
+            return False
+        fields = resp.json().get("fields", {})
+        stored_hash = fields.get("token_hash", {}).get("stringValue", "")
+        _device_cache[device_id] = (stored_hash, now)
+        provided_hash = hashlib.sha256(token.encode()).hexdigest()
+        return hmac.compare_digest(provided_hash, stored_hash)
+    except Exception as e:
+        logger.error(f"Device token validation failed: {e}")
+        return False
+
+
+async def _check_auth_with_device(token: str, device_id: str) -> None:
+    """Validate token. Tries legacy first, then device token via Firestore. Raises 401 on failure."""
+    # Legacy check
+    if config.LEGACY_AUTH_ENABLED and config.AUTH_TOKEN:
+        provided = hashlib.sha256(token.encode()).hexdigest()
+        expected = hashlib.sha256(config.AUTH_TOKEN.encode()).hexdigest()
+        if hmac.compare_digest(provided, expected):
+            return  # Legacy auth passed
+
+    # Device token check via Firestore
+    if await _validate_device_token(device_id, token):
+        return
+
+    raise HTTPException(
+        status_code=401,
+        detail={"status": "error", "error": "Invalid token", "code": 401},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +206,10 @@ async def health() -> dict[str, str]:
 @app.post("/ingest")
 async def ingest(
     body: IngestRequest,
-    authorization: str | None = Header(default=None),
+    request: Request,
 ) -> dict[str, Any]:
-    _check_auth(authorization)
+    token = _extract_bearer_token(request)
+    await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
         try:
@@ -209,9 +277,10 @@ async def ingest(
 @app.post("/query")
 async def query(
     body: QueryRequest,
-    authorization: str | None = Header(default=None),
+    request: Request,
 ) -> dict[str, Any]:
-    _check_auth(authorization)
+    token = _extract_bearer_token(request)
+    await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
         try:
@@ -239,9 +308,10 @@ async def query(
 @app.post("/consolidate")
 async def consolidate(
     body: ConsolidateRequest,
-    authorization: str | None = Header(default=None),
+    request: Request,
 ) -> dict[str, Any]:
-    _check_auth(authorization)
+    token = _extract_bearer_token(request)
+    await _check_auth_with_device(token, body.device_id)
 
     async with _semaphore:
         try:
