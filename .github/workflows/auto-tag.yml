@@ -1,0 +1,33 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [prod]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create version tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Read version and create tag if missing
+        run: |
+          VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+          TAG="v${VERSION}"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+            echo "### Tag $TAG already exists — no release needed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Creating tag $TAG"
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "### Created tag $TAG — release workflow will trigger" >> "$GITHUB_STEP_SUMMARY"
+          fi
