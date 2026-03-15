@@ -52,6 +52,22 @@ const BLOCKED_DEFAULTS_DOMAINS: &[&str] = &[
 /// Shell metacharacters that must not appear in any argument (injection prevention).
 const SHELL_METACHARACTERS: &[&str] = &["|", ";", "`", "$(", ">", "<", "&&", "||"];
 
+/// Terminal emulator apps that Aura must never activate or open (safety: prevents
+/// accidental command execution). Used by both `activate_app` and `run_shell_command`.
+const BLOCKED_TERMINAL_APPS: &[&str] = &[
+    "terminal",
+    "iterm",
+    "iterm2",
+    "kitty",
+    "alacritty",
+    "warp",
+    "hyper",
+    "tabby",
+    "rio",
+    "wezterm",
+    "ghostty",
+];
+
 pub(crate) async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
@@ -278,7 +294,7 @@ pub(crate) async fn execute_tool(
 
             // Get display origin for multi-monitor (used by BOTH oracle and fallback paths)
             let display_origin =
-                tokio::task::spawn_blocking(|| aura_screen::capture::get_active_display_origin())
+                tokio::task::spawn_blocking(aura_screen::capture::get_active_display_origin)
                     .await
                     .ok()
                     .flatten()
@@ -306,21 +322,20 @@ pub(crate) async fn execute_tool(
                     // Bug 5: Check for censored screenshot before sending to oracle
                     if let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD
                         .decode(&frame.jpeg_base64)
-                    {
-                        if let Ok(img) = image::load_from_memory_with_format(
+                        && let Ok(img) = image::load_from_memory_with_format(
                             &jpeg_bytes,
                             image::ImageFormat::Jpeg,
+                        )
+                    {
+                        let rgb = img.to_rgb8();
+                        if aura_screen::capture::frame_looks_censored(
+                            rgb.as_raw(),
+                            rgb.width() as usize,
+                            rgb.height() as usize,
                         ) {
-                            let rgb = img.to_rgb8();
-                            if aura_screen::capture::frame_looks_censored(
-                                rgb.as_raw(),
-                                rgb.width() as usize,
-                                rgb.height() as usize,
-                            ) {
-                                anyhow::bail!(
-                                    "Screenshot appears censored — Screen Recording permission may be revoked"
-                                );
-                            }
+                            anyhow::bail!(
+                                "Screenshot appears censored — Screen Recording permission may be revoked"
+                            );
                         }
                     }
 
@@ -777,20 +792,6 @@ pub(crate) async fn execute_tool(
             .await
         }
         "activate_app" => {
-            const BLOCKED_APPS: &[&str] = &[
-                "terminal",
-                "iterm",
-                "iterm2",
-                "kitty",
-                "alacritty",
-                "warp",
-                "hyper",
-                "tabby",
-                "rio",
-                "wezterm",
-                "ghostty",
-            ];
-
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return serde_json::json!({
@@ -800,7 +801,7 @@ pub(crate) async fn execute_tool(
             }
 
             let name_lower = name.to_lowercase();
-            if BLOCKED_APPS
+            if BLOCKED_TERMINAL_APPS
                 .iter()
                 .any(|b| name_lower == *b || name_lower.contains(b))
             {
@@ -1279,15 +1280,28 @@ pub(crate) async fn execute_tool(
                 }
             }
 
+            // Block `open -a <terminal>` — same safety gate as activate_app
+            if command == "open" && cmd_args.len() >= 2 && cmd_args[0] == "-a" {
+                let app_lower = cmd_args[1].to_lowercase();
+                if BLOCKED_TERMINAL_APPS
+                    .iter()
+                    .any(|b| app_lower == *b || app_lower.contains(b))
+                {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": "Cannot open terminal apps via run_shell_command for safety. Ask the user to open it manually.",
+                    });
+                }
+            }
+
             let timeout = args
                 .get("timeout_secs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(15)
                 .min(MAX_SHELL_TIMEOUT_SECS);
-            let _ = timeout; // reserved for future async timeout support
 
             let abs_path_owned = abs_path.to_string();
-            tokio::task::spawn_blocking(move || {
+            let shell_fut = tokio::task::spawn_blocking(move || {
                 let output = std::process::Command::new(&abs_path_owned)
                     .args(&cmd_args)
                     .stdout(std::process::Stdio::piped())
@@ -1312,14 +1326,18 @@ pub(crate) async fn execute_tool(
                         "error": format!("Failed to execute command: {e}"),
                     }),
                 }
-            })
-            .await
-            .unwrap_or_else(|e| {
-                serde_json::json!({
+            });
+            match tokio::time::timeout(Duration::from_secs(timeout), shell_fut).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => serde_json::json!({
                     "success": false,
                     "error": format!("Task panicked: {e}"),
-                })
-            })
+                }),
+                Err(_) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Command timed out after {timeout} seconds"),
+                }),
+            }
         }
         other => serde_json::json!({
             "success": false,

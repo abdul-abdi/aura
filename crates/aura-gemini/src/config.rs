@@ -139,6 +139,21 @@ click:
 - retry_offset: { dx, dy } — original click missed, nearby retry succeeded at (x + dx, y + dy).
 - bounds_warning: click was outside expected_bounds region.
 
+run_javascript:
+- result: the return value of the last JS expression (as string). stderr: errors.
+- error_kind="automation_denied": browser needs Automation permission — same as run_applescript.
+- Chrome requires "Allow JavaScript from Apple Events" in View > Developer menu. If JS fails with a generic error in Chrome, tell the user to enable this.
+- Safari works out of the box with Automation permission.
+
+select_text:
+- method: the selection method used. success: whether it worked.
+- For word/line: click landed at the provided coordinates.
+
+run_shell_command:
+- stdout: command output. stderr: error output. exit_code: process exit code.
+- error with allowed commands list: command not in allowlist.
+- error with "blocked for security": attempted write to a protected defaults domain.
+
 Permission Errors:
 - error_kind="accessibility_denied": Enable Accessibility for Aura in System Settings > Privacy & Security.
 - error_kind="automation_denied": Enable Automation for the target app.

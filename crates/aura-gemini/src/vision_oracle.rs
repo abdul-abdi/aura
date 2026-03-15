@@ -251,18 +251,18 @@ fn parse_normalized_coords(text: &str) -> Option<(f64, f64)> {
 
 /// Check if oracle returned the "not found" sentinel [-1, -1]
 fn is_not_found_sentinel(text: &str) -> bool {
-    if let Some(start) = text.find('[') {
-        if let Some(end) = text[start..].find(']') {
-            let inner = &text[start + 1..start + end];
-            let nums: Vec<f64> = inner
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| s.parse::<f64>().ok())
-                .collect();
-            if nums.len() >= 2 && nums[0] == -1.0 && nums[1] == -1.0 {
-                return true;
-            }
+    if let Some(start) = text.find('[')
+        && let Some(end) = text[start..].find(']')
+    {
+        let inner = &text[start + 1..start + end];
+        let nums: Vec<f64> = inner
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if nums.len() >= 2 && nums[0] == -1.0 && nums[1] == -1.0 {
+            return true;
         }
     }
     false

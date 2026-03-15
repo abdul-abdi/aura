@@ -663,11 +663,16 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
 
                             let pre_hash = if tools::is_state_changing_tool(&name) {
-                                // Allow tools to opt out of verification (e.g. run_applescript with verify: false)
+                                // Allow tools to opt out of verification (e.g. run_applescript with verify: false).
+                                // Some tools default to verify=false (read-heavy tools like run_javascript, run_shell_command).
+                                let default_verify = !matches!(
+                                    name.as_str(),
+                                    "run_javascript" | "run_shell_command"
+                                );
                                 let verify = args
                                     .get("verify")
                                     .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
+                                    .unwrap_or(default_verify);
                                 if verify {
                                     Some(tool_last_hash.load(Ordering::Acquire))
                                 } else {
