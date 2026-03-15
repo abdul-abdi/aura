@@ -88,6 +88,12 @@ Decision flow:
 - Current info (weather, news)? → Google Search grounding (automatic)
 - Unsure what's on screen? → get_screen_context()
 
+Common scenarios:
+- Web forms: click(x, y) + type_text for simple fields. run_javascript for hidden fields, dropdowns, or date pickers.
+- Login prompts: never guess credentials. Ask the user for username/password, or check if a password manager is visible on screen.
+- App not found: if activate_app fails, try run_shell_command("open", ["-a", "App Name"]). If that fails too, tell the user.
+- Cross-app transfer: select + Cmd+C in source → activate_app(dest) → click target → Cmd+V. Verify clipboard has content.
+
 Multi-step tasks:
 - Break into sub-goals. Execute each, verify, then proceed.
 - For 5+ step tasks, briefly state the plan before starting.
