@@ -93,8 +93,9 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                 },
                 FunctionDeclaration {
                     name: "click".into(),
-                    description: "Click at the specified screen coordinates. Defaults to single \
-                        left click. \
+                    description: "Click at the specified screen coordinates. Always include a target \
+                        description of what you're clicking so the targeting system can visually locate \
+                        the exact element. Defaults to single left click. \
                         Invoke this tool only after you have identified the target coordinates \
                         from screen context or user instruction."
                         .into(),
@@ -103,6 +104,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                         "properties": {
                             "x": { "type": "number", "description": "X coordinate" },
                             "y": { "type": "number", "description": "Y coordinate" },
+                            "target": { "type": "string", "description": "Short UNIQUE description of the UI element you're clicking (e.g. 'blue Submit button at bottom of form', 'Safari address bar'). Include label text, color, or position. Used by the vision targeting system." },
                             "button": { "type": "string", "enum": ["left", "right"], "description": "Mouse button. Default: left" },
                             "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" },
                             "modifiers": {
@@ -533,5 +535,14 @@ mod tests {
         let cmi = decls.iter().find(|d| d.name == "click_menu_item").unwrap();
         let required = cmi.parameters["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "menu_path"));
+    }
+
+    #[test]
+    fn click_tool_has_target_parameter() {
+        let tools = build_tool_declarations();
+        let decls = tools[0].function_declarations.as_ref().unwrap();
+        let click = decls.iter().find(|fd| fd.name == "click").unwrap();
+        let props = click.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("target"), "click tool should have 'target' parameter");
     }
 }
