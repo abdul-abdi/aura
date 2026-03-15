@@ -85,6 +85,164 @@ impl DeviceBackend for InMemoryBackend {
     }
 }
 
+// ── FirestoreBackend ─────────────────────────────────────────────────────────
+
+/// Firestore REST API backend for device storage. Production use on Cloud Run.
+pub struct FirestoreBackend {
+    client: reqwest::Client,
+    project_id: String,
+}
+
+impl FirestoreBackend {
+    /// Create a new Firestore backend with the given project ID.
+    pub fn new(project_id: String) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            project_id,
+        }
+    }
+
+    /// Fetch the GCP service account access token from the metadata server.
+    async fn get_access_token(&self) -> Result<String, String> {
+        const METADATA_URL: &str =
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
+
+        let response = self
+            .client
+            .get(METADATA_URL)
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .await
+            .map_err(|e| format!("metadata server request failed: {e}"))?;
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("failed to parse metadata response: {e}"))?;
+
+        json["access_token"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "access_token field missing in metadata response".to_string())
+    }
+
+    /// Format the Firestore REST API document URL for a device.
+    fn doc_url(&self, device_id: &str) -> String {
+        format!(
+            "https://firestore.googleapis.com/v1/projects/{}/databases/(default)/documents/devices/{}",
+            self.project_id, device_id
+        )
+    }
+}
+
+#[async_trait]
+impl DeviceBackend for FirestoreBackend {
+    async fn get_device(&self, device_id: &str) -> Option<DeviceRecord> {
+        let access_token = match self.get_access_token().await {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::error!(device_id, error = %e, "failed to get access token");
+                return None;
+            }
+        };
+
+        let url = self.doc_url(device_id);
+
+        let response = match self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(device_id, error = %e, "firestore get request failed");
+                return None;
+            }
+        };
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!(device_id, error = %e, "failed to parse firestore response");
+                return None;
+            }
+        };
+
+        // Extract fields from the Firestore document structure.
+        let fields = json.get("fields")?;
+
+        let token_hash = fields
+            .get("token_hash")?
+            .get("stringValue")?
+            .as_str()?
+            .to_string();
+
+        let gemini_key_hash = fields
+            .get("gemini_key_hash")?
+            .get("stringValue")?
+            .as_str()?
+            .to_string();
+
+        let created_at = fields
+            .get("created_at")?
+            .get("stringValue")?
+            .as_str()?
+            .to_string();
+
+        let last_seen = fields
+            .get("last_seen")?
+            .get("stringValue")?
+            .as_str()?
+            .to_string();
+
+        Some(DeviceRecord {
+            token_hash,
+            gemini_key_hash,
+            created_at,
+            last_seen,
+        })
+    }
+
+    async fn set_device(&self, device_id: &str, record: DeviceRecord) {
+        let access_token = match self.get_access_token().await {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::error!(device_id, error = %e, "failed to get access token for set");
+                return;
+            }
+        };
+
+        let url = self.doc_url(device_id);
+
+        let body = serde_json::json!({
+            "fields": {
+                "token_hash": { "stringValue": record.token_hash },
+                "gemini_key_hash": { "stringValue": record.gemini_key_hash },
+                "created_at": { "stringValue": record.created_at },
+                "last_seen": { "stringValue": record.last_seen }
+            }
+        });
+
+        let query_url = format!(
+            "{}?updateMask.fieldPaths=token_hash&updateMask.fieldPaths=gemini_key_hash&updateMask.fieldPaths=created_at&updateMask.fieldPaths=last_seen",
+            url
+        );
+
+        if let Err(e) = self
+            .client
+            .patch(&query_url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .json(&body)
+            .send()
+            .await
+        {
+            tracing::error!(device_id, error = %e, "firestore patch request failed");
+        }
+    }
+}
+
 // ── CachedRecord ─────────────────────────────────────────────────────────────
 
 /// A cached snapshot of the token hash for a device.
@@ -157,6 +315,11 @@ impl DeviceStore {
             backend,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Create a `DeviceStore` backed by Firestore REST API.
+    pub fn new_with_firestore(project_id: String) -> Self {
+        Self::new(Arc::new(FirestoreBackend::new(project_id)))
     }
 
     /// Register a device and return a new plaintext auth token.
