@@ -5,7 +5,7 @@
 # the dependency layer is cached independently of application source changes.
 # Only aura-proxy and its deps are actually compiled (cargo -p flag).
 # ════════════════════════════════════════════════════════════════════════════════
-FROM rust:1.85-slim AS builder
+FROM rust:1.93-slim AS builder
 
 # tokio-tungstenite uses native-tls which requires OpenSSL headers at compile time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
