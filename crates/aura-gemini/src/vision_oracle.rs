@@ -93,6 +93,7 @@ impl VisionOracle {
                 "You are a precise UI click targeting system for macOS.\n\n\
                  Hint: approximately [{norm_hint_y}, {norm_hint_x}] (0-1000 normalized)\n\n\
                  Find the nearest clickable UI element to the hint coordinates.\n\
+                 If no clickable element is visible near the hint, return [-1, -1].\n\
                  Return ONLY the center point as [y, x] normalized to 0-1000. No other text."
             ),
         };

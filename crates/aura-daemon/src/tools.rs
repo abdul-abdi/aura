@@ -307,7 +307,10 @@ pub(crate) async fn execute_tool(
                 match oracle_result {
                     // Oracle found the target
                     Ok(Ok(Some((ox, oy)))) => {
-                        let delta = ((ox - raw_x).powi(2) + (oy - raw_y).powi(2)).sqrt();
+                        // Compare in global coords: raw also needs display origin for fair delta
+                        let global_raw_x = raw_x + display_origin.0;
+                        let global_raw_y = raw_y + display_origin.1;
+                        let delta = ((ox - global_raw_x).powi(2) + (oy - global_raw_y).powi(2)).sqrt();
                         if delta > MAX_ORACLE_DELTA {
                             tracing::warn!(
                                 delta = format!("{:.1}", delta),
