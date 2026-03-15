@@ -13,15 +13,8 @@
 
 </div>
 
-<br/>
 
-<div align="center">
-<img src="assets/promo.gif" alt="Aura demo — voice-controlled macOS" width="100%" />
 
-[Watch full 60s video →](assets/promo.mp4)
-</div>
-
-<br/>
 
 You're deep in work. Twelve tabs open, three apps side by side, a document you need to reference while typing into another window. You reach for the mouse, click, switch, scroll, copy, switch back, paste. Repeat. All day.
 
