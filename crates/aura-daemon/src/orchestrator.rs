@@ -39,13 +39,15 @@ const MIC_BRIDGE_CAPACITY: usize = 256;
 /// Multiplier applied to the barge-in threshold while audio is actively
 /// playing.  Must be high enough to filter speaker bleed (0.005-0.03 RMS)
 /// but low enough that normal speech (0.05-0.3 RMS) passes through.
-const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.3;
+/// 1.5x is a middle ground: 1.3x was too sensitive on MacBook speakers,
+/// 1.8x swallowed real user speech.
+const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.5;
 
 /// Number of consecutive audio chunks that must exceed the barge-in energy
 /// threshold before we forward audio during playback.  Prevents transient
 /// loud passages in the AI's speech from triggering a false barge-in.
-/// At ~10 ms per chunk (512-sample resampler), 2 chunks ≈ 20 ms.
-const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 2;
+/// At ~10 ms per chunk (512-sample resampler), 3 chunks ≈ 30 ms.
+const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 3;
 
 /// Destructive action guardrail injected into the system prompt.
 pub(crate) const DESTRUCTIVE_ACTION_GUARDRAIL: &str = "\n\nSafety — Destructive Actions:\
@@ -455,6 +457,11 @@ pub(crate) async fn run_daemon(
     let _ipc_cancel = cancel.clone();
     let mut processor_done = false;
     let mut processor_handle = processor_handle;
+
+    // Listen for SIGTERM (sent by SwiftUI app's process.terminate())
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+
     tokio::select! {
         _ = &mut processor_handle => {
             tracing::info!("Processor finished, ending session");
@@ -462,6 +469,10 @@ pub(crate) async fn run_daemon(
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Ctrl+C received, shutting down");
+            bus.send(AuraEvent::Shutdown);
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM received, shutting down gracefully");
             bus.send(AuraEvent::Shutdown);
         }
         _ = async {
@@ -491,11 +502,12 @@ pub(crate) async fn run_daemon(
         }
     }
 
-    // Graceful shutdown: disconnect the WebSocket, which triggers the
-    // Disconnected event in the processor. The processor then runs
-    // end-of-session consolidation + memory agent ingest before exiting.
+    // Graceful shutdown: disconnect the WebSocket FIRST so the processor
+    // receives the Disconnected event and runs consolidation + ingest.
+    // cancel.cancel() must come AFTER disconnect — the processor's select
+    // loop has a cancel.cancelled() branch that would skip the Disconnected
+    // handler if cancelled first.
     let _ = ipc_tx.send(DaemonEvent::Shutdown);
-    cancel.cancel();
     mic_shutdown.store(true, Ordering::Release);
     session.disconnect();
 
@@ -506,6 +518,9 @@ pub(crate) async fn run_daemon(
             Err(_) => tracing::warn!("Processor timed out after 15s, exiting anyway"),
         }
     }
+
+    // Now cancel everything else (screen capture, IPC, etc.)
+    cancel.cancel();
 
     Ok(())
 }
