@@ -98,8 +98,10 @@ impl AudioPlayer {
                                 );
                             }
 
-                            // Enter buffering mode: accumulate ~80ms before starting Sink
-                            let target_samples = (sample_rate as usize * 80) / 1000; // 80ms — lower latency
+                            // Enter buffering mode: accumulate ~40ms before starting Sink.
+                            // Gemini's native audio model delivers chunks at a steady rate,
+                            // so 40ms is sufficient jitter absorption with lower latency.
+                            let target_samples = (sample_rate as usize * 40) / 1000;
                             pre_buffer = Some(PreBuffer {
                                 samples: Vec::with_capacity(target_samples),
                                 sample_rate,
@@ -338,11 +340,11 @@ mod tests {
     fn pre_buffer_flush_accepts_more_data() {
         let player = AudioPlayer::new().expect("AudioPlayer::new should succeed");
 
-        // Start a stream at 24kHz (pre-buffer target = 24000 * 80 / 1000 = 1920 samples)
+        // Start a stream at 24kHz (pre-buffer target = 24000 * 40 / 1000 = 960 samples)
         player.start_stream(24_000).expect("start_stream");
 
-        // Send enough data to exceed the pre-buffer target (1920 samples = 80ms at 24kHz)
-        let chunk = sine_chunk(24_000, 100); // 2400 samples > 1920 target
+        // Send enough data to exceed the pre-buffer target (960 samples = 40ms at 24kHz)
+        let chunk = sine_chunk(24_000, 100); // 2400 samples > 960 target
         player.append(chunk).expect("append to fill pre-buffer");
 
         // Give the thread time to flush the pre-buffer and create a sink

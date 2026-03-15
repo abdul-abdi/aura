@@ -24,6 +24,22 @@ const MAX_BACKOFF_MS: u64 = 30_000;
 /// and reset the reconnection attempt counter.
 const MIN_STABLE_CONNECTION_SECS: u64 = 30;
 
+/// Proactive session rotation interval. Gemini Live API audio latency
+/// gradually degrades during long sessions. Rotating the WebSocket
+/// connection (with session resumption) resets server-side state.
+const SESSION_ROTATION_SECS: u64 = 600; // 10 minutes
+
+/// Why a connection ended cleanly (no error).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisconnectReason {
+    /// User or system requested shutdown.
+    Shutdown,
+    /// Server sent goAway — clear resumption handle, reconnect.
+    GoAway,
+    /// Proactive rotation to prevent latency degradation — keep handle.
+    Rotate,
+}
+
 /// Events emitted by the Gemini session.
 #[derive(Debug, Clone)]
 pub enum GeminiEvent {
@@ -291,24 +307,35 @@ async fn connection_loop(
         };
 
         match stream_result {
-            Ok(go_away) => {
-                if go_away {
-                    // goAway — server is rotating, session is done.
-                    // Clear resumption handle so we start fresh instead of
-                    // wasting attempts on a stale handle.
-                    {
-                        let mut handle = state.resumption_handle.lock().await;
-                        if handle.is_some() {
-                            tracing::info!("Clearing resumption handle after goAway");
-                            *handle = None;
+            Ok(reason) => {
+                match reason {
+                    DisconnectReason::GoAway => {
+                        // goAway — server is rotating, session is done.
+                        // Clear resumption handle so we start fresh instead of
+                        // wasting attempts on a stale handle.
+                        {
+                            let mut handle = state.resumption_handle.lock().await;
+                            if handle.is_some() {
+                                tracing::info!("Clearing resumption handle after goAway");
+                                *handle = None;
+                            }
                         }
+                        tracing::info!("Server sent goAway, reconnecting with fresh session");
+                        attempt = 0;
+                        continue;
                     }
-                    tracing::info!("Server sent goAway, reconnecting with fresh session");
-                    continue;
+                    DisconnectReason::Rotate => {
+                        // Proactive rotation — keep resumption handle for seamless resume.
+                        tracing::info!("Session rotation: reconnecting to prevent latency degradation");
+                        attempt = 0;
+                        continue;
+                    }
+                    DisconnectReason::Shutdown => {
+                        // Clean disconnect
+                        let _ = event_tx.send(GeminiEvent::Disconnected);
+                        break;
+                    }
                 }
-                // Clean disconnect
-                let _ = event_tx.send(GeminiEvent::Disconnected);
-                break;
             }
             Err(outcome) => {
                 // Only reset counter if the connection was stable for long enough
@@ -425,7 +452,7 @@ async fn connect_and_stream(
     channels: &mut StreamChannels,
     event_tx: &broadcast::Sender<GeminiEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-) -> std::result::Result<bool, StreamOutcome> {
+) -> std::result::Result<DisconnectReason, StreamOutcome> {
     let mut was_connected = false;
     let mut connected_at = std::time::Instant::now();
 
@@ -440,7 +467,7 @@ async fn connect_and_stream(
     .await;
 
     match result {
-        Ok(go_away) => Ok(go_away),
+        Ok(reason) => Ok(reason),
         Err(error) => {
             let connected_duration = if was_connected {
                 connected_at.elapsed()
@@ -456,8 +483,7 @@ async fn connect_and_stream(
     }
 }
 
-/// Returns `Ok(false)` for clean disconnect, `Ok(true)` for goAway (reconnect without penalty),
-/// or `Err` for a real error.
+/// Returns `Ok(DisconnectReason)` for clean outcomes, or `Err` for a real error.
 async fn connect_and_stream_inner(
     state: &SessionState,
     channels: &mut StreamChannels,
@@ -465,7 +491,7 @@ async fn connect_and_stream_inner(
     cancel: &tokio_util::sync::CancellationToken,
     was_connected: &mut bool,
     connected_at: &mut std::time::Instant,
-) -> Result<bool> {
+) -> Result<DisconnectReason> {
     let url = state.config.ws_url();
     tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
 
@@ -521,7 +547,7 @@ async fn connect_and_stream_inner(
             _ = tokio::time::sleep_until(setup_deadline) => {
                 anyhow::bail!("Timed out waiting for setupComplete (15s). Model '{}' may not exist or may not support the Live API.", state.config.model);
             }
-            _ = cancel.cancelled() => return Ok(false),
+            _ = cancel.cancelled() => return Ok(DisconnectReason::Shutdown),
         };
 
         let json_text = match msg {
@@ -571,11 +597,21 @@ async fn connect_and_stream_inner(
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_server_activity = std::time::Instant::now();
 
+    // Proactive session rotation timer — prevents latency degradation
+    // that occurs in long-lived Gemini audio sessions.
+    let rotation_deadline = tokio::time::Instant::now() + Duration::from_secs(SESSION_ROTATION_SECS);
+
     loop {
         tokio::select! {
-            biased;
+            _ = cancel.cancelled() => return Ok(DisconnectReason::Shutdown),
 
-            _ = cancel.cancelled() => return Ok(false),
+            _ = tokio::time::sleep_until(rotation_deadline) => {
+                tracing::info!(
+                    age_secs = SESSION_ROTATION_SECS,
+                    "Session rotation timer fired, reconnecting to reset server-side state"
+                );
+                return Ok(DisconnectReason::Rotate);
+            }
 
             msg = ws_source.next() => {
                 let Some(msg) = msg else {
@@ -599,7 +635,7 @@ async fn connect_and_stream_inner(
                     match serde_json::from_str::<ServerMessage>(&text) {
                         Ok(server_msg) => {
                             if handle_server_message(server_msg, event_tx, state).await {
-                                return Ok(true); // goAway — reconnect without penalty
+                                return Ok(DisconnectReason::GoAway);
                             }
                         }
                         Err(e) => {
@@ -611,6 +647,7 @@ async fn connect_and_stream_inner(
                         }
                     }
                 }
+
             }
 
             Some((id, name, response)) = channels.tool_response_rx.recv() => {
@@ -651,7 +688,34 @@ async fn connect_and_stream_inner(
                 ws_sink.send(Message::Ping(vec![])).await?;
             }
 
-            Some(jpeg_b64) = channels.video_rx.recv() => {
+            Some(pcm) = channels.audio_rx.recv() => {
+                let msg = encode_audio_message(&pcm);
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.send(Message::Text(json)).await?;
+            }
+
+            Some(mut jpeg_b64) = channels.video_rx.recv() => {
+                // Drain ALL pending audio before sending a large video
+                // frame.  A 300 KB screenshot can stall the TCP socket
+                // for 50-300 ms; flushing audio first guarantees mic
+                // data reaches Gemini without gaps.
+                while let Ok(pcm) = channels.audio_rx.try_recv() {
+                    let msg = encode_audio_message(&pcm);
+                    let json = serde_json::to_string(&msg)?;
+                    ws_sink.send(Message::Text(json)).await?;
+                }
+                // Drain stale video frames — only send the most recent.
+                // With 4 FPS capture, frames can queue up if the
+                // WebSocket is busy. Sending an old frame wastes
+                // bandwidth and gives Gemini outdated screen context.
+                let mut dropped = 0u32;
+                while let Ok(newer) = channels.video_rx.try_recv() {
+                    jpeg_b64 = newer;
+                    dropped += 1;
+                }
+                if dropped > 0 {
+                    tracing::debug!(dropped, "Skipped stale video frames, sending latest");
+                }
                 let msg = RealtimeVideoMessage {
                     realtime_input: RealtimeVideoInput {
                         video: Blob {
@@ -660,12 +724,6 @@ async fn connect_and_stream_inner(
                         },
                     },
                 };
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.send(Message::Text(json)).await?;
-            }
-
-            Some(pcm) = channels.audio_rx.recv() => {
-                let msg = encode_audio_message(&pcm);
                 let json = serde_json::to_string(&msg)?;
                 ws_sink.send(Message::Text(json)).await?;
             }
