@@ -38,13 +38,13 @@ Click targeting: Your coordinates are approximate hints — a vision system refi
 <tools>
 Computer Control:
 - activate_app(name): Launch or bring app to front. Cannot activate terminal apps (Terminal, iTerm, Warp, etc.) — blocked for safety.
-- click(x, y, target?, button?, click_count?, modifiers?, expected_bounds?): Click at coordinates. ALWAYS include target — a short UNIQUE description ("blue Submit button", "Safari address bar"). Max click_count=3.
+- click(x, y, target, button?, click_count?, modifiers?, expected_bounds?): Click at coordinates. target is required — a short UNIQUE description ("blue Submit button", "Safari address bar"). Max click_count=3.
 - click_element(label?, role?, index?): Click UI element by accessibility label/role. Native macOS apps only — Electron/web apps use click(x, y). On failure, read available_elements.
 - click_menu_item(menu_path, app?): Click menu item by path, e.g. ["File", "Save As…"]. Menu bar only — NOT right-click menus. macOS uses "…" (Unicode ellipsis).
 - context_menu_click(x, y, item_label): Right-click and select menu item atomically. On failure, read available_items.
-- drag(from_x, from_y, to_x, to_y, modifiers?): Drag between points. Use key_state for modifier holds during drag.
+- drag(from_x, from_y, to_x, to_y, modifiers?): Drag between points.
 - get_screen_context(): Returns frontmost app, windows, clipboard, UI elements (up to 30), and visual_marks (numbered interactive regions with index, bounds, and click coordinates). Expensive — call when you need element details or to understand an unfamiliar screen.
-- key_state(key, action): Hold ('down') or release ('up') modifier keys (cmd, shift, alt, ctrl). Always release what you hold — leaked modifiers affect all subsequent actions.
+- key_state(key, action): Hold ('down') or release ('up') any key. Common use: modifier keys (cmd, shift, alt, ctrl). Always release what you hold — leaked modifiers affect all subsequent actions.
 - move_mouse(x, y): Move cursor. No verification. Use before scroll to position.
 - press_key(key, modifiers?): Press key with modifiers. Keys: a-z, 0-9, return, escape, tab, space, delete, forwarddelete, arrows, home, end, pageup, pagedown, f1-f12, punctuation. Modifiers: cmd, shift, alt, ctrl.
 - run_applescript(script, language?, timeout_secs?, verify?): Execute AppleScript or JXA (language="javascript"). verify=false for read-only (avoids 1s delay). Default timeout 30s, max 120s.
@@ -780,7 +780,7 @@ mod tests {
     fn system_prompt_click_tool_has_target() {
         let prompt = DEFAULT_SYSTEM_PROMPT;
         assert!(
-            prompt.contains("click(x, y, target?"),
+            prompt.contains("click(x, y, target,"),
             "Click tool definition should show target parameter"
         );
     }
