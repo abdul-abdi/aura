@@ -118,7 +118,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                                 "description": "Optional bounding box [y0, x0, y1, x1] (normalized 0-1000) of the expected target element. If provided, the system validates your click coordinates fall within this region and warns if they don't."
                             }
                         },
-                        "required": ["x", "y"]
+                        "required": ["x", "y", "target"]
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },

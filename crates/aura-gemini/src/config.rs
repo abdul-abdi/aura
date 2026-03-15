@@ -166,6 +166,8 @@ context_menu_click: Atomic right-click + select. On failure, read available_item
 
 activate_app: If verified=false but frontmost_app matches, app was already in front — success.
 
+Multi-step clicks: Always activate_app first before a sequence of clicks in another app. Example: activate_app("Safari") → click(x, y, target="address bar") → type_text("url"). This ensures the app is frontmost before targeting.
+
 write_clipboard: Returns chars_written. Use with Cmd+V to paste. Better than type_text for large text or special chars.
 
 get_screen_context: Returns UI elements (up to 30), frontmost app, windows, clipboard, visual_marks (numbered interactive regions with click coordinates). Expensive — don't call every turn. Call when you need element labels, visual marks, or to understand an unfamiliar screen.
@@ -185,6 +187,10 @@ Right-click: context_menu_click(x, y, "Copy") — atomic. On failure, read avail
 Select text: click(start) → click(end, modifiers=["shift"])
 
 Multi-select: click(item1) → click(item2, modifiers=["cmd"])
+
+Web page interaction (Safari): For precise web interactions, use run_applescript with Safari's do JavaScript:
+  run_applescript('tell application "Safari" to do JavaScript "document.querySelector(\'#submit-btn\').click()" in document 1', verify=false)
+  Useful when click coordinates are unreliable for small web elements.
 </workflows>
 
 <automatic_behaviors>
@@ -245,7 +251,22 @@ Cross-session continuity:
 
 const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
-#[derive(Debug, Clone)]
+/// Production cloud service defaults injected at build time via environment
+/// variables (set in CI from GCP Secret Manager). Uses `option_env!()` so
+/// local dev builds compile fine without them — they just get `None`.
+mod prod_defaults {
+    pub const PROXY_URL: Option<&str> = option_env!("AURA_PROD_PROXY_URL");
+    pub const PROXY_AUTH_TOKEN: Option<&str> = option_env!("AURA_PROD_PROXY_AUTH_TOKEN");
+    pub const CLOUD_RUN_URL: Option<&str> = option_env!("AURA_PROD_CLOUD_RUN_URL");
+    pub const CLOUD_RUN_AUTH_TOKEN: Option<&str> = option_env!("AURA_PROD_CLOUD_RUN_AUTH_TOKEN");
+}
+
+/// Return the compiled-in prod default if present and non-empty.
+fn prod_default(value: Option<&str>) -> Option<String> {
+    value.filter(|s| !s.is_empty()).map(String::from)
+}
+
+#[derive(Clone)]
 pub struct GeminiConfig {
     pub api_key: String,
     pub model: String,
@@ -262,6 +283,24 @@ pub struct GeminiConfig {
     pub cloud_run_auth_token: Option<String>,
 }
 
+impl std::fmt::Debug for GeminiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("voice", &self.voice)
+            .field("temperature", &self.temperature)
+            .field("proxy_url", &self.proxy_url)
+            .field("proxy_auth_token", &self.proxy_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field("firestore_project_id", &self.firestore_project_id)
+            .field("firebase_api_key", &self.firebase_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("device_id", &self.device_id)
+            .field("cloud_run_url", &self.cloud_run_url)
+            .field("cloud_run_auth_token", &self.cloud_run_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 impl GeminiConfig {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("GEMINI_API_KEY")
@@ -273,14 +312,17 @@ impl GeminiConfig {
             )?;
 
         let mut config = Self::from_env_inner(&api_key);
+        // Priority: env var > config.toml > compiled-in prod default (release only)
         config.proxy_url = std::env::var("AURA_PROXY_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(read_config_file_proxy_url);
+            .or_else(read_config_file_proxy_url)
+            .or_else(|| prod_default(prod_defaults::PROXY_URL));
         config.proxy_auth_token = std::env::var("AURA_PROXY_AUTH_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("proxy_auth_token"));
+            .or_else(|| read_config_value("proxy_auth_token"))
+            .or_else(|| prod_default(prod_defaults::PROXY_AUTH_TOKEN));
         config.firestore_project_id = std::env::var("AURA_FIRESTORE_PROJECT_ID")
             .ok()
             .filter(|s| !s.is_empty())
@@ -292,11 +334,13 @@ impl GeminiConfig {
         config.cloud_run_url = std::env::var("AURA_CLOUD_RUN_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("cloud_run_url"));
+            .or_else(|| read_config_value("cloud_run_url"))
+            .or_else(|| prod_default(prod_defaults::CLOUD_RUN_URL));
         config.cloud_run_auth_token = std::env::var("AURA_CLOUD_RUN_AUTH_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("cloud_run_auth_token"));
+            .or_else(|| read_config_value("cloud_run_auth_token"))
+            .or_else(|| prod_default(prod_defaults::CLOUD_RUN_AUTH_TOKEN));
         config.firebase_api_key = std::env::var("AURA_FIREBASE_API_KEY")
             .ok()
             .filter(|s| !s.is_empty())
