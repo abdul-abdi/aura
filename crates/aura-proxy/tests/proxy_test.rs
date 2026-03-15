@@ -419,6 +419,115 @@ async fn test_register_invalid_device_id() {
     handle.abort();
 }
 
+// ── Device token auth integration tests ──────────────────────────────
+
+/// /ws/auth accepts a valid device token issued by /register.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_ws_auth_with_device_token() {
+    let _guard = REGISTER_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    // No legacy token — device auth only.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::set_var("LEGACY_AUTH_ENABLED", "false") };
+    unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
+
+    let port = free_port();
+    let handle = start_server(port).await;
+
+    let client = reqwest::Client::new();
+
+    // 1. Register a device.
+    let reg_resp = client
+        .post(format!("http://127.0.0.1:{port}/register"))
+        .json(&serde_json::json!({
+            "device_id": "ws-auth-device-01",
+            "gemini_api_key": "AIzaSyTestDeviceKey"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reg_resp.status(), 200, "registration should succeed");
+    let body: serde_json::Value = reg_resp.json().await.unwrap();
+    let device_token = body["device_token"].as_str().unwrap().to_string();
+
+    // 2. Use the device token on /ws/auth.
+    let auth_resp = client
+        .get(format!("http://127.0.0.1:{port}/ws/auth"))
+        .header("x-device-id", "ws-auth-device-01")
+        .header("x-device-token", &device_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth_resp.status(), 200, "valid device token should be accepted");
+
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("LEGACY_AUTH_ENABLED") };
+    unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
+    handle.abort();
+}
+
+/// /ws/auth rejects an unknown device / wrong device token.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_ws_auth_rejects_invalid_device_token() {
+    let _guard = REGISTER_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::set_var("LEGACY_AUTH_ENABLED", "false") };
+    unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
+
+    let port = free_port();
+    let handle = start_server(port).await;
+
+    let client = reqwest::Client::new();
+
+    // Unknown device + bogus token should get 401.
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/ws/auth"))
+        .header("x-device-id", "nonexistent-device")
+        .header("x-device-token", "bad-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "invalid device token should be rejected");
+
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("LEGACY_AUTH_ENABLED") };
+    unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
+    handle.abort();
+}
+
+/// /ws/auth still accepts the legacy x-auth-token when legacy auth is enabled.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_ws_auth_legacy_still_works() {
+    let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: Serialized by ENV_MUTEX.
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "legacy_secret") };
+    // Explicitly enable legacy auth (default, but be explicit).
+    unsafe { std::env::set_var("LEGACY_AUTH_ENABLED", "true") };
+
+    let port = free_port();
+    let handle = start_server(port).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/ws/auth"))
+        .header("x-auth-token", "legacy_secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "legacy x-auth-token should still work");
+
+    // SAFETY: Serialized by ENV_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::remove_var("LEGACY_AUTH_ENABLED") };
+    handle.abort();
+}
+
 /// POST /register with a valid device_id and SKIP_GEMINI_VALIDATION=true → 200
 /// with a `device_token` field in the response body.
 #[tokio::test]

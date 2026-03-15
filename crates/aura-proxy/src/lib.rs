@@ -53,13 +53,17 @@ struct RegisterResponse {
 pub struct ConnectParams {
     pub api_key: Option<String>,
     pub auth_token: Option<String>,
+    pub device_id: Option<String>,
+    pub device_token: Option<String>,
 }
 
 /// Extract connection parameters from headers (preferred) with query-param fallback.
 ///
 /// Header precedence:
-/// - `x-gemini-key` header  -> `api_key`   (falls back to `api_key` query param)
-/// - `x-auth-token` header  -> `auth_token` (falls back to `auth_token` query param)
+/// - `x-gemini-key` header    -> `api_key`      (falls back to `api_key` query param)
+/// - `x-auth-token` header    -> `auth_token`   (falls back to `auth_token` query param)
+/// - `x-device-id` header     -> `device_id`    (falls back to `device_id` query param)
+/// - `x-device-token` header  -> `device_token` (falls back to `device_token` query param)
 pub fn extract_connect_params(
     headers: &HeaderMap,
     query: &HashMap<String, String>,
@@ -76,9 +80,23 @@ pub fn extract_connect_params(
         .map(String::from)
         .or_else(|| query.get("auth_token").cloned());
 
+    let device_id = headers
+        .get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .or_else(|| query.get("device_id").cloned());
+
+    let device_token = headers
+        .get("x-device-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .or_else(|| query.get("device_token").cloned());
+
     ConnectParams {
         api_key,
         auth_token,
+        device_id,
+        device_token,
     }
 }
 
@@ -111,6 +129,39 @@ fn hash_token(input: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Dual-mode auth check: tries legacy shared-token first, then per-device token.
+///
+/// Returns `true` when at least one of the following conditions holds:
+/// - Legacy auth is enabled, a `legacy_token` was provided, and it matches
+///   `state.legacy_auth_token`.
+/// - Both `device_id` and `device_token` are provided and
+///   `state.device_store.validate_token` succeeds.
+///
+/// Returns `false` when neither condition is satisfied (including when both
+/// credential sets are absent — no anonymous access).
+async fn check_auth_dual(
+    state: &AppState,
+    legacy_token: Option<&str>,
+    device_id: Option<&str>,
+    device_token: Option<&str>,
+) -> bool {
+    // Try legacy auth first (if enabled and a token was provided).
+    if state.legacy_auth_enabled
+        && let (Some(provided), Some(expected)) =
+            (legacy_token, state.legacy_auth_token.as_deref())
+        && check_auth(Some(provided), expected)
+    {
+        return true;
+    }
+
+    // Try per-device token auth.
+    if let (Some(did), Some(dtok)) = (device_id, device_token) {
+        return state.device_store.validate_token(did, dtok).await;
+    }
+
+    false
+}
+
 /// Validate that a device_id is safe: non-empty, ≤128 chars, alphanumeric + `-` + `_` only.
 fn validate_device_id(id: &str) -> bool {
     !id.is_empty()
@@ -128,17 +179,16 @@ async fn ws_handler(
 ) -> Response {
     let params = extract_connect_params(&headers, &query);
 
-    // Legacy auth check. If legacy auth is enabled a matching token is required.
-    if state.legacy_auth_enabled {
-        let expected = match &state.legacy_auth_token {
-            Some(t) => t.as_str(),
-            None => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Auth not configured").into_response()
-            }
-        };
-        if !check_auth(params.auth_token.as_deref(), expected) {
-            return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
-        }
+    // Dual-mode auth: legacy shared token OR per-device token.
+    if !check_auth_dual(
+        &state,
+        params.auth_token.as_deref(),
+        params.device_id.as_deref(),
+        params.device_token.as_deref(),
+    )
+    .await
+    {
+        return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
 
     let api_key = match params.api_key {
@@ -168,16 +218,16 @@ async fn ws_auth_preflight(
 ) -> Response {
     let params = extract_connect_params(&headers, &query);
 
-    if state.legacy_auth_enabled {
-        let expected = match &state.legacy_auth_token {
-            Some(t) => t.as_str(),
-            None => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Auth not configured").into_response()
-            }
-        };
-        if !check_auth(params.auth_token.as_deref(), expected) {
-            return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
-        }
+    // Dual-mode auth: legacy shared token OR per-device token.
+    if !check_auth_dual(
+        &state,
+        params.auth_token.as_deref(),
+        params.device_id.as_deref(),
+        params.device_token.as_deref(),
+    )
+    .await
+    {
+        return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
     }
 
     StatusCode::OK.into_response()
