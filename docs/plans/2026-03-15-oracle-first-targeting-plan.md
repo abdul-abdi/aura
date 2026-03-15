@@ -4,9 +4,15 @@
 
 **Goal:** Replace AX-based click targeting with Vision Oracle as the primary coordinate refinement system, with circuit breaker, delta guard, multi-monitor fix, and 4s click budget.
 
-**Architecture:** Remove `element_at_position()` from click path. Oracle becomes primary with hard timeout. Circuit breaker auto-disables on repeated failure. Spiral retries stay fast (no oracle). Multi-monitor fixed by adding display origin offset.
+**Architecture:** Remove `element_at_position()` from click path. Oracle becomes primary with hard timeout. Circuit breaker auto-disables on repeated failure (real errors only — NotFound is NOT a failure). Spiral retries stay fast (no oracle). Multi-monitor fixed by adding display origin offset to ALL click paths.
 
 **Tech Stack:** Rust, Gemini 3 Flash REST API, macOS Accessibility (context-only), tokio, reqwest
+
+**v3 Fixes (Expert Review Round 2):**
+- `[-1, -1]` sentinel for invisible targets (prevents circuit breaker poisoning)
+- `find_element_coordinates` returns `Result<Option<(f64, f64)>>` — `None` = not found
+- All system prompt sections updated (`<strategy>`, `<tool_tips>`, `<workflows>`)
+- Display origin offset applied to raw-coord fallback path too
 
 ---
 
@@ -238,6 +244,20 @@ fn normalize_hint_coords() {
     assert_eq!(norm_x, 500);
     assert_eq!(norm_y, 500);
 }
+
+#[test]
+fn not_found_sentinel_returns_none() {
+    // [-1, -1] means target not visible — should be None, NOT a parse error
+    assert_eq!(parse_normalized_coords("[-1, -1]"), None);
+}
+
+#[test]
+fn not_found_is_distinct_from_parse_error() {
+    // [-1, -1] → NotFound (valid oracle response)
+    assert!(is_not_found_sentinel("[-1, -1]"));
+    // garbage → parse error (invalid oracle response)
+    assert!(!is_not_found_sentinel("no coordinates here"));
+}
 ```
 
 **Step 2: Run tests to verify they fail**
@@ -245,9 +265,35 @@ fn normalize_hint_coords() {
 Run: `cargo test -p aura-gemini find_element_coordinates_accepts`
 Expected: FAIL — wrong number of arguments
 
-**Step 3: Update `find_element_coordinates`**
+**Step 3: Add NotFound sentinel detection**
 
-New signature:
+```rust
+/// Check if oracle returned the "not found" sentinel [-1, -1]
+fn is_not_found_sentinel(text: &str) -> bool {
+    if let Some(start) = text.find('[') {
+        if let Some(end) = text[start..].find(']') {
+            let inner = &text[start + 1..start + end];
+            let nums: Vec<f64> = inner
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .filter_map(|s| s.parse::<f64>().ok())
+                .collect();
+            if nums.len() >= 2 && nums[0] == -1.0 && nums[1] == -1.0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+```
+
+**Step 4: Update `find_element_coordinates` return type and prompt**
+
+New signature returns `Result<Option<(f64, f64)>>`:
+- `Ok(Some(x, y))` = oracle found the target
+- `Ok(None)` = oracle says target not visible ([-1,-1] sentinel)
+- `Err(...)` = real API/parse failure (increments circuit breaker)
 
 ```rust
 #[allow(clippy::too_many_arguments)]
@@ -263,7 +309,7 @@ pub async fn find_element_coordinates(
     target: Option<&str>,
     display_origin_x: f64,
     display_origin_y: f64,
-) -> Result<(f64, f64)> {
+) -> Result<Option<(f64, f64)>> {
     if screen_w == 0 || screen_h == 0 {
         anyhow::bail!("Invalid screen dimensions: {}x{}", screen_w, screen_h);
     }
@@ -282,7 +328,7 @@ pub async fn find_element_coordinates(
              - Return the CENTER of the element, not an edge\n\
              - If multiple elements match, prefer the one closest to the hint\n\
              - If the target is on a canvas or content area (not a UI control), return the hint unchanged\n\
-             - If the target is not visible or is covered by another element, return [0, 0]\n\
+             - If the target is not visible or is covered by another element, return [-1, -1]\n\
              - Return ONLY [y, x] normalized to 0-1000. No other text."
         ),
         None => format!(
@@ -311,16 +357,26 @@ pub async fn find_element_coordinates(
 
     // ... HTTP call unchanged ...
 
+    // Check for NotFound sentinel BEFORE parsing coordinates
+    if is_not_found_sentinel(text) {
+        tracing::info!("Vision oracle: target not visible (returned [-1, -1])");
+        return Ok(None);
+    }
+
+    let (norm_y, norm_x) = parse_normalized_coords(text).context(...)?;
+
     // After denormalize, add display origin for global coords
     let (local_x, local_y) = denormalize(norm_x, norm_y, screen_w, screen_h);
     let global_x = local_x + display_origin_x;
     let global_y = local_y + display_origin_y;
 
-    Ok((global_x, global_y))
+    Ok(Some((global_x, global_y)))
 }
 ```
 
 Key changes:
+- Return type: `Result<(f64, f64)>` → `Result<Option<(f64, f64)>>`
+- `[-1, -1]` sentinel for not-visible targets → `Ok(None)` (does NOT trip circuit breaker)
 - `target: Option<&str>` parameter
 - `display_origin_x/y` parameters, added to output
 - Hint coords normalized to 0-1000 (same space as output)
@@ -446,6 +502,15 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
             /// Total time budget for oracle refinement (capture + API call + retry).
             const ORACLE_BUDGET: Duration = Duration::from_secs(4);
 
+            // Get display origin for multi-monitor (used by BOTH oracle and fallback paths)
+            let display_origin = tokio::task::spawn_blocking(|| {
+                aura_screen::capture::get_active_display_origin()
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or((0.0, 0.0));
+
             if let Some(oracle) = vision_oracle.filter(|o| o.is_available()) {
                 let oracle_start = std::time::Instant::now();
                 tracing::info!(x, y, target = ?target, "Querying vision oracle");
@@ -470,7 +535,7 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                         )
                         .await;
 
-                    // Single retry on failure
+                    // Single retry on failure (Err only, not Ok(None))
                     if result.is_err() {
                         tracing::warn!("Vision oracle attempt 1 failed, retrying");
                         result = oracle
@@ -492,7 +557,8 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                 let elapsed_ms = oracle_start.elapsed().as_millis() as u64;
 
                 match oracle_result {
-                    Ok(Ok((ox, oy))) => {
+                    // Oracle found the target
+                    Ok(Ok(Some((ox, oy)))) => {
                         let delta = ((ox - raw_x).powi(2) + (oy - raw_y).powi(2)).sqrt();
                         if delta > MAX_ORACLE_DELTA {
                             tracing::warn!(
@@ -501,6 +567,9 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                                 "Oracle delta too large — discarding, using raw coords"
                             );
                             oracle.record_success(); // API worked, just result was weird
+                            // Apply display origin to raw coords (multi-monitor fix)
+                            x = raw_x + display_origin.0;
+                            y = raw_y + display_origin.1;
                             targeting_info = serde_json::json!({
                                 "vision_oracle": false,
                                 "raw_coords": [raw_x, raw_y],
@@ -511,7 +580,7 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                             });
                         } else {
                             oracle.record_success();
-                            x = ox;
+                            x = ox; // Already includes display origin from oracle
                             y = oy;
                             targeting_info = serde_json::json!({
                                 "vision_oracle": true,
@@ -522,8 +591,27 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                             });
                         }
                     }
+                    // Oracle says target not visible (NotFound) — NOT a failure
+                    Ok(Ok(None)) => {
+                        oracle.record_success(); // API worked correctly
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
+                        tracing::info!(elapsed_ms, "Vision oracle: target not visible, using raw coords");
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_not_found": true,
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle: target not visible — using raw coordinates",
+                        });
+                    }
+                    // Real API/parse failure — increments circuit breaker
                     Ok(Err(e)) => {
                         oracle.record_failure();
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
                         tracing::warn!(error = %e, elapsed_ms, "Vision oracle failed");
                         targeting_info = serde_json::json!({
                             "vision_oracle": false,
@@ -534,8 +622,11 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                         });
                     }
                     Err(_) => {
-                        // Timeout
+                        // Timeout — increments circuit breaker
                         oracle.record_failure();
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
                         tracing::warn!("Vision oracle timed out after 4s");
                         targeting_info = serde_json::json!({
                             "vision_oracle": false,
@@ -548,6 +639,9 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
                 }
             } else {
                 // Oracle unavailable (not configured or circuit breaker tripped)
+                // Apply display origin to raw coords (multi-monitor fix)
+                x = raw_x + display_origin.0;
+                y = raw_y + display_origin.1;
                 let reason = if vision_oracle.is_some() { "circuit_breaker" } else { "not_configured" };
                 targeting_info = serde_json::json!({
                     "vision_oracle": false,
@@ -558,27 +652,45 @@ In `tools.rs`, replace lines 235-359 (from `// AX hit-test:` through the end of 
             }
 ```
 
-**Step 2: Handle the `.filter()` on `Option<&VisionOracle>`**
+**Step 2: Add `get_active_display_origin` helper to `aura-screen`**
+
+Add to `crates/aura-screen/src/capture.rs`:
+
+```rust
+/// Get the display origin (global coordinate offset) for the display under the mouse cursor.
+/// Returns (origin_x, origin_y) for multi-monitor support.
+/// Primary display is (0.0, 0.0). Secondary displays have non-zero origins.
+pub fn get_active_display_origin() -> Option<(f64, f64)> {
+    let display_id = active_display_id()?;
+    let display = CGDisplay::new(display_id);
+    let bounds = display.bounds();
+    Some((bounds.origin.x, bounds.origin.y))
+}
+```
+
+**Step 3: Handle the `.filter()` on `Option<&VisionOracle>`**
 
 The line `vision_oracle.filter(|o| o.is_available())` requires `Option<&VisionOracle>`. Since the function signature already provides `vision_oracle: Option<&VisionOracle>`, `.filter()` works directly.
 
 For the `record_success`/`record_failure` calls: these use atomics so `&self` is sufficient (no `&mut`).
 
-**Step 3: Verify compilation**
+Note: display origin is applied to ALL paths — oracle success (already in oracle output), oracle delta-exceeded, oracle NotFound, oracle error, oracle timeout, and oracle-skipped. This fixes the pre-existing multi-monitor bug for raw coordinates.
 
-Run: `cargo check -p aura-daemon`
+**Step 4: Verify compilation**
+
+Run: `cargo check -p aura-daemon -p aura-screen`
 Expected: PASS
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```bash
-git add crates/aura-daemon/src/tools.rs
-git commit -m "feat: replace AX targeting with oracle-first + 4s budget + delta guard"
+git add crates/aura-daemon/src/tools.rs crates/aura-screen/src/capture.rs
+git commit -m "feat: replace AX targeting with oracle-first + 4s budget + delta guard + multi-monitor"
 ```
 
 ---
 
-### Task 6: Update Aura System Prompt
+### Task 6: Update Aura System Prompt (all 6 sections)
 
 **Files:**
 - Modify: `crates/aura-gemini/src/config.rs:5-236`
@@ -590,11 +702,11 @@ git commit -m "feat: replace AX targeting with oracle-first + 4s budget + delta 
 fn system_prompt_has_vision_targeting_guidance() {
     let prompt = DEFAULT_SYSTEM_PROMPT;
     assert!(
-        prompt.contains("approximate"),
+        prompt.contains("approximate hints"),
         "Prompt should tell Gemini coords are approximate hints"
     );
     assert!(
-        prompt.contains("target"),
+        prompt.contains("target description"),
         "Prompt should reference the click target parameter"
     );
 }
@@ -607,6 +719,24 @@ fn system_prompt_click_tool_has_target() {
         "Click tool definition should show target parameter"
     );
 }
+
+#[test]
+fn system_prompt_strategy_has_target() {
+    let prompt = DEFAULT_SYSTEM_PROMPT;
+    assert!(
+        prompt.contains("click(x, y, target="),
+        "Strategy section should show target in decision flow"
+    );
+}
+
+#[test]
+fn system_prompt_tool_tips_has_click_target() {
+    let prompt = DEFAULT_SYSTEM_PROMPT;
+    assert!(
+        prompt.contains("ALWAYS include target description"),
+        "Tool tips should reinforce target usage"
+    );
+}
 ```
 
 **Step 2: Run tests to verify they fail**
@@ -614,11 +744,9 @@ fn system_prompt_click_tool_has_target() {
 Run: `cargo test -p aura-gemini system_prompt_has_vision_targeting`
 Expected: FAIL
 
-**Step 3: Update DEFAULT_SYSTEM_PROMPT**
+**Step 3: Update DEFAULT_SYSTEM_PROMPT (6 sections)**
 
-Make these specific edits to the prompt string:
-
-1. **`<vision>` section** (after "Never manually scale coordinates" line) — add:
+1. **`<vision>` section** — after "Never manually scale coordinates" line, add:
 ```
 Click Targeting:
 - Your click coordinates are approximate hints — a vision targeting system refines them to the exact element center.
@@ -631,7 +759,28 @@ Click Targeting:
 - click(x, y, target?, button?, click_count?, modifiers?, expected_bounds?): Click at screen coordinates. ALWAYS include target — a short UNIQUE description of what you're clicking (e.g. "blue Submit button at bottom of form", "Safari address bar"). Include label text, color, or position to disambiguate. Max click_count=3.
 ```
 
-3. **`<automatic_behaviors>` section** — replace click auto-retry line with:
+3. **`<strategy>` section** — update lines with target:
+```
+   Web/Electron apps (Chrome, Slack, VS Code): click(x, y, target="description") from screenshot coordinates.
+```
+Decision flow:
+```
+- Clicking in a web page or Electron app? → click(x, y, target="description") from screenshot
+```
+
+4. **`<tool_tips>` section** — add new click tip:
+```
+click: ALWAYS include target description — "blue Submit button", "Safari address bar", "third tab in tab bar". More descriptive = more accurate targeting. The vision system uses this to find the exact element center.
+```
+
+5. **`<workflows>` section** — update examples:
+```
+Fill a form: click(field1, target="Name input field") → type_text(value1) → press_key("tab") → type_text(value2) → press_key("return")
+
+Open URL: activate_app("Safari") → click(x, y, target="Safari address bar") → Cmd+A → type_text("https://...") → press_key("return")
+```
+
+6. **`<automatic_behaviors>` section** — replace click auto-retry:
 ```
 - Click targeting: A vision system refines your coordinates to the exact UI element using the target description you provide. More descriptive targets = more accurate clicks. If the vision system is unavailable, your raw coordinates are used as-is.
 - Click auto-retry: if screen doesn't change after click, system retries at nearby offsets (up to 4 times). retry_offset in response confirms.
@@ -646,7 +795,7 @@ Expected: All pass. Verify each existing test still holds (XML markers, tool nam
 
 ```bash
 git add crates/aura-gemini/src/config.rs
-git commit -m "feat: update system prompt for oracle-first targeting"
+git commit -m "feat: update system prompt for oracle-first targeting (all 6 sections)"
 ```
 
 ---

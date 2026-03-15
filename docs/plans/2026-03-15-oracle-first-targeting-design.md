@@ -1,7 +1,7 @@
 # Oracle-First Click Targeting Redesign (v2 — Expert-Reviewed)
 
 **Date:** 2026-03-15
-**Status:** Approved
+**Status:** Approved (v3 — all expert issues resolved)
 **Approach:** B — Oracle-Only (AX removed from click targeting path)
 
 ## Problem
@@ -37,9 +37,10 @@ click(x, y, target?) from Gemini
   |
   +-- 3. On oracle success -> click at (ox, oy) + display origin offset
   |
-  +-- 4. On oracle failure/timeout/tripped -> click at raw (x, y)
+  +-- 4. On oracle failure/timeout/tripped -> click at raw (x, y) + display origin offset
   |     - NO AX snap fallback
   |     - Log warning with failure reason
+  |     - Display origin ALWAYS applied (both oracle and raw paths)
   |
   +-- 5. Verification + spiral retry (fast, no oracle)
 ```
@@ -95,7 +96,7 @@ const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 - On success, reset `consecutive_failures` to 0
 - Logged when circuit opens/closes
 
-## Section 4: Multi-Monitor Fix
+## Section 4: Multi-Monitor Fix (v3 — both paths)
 
 The oracle's `denormalize` produces display-local coords (0-relative).
 CGEvent expects global coords. On secondary displays, this is wrong.
@@ -109,7 +110,20 @@ let global_x = local_x + frame.display_origin_x;
 let global_y = local_y + frame.display_origin_y;
 ```
 
-This also fixes the pre-existing multi-monitor bug for raw coordinates.
+**v3 fix: Raw-coord fallback also gets display origin offset.**
+
+When the oracle fails/is tripped, the daemon STILL captures display origin from the
+active display (via `active_display_id()`) and applies it to raw coords before clicking:
+
+```rust
+// In fallback path (oracle failed/tripped):
+let display_id = active_display_id().unwrap_or(CGDisplay::main().id);
+let bounds = CGDisplay::new(display_id).bounds();
+let global_x = raw_x + bounds.origin.x;
+let global_y = raw_y + bounds.origin.y;
+```
+
+This fixes the pre-existing multi-monitor bug for ALL click paths.
 
 ## Section 5: Oracle Prompt (Revised)
 
@@ -134,11 +148,21 @@ Rules:
 - Return the CENTER of the element, not an edge
 - If multiple elements match, prefer the one closest to the hint
 - If the target is on a canvas or content area (not a UI control), return the hint unchanged
-- If the target is not visible or is covered by another element, return [0, 0]
+- If the target is not visible or is covered by another element, return [-1, -1]
 - Return ONLY [y, x] normalized to 0-1000. No other text.
 ```
 
 When no target description: fall back to "find the nearest clickable UI element to the hint"
+
+### NotFound Sentinel: `[-1, -1]` (v3 fix)
+
+**Problem (v2):** `[0, 0]` was the failure sentinel, but `validate_coords` rejected it as
+a parse failure → `record_failure()` → circuit breaker poisoned after 3 invisible targets.
+
+**Fix:** Oracle returns `[-1, -1]` for not-visible targets. `find_element_coordinates` returns
+`Ok(None)` for NotFound, `Ok(Some(x,y))` for success, `Err` for real failures.
+Only `Err` increments the circuit breaker. `Ok(None)` is treated as a successful API call
+with a "no target found" result — uses raw coords, does NOT poison circuit breaker.
 
 ### Config changes:
 - `maxOutputTokens`: 50 -> 100
@@ -176,11 +200,11 @@ Prevents the oracle from "teleporting" clicks to unrelated screen areas.
 
 Always includes `elapsed_ms`. On oracle skip (circuit breaker), includes `"oracle_skipped": "circuit_breaker"`.
 
-## Section 8: System Prompt Changes
+## Section 8: System Prompt Changes (v3 — all sections)
 
 ### Aura Main Prompt (Gemini Live)
 
-**`<vision>`** — add:
+**`<vision>`** — add after "Never manually scale coordinates":
 ```
 Click Targeting:
 - Your click coordinates are approximate hints — a vision targeting system refines them.
@@ -188,22 +212,37 @@ Click Targeting:
 - ALWAYS include a target description in click() calls.
 ```
 
-**`click` tool** — updated:
+**`<tools>`** — replace click line:
 ```
-click(x, y, target?, button?, click_count?, modifiers?, expected_bounds?):
-  Click at screen coordinates. ALWAYS include target — a short UNIQUE description
-  of what you're clicking (e.g. "blue Submit button at bottom of form",
-  "Safari address bar"). Include label text, color, or position to disambiguate.
-  The targeting system uses this to visually locate the exact element.
+- click(x, y, target?, button?, click_count?, modifiers?, expected_bounds?): Click at screen coordinates. ALWAYS include target — a short UNIQUE description of what you're clicking (e.g. "blue Submit button at bottom of form", "Safari address bar"). Include label text, color, or position to disambiguate. The targeting system uses this to visually locate the exact element. Max click_count=3.
 ```
 
-**`<automatic_behaviors>`** — updated:
+**`<strategy>`** — update decision flow (v3 fix):
 ```
-- Click targeting: A vision system refines your coordinates using the target
-  description you provide. More descriptive targets = more accurate clicks.
-  If unavailable, raw coordinates are used as-is.
-- Click auto-retry: if screen doesn't change, system retries at nearby offsets
-  (up to 4 times). retry_offset in response confirms.
+   Native macOS apps: click_element(label, role) — precise, no coordinate guessing.
+   Web/Electron apps (Chrome, Slack, VS Code): click(x, y, target="description") from screenshot coordinates.
+```
+And update decision flow line:
+```
+- Clicking in a web page or Electron app? → click(x, y, target="description") from screenshot
+```
+
+**`<tool_tips>`** — add after existing click tip (v3 fix):
+```
+click: ALWAYS include target description — "blue Submit button", "Safari address bar", "third tab in tab bar". More descriptive = more accurate targeting. The vision system uses this to find the exact element center.
+```
+
+**`<workflows>`** — update examples to show target (v3 fix):
+```
+Fill a form: click(field1, target="Name input field") → type_text(value1) → press_key("tab") → type_text(value2) → press_key("return")
+
+Open URL: activate_app("Safari") → click(x, y, target="Safari address bar") → Cmd+A → type_text("https://...") → press_key("return")
+```
+
+**`<automatic_behaviors>`** — replace click auto-retry:
+```
+- Click targeting: A vision system refines your coordinates to the exact UI element using the target description you provide. More descriptive targets = more accurate clicks. If the vision system is unavailable, your raw coordinates are used as-is.
+- Click auto-retry: if screen doesn't change after click, system retries at nearby offsets (up to 4 times). retry_offset in response confirms.
 ```
 
 ## Section 9: Worst-Case Latency
@@ -252,3 +291,10 @@ vs previous worst case of 84s. The 4s budget is the key fix.
 4. **Very small targets (<12px)** — oracle precision is tight; system prompt steers to `click_element` for native apps
 5. **Notifications** — may auto-dismiss during oracle latency (~1.5s)
 6. **Secondary display capture** — only captures display under mouse cursor (pre-existing)
+
+## v3 Changes (Expert Review Round 2 Fixes)
+
+1. **`[-1, -1]` sentinel** — replaces `[0, 0]` to prevent circuit breaker poisoning on invisible targets
+2. **`Ok(None)` return** — `find_element_coordinates` returns `Result<Option<(f64, f64)>>` — `None` = not found, not a failure
+3. **All system prompt sections updated** — `<strategy>`, `<tool_tips>`, `<workflows>` now reinforce target usage
+4. **Raw-coord fallback multi-monitor** — display origin offset applied to ALL click paths, not just oracle path
