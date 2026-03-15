@@ -2,6 +2,9 @@ use aura_proxy::firestore::DeviceStore;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Serializes tests that set SKIP_GEMINI_VALIDATION in addition to ENV_MUTEX.
+static REGISTER_MUTEX: Mutex<()> = Mutex::new(());
+
 /// Global mutex to serialize tests that read/write AURA_PROXY_AUTH_TOKEN env var.
 /// SAFETY: All env var mutations are serialized by this mutex, so no data race
 /// can occur with other threads reading the env at the same time.
@@ -345,4 +348,112 @@ async fn test_device_store_reregister_same_key_invalidates_old() {
         !store.validate_token("device-003", &old_token).await,
         "old token should be invalidated after re-registration"
     );
+}
+
+// ── /register endpoint tests ──────────────────────────────────────────
+
+/// POST /register with an empty JSON body → 422 (Axum deserialization error).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_register_missing_fields() {
+    let _guard = REGISTER_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "test_secret") };
+    unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
+
+    let port = free_port();
+    let handle = start_server(port).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/register"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+
+    // Missing required fields → 400 (or 422 from Axum's Json extractor)
+    assert!(
+        resp.status() == 400 || resp.status() == 422,
+        "expected 400 or 422, got {}",
+        resp.status()
+    );
+
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
+    handle.abort();
+}
+
+/// POST /register with an invalid device_id (path traversal chars) → 400.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_register_invalid_device_id() {
+    let _guard = REGISTER_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "test_secret") };
+    unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
+
+    let port = free_port();
+    let handle = start_server(port).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/register"))
+        .json(&serde_json::json!({
+            "device_id": "../bad",
+            "gemini_api_key": "some-key"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
+    handle.abort();
+}
+
+/// POST /register with a valid device_id and SKIP_GEMINI_VALIDATION=true → 200
+/// with a `device_token` field in the response body.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_register_success() {
+    let _guard = REGISTER_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::set_var("AURA_PROXY_AUTH_TOKEN", "test_secret") };
+    unsafe { std::env::set_var("SKIP_GEMINI_VALIDATION", "true") };
+
+    let port = free_port();
+    let handle = start_server(port).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/register"))
+        .json(&serde_json::json!({
+            "device_id": "test-device-001",
+            "gemini_api_key": "AIzaSyTest1234"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let token = body.get("device_token").and_then(|v| v.as_str());
+    assert!(
+        token.is_some() && !token.unwrap().is_empty(),
+        "expected non-empty device_token in response, got: {body}"
+    );
+
+    // SAFETY: Serialized by ENV_MUTEX + REGISTER_MUTEX.
+    unsafe { std::env::remove_var("AURA_PROXY_AUTH_TOKEN") };
+    unsafe { std::env::remove_var("SKIP_GEMINI_VALIDATION") };
+    handle.abort();
 }

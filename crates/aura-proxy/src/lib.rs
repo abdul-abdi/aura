@@ -6,16 +6,47 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Router,
-    extract::{Query, WebSocketUpgrade},
+    Json, Router,
+    extract::{Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json, Response},
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
+
 const GEMINI_WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 /// Max WebSocket message/frame size: 1 MiB.
 const WS_MAX_SIZE: usize = 1_048_576;
+
+// ── AppState ──────────────────────────────────────────────────────────────────
+
+/// Shared application state injected into all handlers via Axum's `State` extractor.
+#[derive(Clone)]
+pub struct AppState {
+    /// The shared legacy auth token (read from `AURA_PROXY_AUTH_TOKEN`).
+    pub legacy_auth_token: Option<String>,
+    /// Whether legacy shared-token auth is enabled (env `LEGACY_AUTH_ENABLED`, default `true`).
+    pub legacy_auth_enabled: bool,
+    /// Device registry (in-memory or Firestore-backed).
+    pub device_store: firestore::DeviceStore,
+    /// Limits concurrent WebSocket connections.
+    pub semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+// ── /register request / response types ───────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct RegisterRequest {
+    device_id: String,
+    gemini_api_key: String,
+}
+
+#[derive(serde::Serialize)]
+struct RegisterResponse {
+    device_token: String,
+}
+
+// ── ConnectParams ─────────────────────────────────────────────────────────────
 
 /// Parsed connection parameters. Fields are `Option` because they may come from
 /// headers, query params, or neither.
@@ -51,6 +82,8 @@ pub fn extract_connect_params(
     }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "ok" }))
 }
@@ -78,17 +111,34 @@ fn hash_token(input: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-async fn ws_handler_with_sem(
+/// Validate that a device_id is safe: non-empty, ≤128 chars, alphanumeric + `-` + `_` only.
+fn validate_device_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+async fn ws_handler(
+    State(state): State<AppState>,
     ws: WebSocketUpgrade,
     headers: HeaderMap,
-    query: HashMap<String, String>,
-    expected: String,
-    semaphore: Arc<tokio::sync::Semaphore>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let params = extract_connect_params(&headers, &query);
 
-    if !check_auth(params.auth_token.as_deref(), &expected) {
-        return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
+    // Legacy auth check. If legacy auth is enabled a matching token is required.
+    if state.legacy_auth_enabled {
+        let expected = match &state.legacy_auth_token {
+            Some(t) => t.as_str(),
+            None => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Auth not configured").into_response()
+            }
+        };
+        if !check_auth(params.auth_token.as_deref(), expected) {
+            return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
+        }
     }
 
     let api_key = match params.api_key {
@@ -96,7 +146,7 @@ async fn ws_handler_with_sem(
         _ => return (StatusCode::BAD_REQUEST, "Missing api_key").into_response(),
     };
 
-    let permit = match semaphore.try_acquire_owned() {
+    let permit = match state.semaphore.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "Too many connections").into_response(),
     };
@@ -111,50 +161,131 @@ async fn ws_handler_with_sem(
 }
 
 /// Auth-only endpoint for testing — validates token without requiring WS upgrade headers.
-async fn ws_auth_preflight_with_token(
+async fn ws_auth_preflight(
+    State(state): State<AppState>,
     headers: HeaderMap,
-    query: HashMap<String, String>,
-    expected: String,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let params = extract_connect_params(&headers, &query);
 
-    if !check_auth(params.auth_token.as_deref(), &expected) {
-        return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
+    if state.legacy_auth_enabled {
+        let expected = match &state.legacy_auth_token {
+            Some(t) => t.as_str(),
+            None => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Auth not configured").into_response()
+            }
+        };
+        if !check_auth(params.auth_token.as_deref(), expected) {
+            return (StatusCode::UNAUTHORIZED, "Invalid auth token").into_response();
+        }
     }
+
     StatusCode::OK.into_response()
 }
 
+/// `POST /register` — register a device and receive a per-device auth token.
+///
+/// Validates the `device_id`, optionally validates the Gemini API key against
+/// the Gemini REST API (skipped when `SKIP_GEMINI_VALIDATION=true`), hashes the
+/// key, and delegates to `DeviceStore::register_device`.
+async fn register_handler(
+    State(state): State<AppState>,
+    Json(req): Json<RegisterRequest>,
+) -> Response {
+    // 1. Validate device_id.
+    if !validate_device_id(&req.device_id) {
+        return (StatusCode::BAD_REQUEST, "Invalid device_id").into_response();
+    }
+
+    // 2. Validate Gemini key (skip in test environments).
+    let skip_validation = std::env::var("SKIP_GEMINI_VALIDATION")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    if !skip_validation {
+        let validation_url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
+            req.gemini_api_key
+        );
+        let client = reqwest::Client::new();
+        match client.get(&validation_url).send().await {
+            Ok(resp) if resp.status().is_success() => {} // key is valid
+            Ok(_) => {
+                return (StatusCode::UNAUTHORIZED, "Invalid Gemini API key").into_response();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Gemini key validation request failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Key validation failed")
+                    .into_response();
+            }
+        }
+    }
+
+    // 3. Hash the Gemini key — never store or log the plaintext.
+    let gemini_key_hash = hex::encode(hash_token(req.gemini_api_key.as_bytes()));
+
+    // 4. Register with the device store.
+    match state
+        .device_store
+        .register_device(&req.device_id, gemini_key_hash)
+        .await
+    {
+        Ok(device_token) => Json(RegisterResponse { device_token }).into_response(),
+        Err(firestore::RegisterError::KeyMismatch) => {
+            (StatusCode::FORBIDDEN, "Gemini key mismatch for existing device").into_response()
+        }
+        Err(firestore::RegisterError::BackendError(msg)) => {
+            tracing::error!(device_id = %req.device_id, error = %msg, "device store backend error");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+// ── Server entrypoint ─────────────────────────────────────────────────────────
+
 pub async fn run_server(port: u16) -> Result<()> {
-    let auth_token: String = std::env::var("AURA_PROXY_AUTH_TOKEN").unwrap_or_else(|_| {
+    // Legacy shared auth token — optional; panicked on in previous version.
+    let legacy_auth_token: Option<String> = std::env::var("AURA_PROXY_AUTH_TOKEN").ok();
+
+    // Whether legacy shared-token auth is active (default: true if token is set).
+    let legacy_auth_enabled: bool = std::env::var("LEGACY_AUTH_ENABLED")
+        .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
+        .unwrap_or(true);
+
+    // Device store — Firestore if GCP_PROJECT_ID is set, otherwise in-memory.
+    let device_store = match std::env::var("GCP_PROJECT_ID").ok() {
+        Some(project_id) => {
+            tracing::info!(%project_id, "using Firestore device store");
+            firestore::DeviceStore::new_with_firestore(project_id)
+        }
+        None => {
+            tracing::info!("using in-memory device store");
+            firestore::DeviceStore::new_in_memory()
+        }
+    };
+
+    // Require at least one auth mechanism.
+    if legacy_auth_enabled && legacy_auth_token.is_none() && std::env::var("GCP_PROJECT_ID").is_err()
+    {
         panic!(
-            "FATAL: AURA_PROXY_AUTH_TOKEN must be set. Refusing to start without authentication."
-        )
-    });
-    let ws_semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+            "FATAL: Neither AURA_PROXY_AUTH_TOKEN nor GCP_PROJECT_ID is set. \
+             Refusing to start without an authentication mechanism."
+        );
+    }
+
+    let state = AppState {
+        legacy_auth_token,
+        legacy_auth_enabled,
+        device_store,
+        semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+    };
 
     let app = Router::new()
         .route("/health", get(health))
-        .route(
-            "/ws",
-            get({
-                let sem = Arc::clone(&ws_semaphore);
-                let token = auth_token.clone();
-                move |ws: WebSocketUpgrade,
-                      headers: HeaderMap,
-                      Query(query): Query<HashMap<String, String>>| {
-                    ws_handler_with_sem(ws, headers, query, token, sem)
-                }
-            }),
-        )
-        .route(
-            "/ws/auth",
-            get({
-                let token = auth_token;
-                move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>| {
-                    ws_auth_preflight_with_token(headers, query, token)
-                }
-            }),
-        );
+        .route("/ws", get(ws_handler))
+        .route("/ws/auth", get(ws_auth_preflight))
+        .route("/register", post(register_handler))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("Proxy listening on port {port}");
