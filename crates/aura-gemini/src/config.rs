@@ -305,12 +305,21 @@ impl std::fmt::Debug for GeminiConfig {
             .field("voice", &self.voice)
             .field("temperature", &self.temperature)
             .field("proxy_url", &self.proxy_url)
-            .field("proxy_auth_token", &self.proxy_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "proxy_auth_token",
+                &self.proxy_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("firestore_project_id", &self.firestore_project_id)
-            .field("firebase_api_key", &self.firebase_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "firebase_api_key",
+                &self.firebase_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("device_id", &self.device_id)
             .field("cloud_run_url", &self.cloud_run_url)
-            .field("cloud_run_auth_token", &self.cloud_run_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "cloud_run_auth_token",
+                &self.cloud_run_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }

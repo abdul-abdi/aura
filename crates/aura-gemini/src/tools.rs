@@ -647,6 +647,9 @@ mod tests {
         let decls = tools[0].function_declarations.as_ref().unwrap();
         let click = decls.iter().find(|fd| fd.name == "click").unwrap();
         let props = click.parameters["properties"].as_object().unwrap();
-        assert!(props.contains_key("target"), "click tool should have 'target' parameter");
+        assert!(
+            props.contains_key("target"),
+            "click tool should have 'target' parameter"
+        );
     }
 }

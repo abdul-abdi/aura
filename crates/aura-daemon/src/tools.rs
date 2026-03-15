@@ -182,7 +182,8 @@ pub(crate) async fn execute_tool(
         // All input tools (mouse/keyboard) require Accessibility permission.
         // CGEvent.post() silently drops events without it — check before executing
         // so Gemini gets an honest failure instead of a fake success.
-        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "key_state" | "select_text"
+        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "key_state"
+        | "select_text"
             if !aura_input::accessibility::check_accessibility(false) =>
         {
             serde_json::json!({
@@ -276,13 +277,12 @@ pub(crate) async fn execute_tool(
             const ORACLE_BUDGET: Duration = Duration::from_secs(4);
 
             // Get display origin for multi-monitor (used by BOTH oracle and fallback paths)
-            let display_origin = tokio::task::spawn_blocking(|| {
-                aura_screen::capture::get_active_display_origin()
-            })
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or((0.0, 0.0));
+            let display_origin =
+                tokio::task::spawn_blocking(|| aura_screen::capture::get_active_display_origin())
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or((0.0, 0.0));
 
             // Bug 3: Capture frontmost app before oracle so we can detect an app switch
             let pre_oracle_app = tokio::task::spawn_blocking(|| {
@@ -382,17 +382,17 @@ pub(crate) async fn execute_tool(
                 // the oracle coordinate result. For error/timeout paths we fall back to the
                 // separately-fetched display_origin (Bug 2 fix).
                 enum OracleOutcome {
-                    Found((f64, f64), (f64, f64)),      // (coords, frame_origin)
-                    NotFound((f64, f64)),                 // frame_origin
-                    Failed(anyhow::Error, (f64, f64)),   // (error, frame_origin)
+                    Found((f64, f64), (f64, f64)),     // (coords, frame_origin)
+                    NotFound((f64, f64)),              // frame_origin
+                    Failed(anyhow::Error, (f64, f64)), // (error, frame_origin)
                     TimedOut,
                 }
                 let outcome = match oracle_result {
                     Ok(Ok((Ok(Some(coords)), origin))) => OracleOutcome::Found(coords, origin),
-                    Ok(Ok((Ok(None), origin)))          => OracleOutcome::NotFound(origin),
-                    Ok(Ok((Err(e), origin)))             => OracleOutcome::Failed(e, origin),
-                    Ok(Err(e))                           => OracleOutcome::Failed(e, display_origin),
-                    Err(_elapsed)                        => OracleOutcome::TimedOut,
+                    Ok(Ok((Ok(None), origin))) => OracleOutcome::NotFound(origin),
+                    Ok(Ok((Err(e), origin))) => OracleOutcome::Failed(e, origin),
+                    Ok(Err(e)) => OracleOutcome::Failed(e, display_origin),
+                    Err(_elapsed) => OracleOutcome::TimedOut,
                 };
 
                 match outcome {
@@ -402,11 +402,13 @@ pub(crate) async fn execute_tool(
                         // this is the origin the oracle actually saw (Bug 2 fix).
                         let global_raw_x = raw_x + frame_display_origin.0;
                         let global_raw_y = raw_y + frame_display_origin.1;
-                        let delta = ((ox - global_raw_x).powi(2) + (oy - global_raw_y).powi(2)).sqrt();
+                        let delta =
+                            ((ox - global_raw_x).powi(2) + (oy - global_raw_y).powi(2)).sqrt();
 
                         // Axis-swap detection: if swapping ox/oy produces a much closer match,
                         // Gemini likely returned [x,y] instead of [y,x] (Bug 1 fix).
-                        let swapped_delta = ((oy - global_raw_x).powi(2) + (ox - global_raw_y).powi(2)).sqrt();
+                        let swapped_delta =
+                            ((oy - global_raw_x).powi(2) + (ox - global_raw_y).powi(2)).sqrt();
                         let likely_swapped = swapped_delta < delta * 0.5 && delta > 50.0;
                         if likely_swapped {
                             tracing::warn!(
@@ -462,7 +464,10 @@ pub(crate) async fn execute_tool(
                         // Use frame's display origin (same capture the oracle saw, Bug 2 fix)
                         x = raw_x + frame_display_origin.0;
                         y = raw_y + frame_display_origin.1;
-                        tracing::info!(elapsed_ms, "Vision oracle: target not visible, using raw coords");
+                        tracing::info!(
+                            elapsed_ms,
+                            "Vision oracle: target not visible, using raw coords"
+                        );
                         targeting_info = serde_json::json!({
                             "vision_oracle": false,
                             "raw_coords": [raw_x, raw_y],
@@ -507,7 +512,11 @@ pub(crate) async fn execute_tool(
                 // Apply display origin to raw coords (multi-monitor fix)
                 x = raw_x + display_origin.0;
                 y = raw_y + display_origin.1;
-                let reason = if vision_oracle.is_some() { "circuit_breaker" } else { "not_configured" };
+                let reason = if vision_oracle.is_some() {
+                    "circuit_breaker"
+                } else {
+                    "not_configured"
+                };
                 targeting_info = serde_json::json!({
                     "vision_oracle": false,
                     "raw_coords": [raw_x, raw_y],
@@ -1096,11 +1105,7 @@ pub(crate) async fn execute_tool(
                     let keycode = aura_input::keyboard::keycode_from_name("up").unwrap();
                     run_with_pid_fallback(
                         move |pid| {
-                            aura_input::keyboard::press_key_pid(
-                                keycode,
-                                &["cmd", "shift"],
-                                pid,
-                            )
+                            aura_input::keyboard::press_key_pid(keycode, &["cmd", "shift"], pid)
                         },
                         "select_to_start_pid",
                         move || aura_input::keyboard::press_key(keycode, &["cmd", "shift"]),
@@ -1113,11 +1118,7 @@ pub(crate) async fn execute_tool(
                     let keycode = aura_input::keyboard::keycode_from_name("down").unwrap();
                     run_with_pid_fallback(
                         move |pid| {
-                            aura_input::keyboard::press_key_pid(
-                                keycode,
-                                &["cmd", "shift"],
-                                pid,
-                            )
+                            aura_input::keyboard::press_key_pid(keycode, &["cmd", "shift"], pid)
                         },
                         "select_to_end_pid",
                         move || aura_input::keyboard::press_key(keycode, &["cmd", "shift"]),
@@ -1186,7 +1187,9 @@ pub(crate) async fn execute_tool(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30)
                 .min(MAX_APPLESCRIPT_TIMEOUT_SECS);
-            let result = executor.run(&script, ScriptLanguage::AppleScript, timeout).await;
+            let result = executor
+                .run(&script, ScriptLanguage::AppleScript, timeout)
+                .await;
 
             if !result.success && is_automation_denied(&result.stderr) {
                 return serde_json::json!({
@@ -1211,11 +1214,18 @@ pub(crate) async fn execute_tool(
             let cmd_args: Vec<String> = args
                 .get("args")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // Validate command is in allowlist
-            let abs_path = match ALLOWED_SHELL_COMMANDS.iter().find(|(name, _)| *name == command) {
+            let abs_path = match ALLOWED_SHELL_COMMANDS
+                .iter()
+                .find(|(name, _)| *name == command)
+            {
                 Some((_, path)) => *path,
                 None => {
                     return serde_json::json!({
@@ -1257,16 +1267,15 @@ pub(crate) async fn execute_tool(
             if command == "defaults" && cmd_args.len() >= 2 {
                 let subcommand = cmd_args[0].as_str();
                 let domain = &cmd_args[1];
-                if subcommand == "write" || subcommand == "delete" {
-                    if let Some(blocked) = BLOCKED_DEFAULTS_DOMAINS
+                if (subcommand == "write" || subcommand == "delete")
+                    && let Some(blocked) = BLOCKED_DEFAULTS_DOMAINS
                         .iter()
                         .find(|d| domain.starts_with(*d))
-                    {
-                        return serde_json::json!({
-                            "success": false,
-                            "error": format!("defaults domain '{}' is blocked for security", blocked),
-                        });
-                    }
+                {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("defaults domain '{}' is blocked for security", blocked),
+                    });
                 }
             }
 
@@ -1278,7 +1287,7 @@ pub(crate) async fn execute_tool(
             let _ = timeout; // reserved for future async timeout support
 
             let abs_path_owned = abs_path.to_string();
-            let result = tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || {
                 let output = std::process::Command::new(&abs_path_owned)
                     .args(&cmd_args)
                     .stdout(std::process::Stdio::piped())
@@ -1305,12 +1314,12 @@ pub(crate) async fn execute_tool(
                 }
             })
             .await
-            .unwrap_or_else(|e| serde_json::json!({
-                "success": false,
-                "error": format!("Task panicked: {e}"),
-            }));
-
-            result
+            .unwrap_or_else(|e| {
+                serde_json::json!({
+                    "success": false,
+                    "error": format!("Task panicked: {e}"),
+                })
+            })
         }
         other => serde_json::json!({
             "success": false,
