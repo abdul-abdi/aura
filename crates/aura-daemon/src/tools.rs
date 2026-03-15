@@ -1023,6 +1023,79 @@ pub(crate) async fn execute_tool(
                 }
             }
         }
+        "run_javascript" => {
+            let app = args.get("app").and_then(|v| v.as_str()).unwrap_or("Safari");
+            let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+
+            if code.is_empty() {
+                return serde_json::json!({ "success": false, "error": "code parameter is required" });
+            }
+
+            // Resolve browser name for AppleScript targeting
+            let (script_app, bundle_hint) = match app {
+                "Chrome" => ("Google Chrome", "com.google.Chrome"),
+                _ => ("Safari", "com.apple.Safari"),
+            };
+
+            // Pre-check Automation permission
+            let bundle = bundle_hint.to_string();
+            let perm = tokio::task::spawn_blocking(move || {
+                aura_bridge::automation::check_automation_permission(&bundle)
+            })
+            .await
+            .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
+            if perm == aura_bridge::automation::AutomationPermission::Denied {
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Automation permission for {script_app} is denied. \
+                         Grant it in System Settings > Privacy & Security > Automation."
+                    ),
+                    "error_kind": "automation_denied",
+                });
+            }
+
+            // Escape backslashes and double quotes for AppleScript string embedding
+            let escaped_code = code.replace('\\', "\\\\").replace('"', "\\\"");
+
+            // Build the AppleScript that executes JS in the browser
+            let script = if app == "Chrome" {
+                format!(
+                    "tell application \"Google Chrome\" to execute front window's active tab javascript \"{}\"",
+                    escaped_code
+                )
+            } else {
+                format!(
+                    "tell application \"Safari\" to do JavaScript \"{}\" in document 1",
+                    escaped_code
+                )
+            };
+
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(30)
+                .min(MAX_APPLESCRIPT_TIMEOUT_SECS);
+            let result = executor.run(&script, ScriptLanguage::AppleScript, timeout).await;
+
+            if !result.success && is_automation_denied(&result.stderr) {
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Automation permission for {script_app} was denied. \
+                         Grant it in System Settings > Privacy & Security > Automation."
+                    ),
+                    "error_kind": "automation_denied",
+                    "stderr": result.stderr,
+                });
+            }
+
+            serde_json::json!({
+                "success": result.success,
+                "result": result.stdout,
+                "stderr": result.stderr,
+            })
+        }
         other => serde_json::json!({
             "success": false,
             "error": format!("Unknown tool: {other}"),
