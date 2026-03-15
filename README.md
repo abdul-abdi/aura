@@ -166,38 +166,43 @@ The loop that runs continuously while Aura is active:
 >
 > Requires **Rust 1.85+** and **Xcode Command Line Tools**.
 
-**2. Get a Gemini API key**
-
-> Grab a free key from [Google AI Studio](https://aistudio.google.com/apikey). Add it to your config:
->
-> ```bash
-> mkdir -p ~/.config/aura
-> echo 'api_key = "YOUR_KEY_HERE"' > ~/.config/aura/config.toml
-> ```
-
-**3. Build, install, and launch**
+**2. Build, install, and launch**
 
 > ```bash
 > bash scripts/dev.sh
 > ```
 >
-> This builds the Rust daemon + SwiftUI app, installs `Aura.app` to `/Applications`, and launches it. One command.
+> This builds the Rust daemon + SwiftUI app, code-signs with stable identifiers, installs `Aura.app` to `/Applications`, and launches it. One command.
 
-**4. Grant permissions**
+**3. First launch — onboarding**
 
-> Aura needs three macOS permissions to function:
+> Aura walks you through setup on first launch:
 >
-> | Permission | Why |
-> |---|---|
-> | Microphone | To hear your voice |
-> | Screen Recording | To see your screen |
-> | Accessibility | To control mouse and keyboard |
+> **Step 1 — API key.** Enter your Gemini API key (free from [Google AI Studio](https://aistudio.google.com/apikey)). Aura saves it to `~/.config/aura/config.toml` and generates a device ID. If a Cloud Run proxy is configured, device registration happens in the background — the auth token is stored in the macOS Keychain (not in config files).
 >
-> The app walks you through granting each one on first launch.
+> **Step 2 — macOS permissions.** Aura requests three system permissions:
+>
+> | Permission | Why | How it's granted |
+> |---|---|---|
+> | Microphone | Voice capture | Standard macOS prompt — click Allow |
+> | Screen Recording | See your screen | Opens System Settings — toggle Aura on, then relaunch |
+> | Accessibility | Control mouse and keyboard | Opens System Settings — toggle Aura on |
+>
+> **Screen Recording and Accessibility cannot be auto-granted** — macOS requires you to manually toggle them in System Settings > Privacy & Security. The app detects when they're granted (polls every 2s) and advances automatically.
+>
+> **Step 3 — Done.** The daemon launches, connects to Gemini, and the green dot appears in your menu bar.
 
-**5. Start talking**
+**4. Start talking**
 
-> The green dot appears in your menu bar. You're live.
+> You're live. Aura is listening.
+
+### Permissions persist across rebuilds
+
+Aura is ad-hoc code-signed with **stable designated requirements** (`identifier "com.aura.desktop"`). This means macOS TCC permissions (Microphone, Screen Recording, Accessibility) survive rebuilds — you only grant them once. Without stable DRs, ad-hoc signing pins to the CDHash, which changes every build and forces re-granting.
+
+### Keychain & device auth
+
+The device token for Cloud Run proxy authentication is stored in the **macOS login Keychain** under service `com.aura.desktop`, not in plaintext config files. Both the SwiftUI app and Rust daemon access it via the `security` CLI (not Security.framework) to avoid per-app ACL prompts that occur when multiple ad-hoc signed binaries share a Keychain item. If registration fails on first launch, the daemon retries in the background on subsequent starts.
 
 ---
 
@@ -253,13 +258,18 @@ Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md)
 ## Build from source
 
 ```bash
-# Full dev workflow: build, install to /Applications, and launch
+# Build + install to /Applications + launch (recommended)
 bash scripts/dev.sh
 
 # Or just build the .app bundle without installing
 bash scripts/bundle.sh
 open target/release/Aura.app
+
+# Build a .dmg installer for distribution
+bash scripts/bundle.sh --dmg
 ```
+
+`dev.sh` calls `bundle.sh` internally, then kills any running Aura, copies the bundle to `/Applications`, and launches it. Use `bundle.sh` directly if you want to build without installing.
 
 ## Deploy to Google Cloud
 
