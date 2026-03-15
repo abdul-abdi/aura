@@ -274,7 +274,9 @@ bash scripts/bundle.sh --dmg
 
 ## Deploy to Google Cloud
 
-Aura's cloud backend (WebSocket proxy + memory agent + Firestore) deploys to Google Cloud with a single script. Infrastructure-as-code — no manual console steps.
+Aura works fully offline with just a Gemini API key — but cloud services unlock **persistent cross-session memory**. Without them, Aura forgets everything when the session ends. With them, conversations are distilled into structured facts via a Gemini ADK agent, stored in Firestore, and recalled at the start of every future session. Aura remembers who you are, what you were working on, and what you asked it before.
+
+The cloud backend deploys with a single script. Infrastructure-as-code — no manual console steps.
 
 **Automated (one command):**
 
@@ -295,6 +297,20 @@ This enables Firestore, creates Secret Manager entries, deploys the memory agent
 | Secret Manager | GCP | Stores API keys and auth tokens (never in code or env vars) |
 
 **CI/CD:** Push to `main` triggers automatic deployment via GitHub Actions with Workload Identity Federation (no service account keys). See `.github/workflows/deploy-cloud.yml`.
+
+**Connecting Aura to cloud services:**
+
+After deploying, add the URLs to `~/.config/aura/config.toml`:
+
+```toml
+# Cloud services (optional — without these, Aura runs local-only)
+proxy_url = "wss://your-proxy.run.app/ws"
+cloud_run_url = "https://your-memory-agent.run.app"
+firestore_project_id = "your-gcp-project-id"
+firebase_api_key = "your-firebase-web-api-key"
+```
+
+The device token is stored in the macOS Keychain automatically during onboarding — it never goes in config files. If all four values are set, Aura will query past session context on startup, ingest conversations to the memory agent on session end, and sync facts to Firestore. If any are missing, Aura falls back to local-only mode with no errors.
 
 ## Grounding & accuracy
 
