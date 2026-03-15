@@ -182,7 +182,7 @@ pub(crate) async fn execute_tool(
         // All input tools (mouse/keyboard) require Accessibility permission.
         // CGEvent.post() silently drops events without it — check before executing
         // so Gemini gets an honest failure instead of a fake success.
-        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "key_state"
+        "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "key_state" | "select_text"
             if !aura_input::accessibility::check_accessibility(false) =>
         {
             serde_json::json!({
