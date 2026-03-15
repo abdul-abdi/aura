@@ -15,6 +15,8 @@ BUNDLE_SRC="${PROJECT_DIR}/target/release/${APP_NAME}.app"
 INSTALL_DEST="/Applications/${APP_NAME}.app"
 
 # ── Step 1: Build & Bundle Aura.app ──────────────────────────────────────────
+# Dev builds get cloud config from ~/.config/aura/config.toml at runtime.
+# Build-time injection (option_env) is only used in CI release builds.
 # bundle.sh handles both the Rust daemon build and SwiftUI app build internally.
 
 echo "==> Building and bundling ${APP_NAME}.app..."

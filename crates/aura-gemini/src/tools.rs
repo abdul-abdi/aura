@@ -6,7 +6,7 @@ use serde_json::json;
 /// Build the tool declarations sent to Gemini in the setup message.
 ///
 /// Returns a `Vec<Tool>` with:
-/// - 17 function declarations for macOS automation and computer control
+/// - 20 function declarations for macOS automation and computer control
 /// - Google Search grounding (current events, weather, facts, etc.)
 pub fn build_tool_declarations() -> Vec<Tool> {
     vec![
@@ -93,8 +93,9 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                 },
                 FunctionDeclaration {
                     name: "click".into(),
-                    description: "Click at the specified screen coordinates. Defaults to single \
-                        left click. \
+                    description: "Click at the specified screen coordinates. Always include a target \
+                        description of what you're clicking so the targeting system can visually locate \
+                        the exact element. Defaults to single left click. \
                         Invoke this tool only after you have identified the target coordinates \
                         from screen context or user instruction."
                         .into(),
@@ -103,6 +104,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                         "properties": {
                             "x": { "type": "number", "description": "X coordinate" },
                             "y": { "type": "number", "description": "Y coordinate" },
+                            "target": { "type": "string", "description": "Short UNIQUE description of the UI element you're clicking (e.g. 'blue Submit button at bottom of form', 'Safari address bar'). Include label text, color, or position. Used by the vision targeting system." },
                             "button": { "type": "string", "enum": ["left", "right"], "description": "Mouse button. Default: left" },
                             "click_count": { "type": "integer", "description": "Number of clicks (2 for double-click). Default: 1" },
                             "modifiers": {
@@ -116,7 +118,7 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                                 "description": "Optional bounding box [y0, x0, y1, x1] (normalized 0-1000) of the expected target element. If provided, the system validates your click coordinates fall within this region and warns if they don't."
                             }
                         },
-                        "required": ["x", "y"]
+                        "required": ["x", "y", "target"]
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },
@@ -374,6 +376,104 @@ pub fn build_tool_declarations() -> Vec<Tool> {
                     }),
                     behavior: Some("NON_BLOCKING".into()),
                 },
+                FunctionDeclaration {
+                    name: "run_javascript".into(),
+                    description: "Execute JavaScript in Safari or Chrome's active tab. Returns the \
+                        result of the last expression. Use for DOM queries, form filling, clicking \
+                        web elements, reading page content, and any web interaction where coordinates \
+                        are unreliable. \
+                        Invoke this tool only after you have confirmed the user wants to interact \
+                        with a web page and the target browser is open."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "app": {
+                                "type": "string",
+                                "enum": ["Safari", "Chrome"],
+                                "description": "Target browser"
+                            },
+                            "code": {
+                                "type": "string",
+                                "description": "JavaScript code to execute in the active tab"
+                            },
+                            "timeout_secs": {
+                                "type": "integer",
+                                "description": "Max execution time in seconds. Default: 30"
+                            },
+                            "verify": {
+                                "type": "boolean",
+                                "description": "Whether to verify screen changed. Default: false (most JS is read-only)"
+                            }
+                        },
+                        "required": ["app", "code"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "select_text".into(),
+                    description: "Select text using the appropriate keyboard/mouse method. Use before \
+                        copy operations. 'all' selects everything (Cmd+A), 'word' double-clicks at \
+                        coordinates, 'line' triple-clicks at coordinates, 'to_start' selects from \
+                        cursor to document start, 'to_end' selects from cursor to document end. \
+                        Invoke this tool only after you know what text needs to be selected."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "method": {
+                                "type": "string",
+                                "enum": ["all", "word", "line", "to_start", "to_end"],
+                                "description": "Selection strategy"
+                            },
+                            "x": {
+                                "type": "number",
+                                "description": "X coordinate for word/line selection (image pixels)"
+                            },
+                            "y": {
+                                "type": "number",
+                                "description": "Y coordinate for word/line selection (image pixels)"
+                            }
+                        },
+                        "required": ["method"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
+                FunctionDeclaration {
+                    name: "run_shell_command".into(),
+                    description: "Execute an allowlisted shell command for system configuration. \
+                        Allowed commands: defaults (read/write macOS preferences), open (open files/URLs/apps), \
+                        killall (terminate apps), say (text-to-speech), launchctl (manage services). \
+                        Use defaults write + killall to apply system preference changes. \
+                        Invoke this tool only after you have confirmed the user wants to change \
+                        a system setting or perform an operation that requires shell access."
+                        .into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "enum": ["defaults", "open", "killall", "say", "launchctl"],
+                                "description": "The command to run (must be in allowlist)"
+                            },
+                            "args": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Command arguments as separate strings"
+                            },
+                            "timeout_secs": {
+                                "type": "integer",
+                                "description": "Max execution time in seconds. Default: 15"
+                            },
+                            "verify": {
+                                "type": "boolean",
+                                "description": "Whether to verify screen changed. Default: false"
+                            }
+                        },
+                        "required": ["command", "args"]
+                    }),
+                    behavior: Some("NON_BLOCKING".into()),
+                },
             ]),
             google_search: None,
             code_execution: None,
@@ -396,7 +496,7 @@ mod tests {
         let tools = build_tool_declarations();
         assert_eq!(tools.len(), 2, "Function declarations + Google Search");
         let decls = tools[0].function_declarations.as_ref().unwrap();
-        assert_eq!(decls.len(), 17, "Should have 17 function declarations");
+        assert_eq!(decls.len(), 20, "Should have 20 function declarations");
     }
 
     #[test]
@@ -424,6 +524,9 @@ mod tests {
                 "save_memory",
                 "key_state",
                 "context_menu_click",
+                "run_javascript",
+                "select_text",
+                "run_shell_command",
             ]
         );
     }
@@ -442,7 +545,7 @@ mod tests {
         let tools = build_tool_declarations();
         let value = serde_json::to_value(&tools).unwrap();
         let decls = value[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 17);
+        assert_eq!(decls.len(), 20);
         assert_eq!(decls[0]["name"], "run_applescript");
         assert_eq!(decls[1]["name"], "get_screen_context");
         assert_eq!(decls[2]["name"], "shutdown_aura");
@@ -453,6 +556,9 @@ mod tests {
         assert_eq!(decls[14]["name"], "save_memory");
         assert_eq!(decls[15]["name"], "key_state");
         assert_eq!(decls[16]["name"], "context_menu_click");
+        assert_eq!(decls[17]["name"], "run_javascript");
+        assert_eq!(decls[18]["name"], "select_text");
+        assert_eq!(decls[19]["name"], "run_shell_command");
         // Google Search
         assert!(value[1]["googleSearch"].is_object());
     }
@@ -533,5 +639,17 @@ mod tests {
         let cmi = decls.iter().find(|d| d.name == "click_menu_item").unwrap();
         let required = cmi.parameters["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "menu_path"));
+    }
+
+    #[test]
+    fn click_tool_has_target_parameter() {
+        let tools = build_tool_declarations();
+        let decls = tools[0].function_declarations.as_ref().unwrap();
+        let click = decls.iter().find(|fd| fd.name == "click").unwrap();
+        let props = click.parameters["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("target"),
+            "click tool should have 'target' parameter"
+        );
     }
 }

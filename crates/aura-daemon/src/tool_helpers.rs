@@ -31,11 +31,11 @@ impl FrameDims {
 /// Keyboard actions are near-instant; app activation and scripts need more time.
 pub(crate) fn settle_delay_for_tool(name: &str) -> Duration {
     match name {
-        "type_text" | "press_key" | "move_mouse" => Duration::from_millis(30),
+        "type_text" | "press_key" | "move_mouse" | "select_text" => Duration::from_millis(30),
         "scroll" | "drag" => Duration::from_millis(50),
         "click" | "click_element" | "context_menu_click" => Duration::from_millis(100),
         "activate_app" | "click_menu_item" => Duration::from_millis(150),
-        "run_applescript" => Duration::from_millis(200),
+        "run_applescript" | "run_javascript" | "run_shell_command" => Duration::from_millis(200),
         _ => Duration::from_millis(150), // conservative default
     }
 }
@@ -386,6 +386,9 @@ pub(crate) fn is_state_changing_tool(name: &str) -> bool {
             | "click_menu_item"
             | "context_menu_click"
             | "run_applescript"
+            | "run_javascript"
+            | "select_text"
+            | "run_shell_command"
     )
 }
 
@@ -526,11 +529,30 @@ mod tests {
         );
         assert_eq!(settle_delay_for_tool("scroll"), Duration::from_millis(50));
         assert_eq!(settle_delay_for_tool("drag"), Duration::from_millis(50));
+        assert_eq!(
+            settle_delay_for_tool("select_text"),
+            Duration::from_millis(30)
+        );
+        assert_eq!(
+            settle_delay_for_tool("run_javascript"),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            settle_delay_for_tool("run_shell_command"),
+            Duration::from_millis(200)
+        );
     }
 
     #[test]
     fn run_applescript_is_state_changing() {
         assert!(is_state_changing_tool("run_applescript"));
+    }
+
+    #[test]
+    fn new_tools_are_state_changing() {
+        assert!(is_state_changing_tool("run_javascript"));
+        assert!(is_state_changing_tool("select_text"));
+        assert!(is_state_changing_tool("run_shell_command"));
     }
 
     #[test]

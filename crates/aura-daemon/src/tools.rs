@@ -27,6 +27,47 @@ const SCROLL_MAX: i32 = 1000;
 /// Maximum timeout allowed for a single run_applescript call.
 const MAX_APPLESCRIPT_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum timeout for shell commands.
+const MAX_SHELL_TIMEOUT_SECS: u64 = 60;
+
+/// Maximum output size from shell commands.
+const MAX_SHELL_OUTPUT_BYTES: usize = 10_240;
+
+/// Allowlisted shell commands with their absolute paths.
+const ALLOWED_SHELL_COMMANDS: &[(&str, &str)] = &[
+    ("defaults", "/usr/bin/defaults"),
+    ("open", "/usr/bin/open"),
+    ("killall", "/usr/bin/killall"),
+    ("say", "/usr/bin/say"),
+    ("launchctl", "/bin/launchctl"),
+];
+
+/// Blocked `defaults` domains that could compromise system security.
+const BLOCKED_DEFAULTS_DOMAINS: &[&str] = &[
+    "com.apple.security",
+    "com.apple.loginwindow",
+    "com.apple.screensaver",
+];
+
+/// Shell metacharacters that must not appear in any argument (injection prevention).
+const SHELL_METACHARACTERS: &[&str] = &["|", ";", "`", "$(", ">", "<", "&&", "||"];
+
+/// Terminal emulator apps that Aura must never activate or open (safety: prevents
+/// accidental command execution). Used by both `activate_app` and `run_shell_command`.
+const BLOCKED_TERMINAL_APPS: &[&str] = &[
+    "terminal",
+    "iterm",
+    "iterm2",
+    "kitty",
+    "alacritty",
+    "warp",
+    "hyper",
+    "tabby",
+    "rio",
+    "wezterm",
+    "ghostty",
+];
+
 pub(crate) async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
@@ -158,6 +199,7 @@ pub(crate) async fn execute_tool(
         // CGEvent.post() silently drops events without it — check before executing
         // so Gemini gets an honest failure instead of a fake success.
         "move_mouse" | "click" | "type_text" | "press_key" | "scroll" | "drag" | "key_state"
+        | "select_text"
             if !aura_input::accessibility::check_accessibility(false) =>
         {
             serde_json::json!({
@@ -232,130 +274,297 @@ pub(crate) async fn execute_tool(
                 .unwrap_or(1) as u32;
             let count = count.clamp(1, CLICK_COUNT_MAX);
 
-            // AX hit-test: find the interactive element at the target coordinates
-            // and snap to its center for improved accuracy.
-            let hit_x = x;
-            let hit_y = y;
-            let ax_hit = tokio::task::spawn_blocking(move || {
-                aura_screen::accessibility::element_at_position(hit_x, hit_y)
+            // Extract target description for vision oracle
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Oracle-first coordinate refinement with 4s total budget
+            let mut targeting_info = serde_json::json!({});
+            let raw_x = x;
+            let raw_y = y;
+
+            /// Maximum distance (logical px) the oracle can move coords from the hint.
+            /// Beyond this, the oracle result is discarded as unreliable.
+            const MAX_ORACLE_DELTA: f64 = 150.0;
+
+            /// Total time budget for oracle refinement (capture + API call + retry).
+            const ORACLE_BUDGET: Duration = Duration::from_secs(4);
+
+            // Get display origin for multi-monitor (used by BOTH oracle and fallback paths)
+            let display_origin =
+                tokio::task::spawn_blocking(aura_screen::capture::get_active_display_origin)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or((0.0, 0.0));
+
+            // Bug 3: Capture frontmost app before oracle so we can detect an app switch
+            let pre_oracle_app = tokio::task::spawn_blocking(|| {
+                aura_screen::macos::get_frontmost_app().unwrap_or_default()
             })
             .await
-            .ok()
-            .flatten();
+            .unwrap_or_default();
 
-            let mut targeting_info = serde_json::json!({});
-            if let Some(ref el) = ax_hit {
-                if let Some(ref bounds) = el.bounds {
-                    let (cx, cy) = bounds.center();
-                    tracing::debug!(
-                        original_x = x,
-                        original_y = y,
-                        snapped_x = cx,
-                        snapped_y = cy,
-                        role = %el.role,
-                        label = ?el.label,
-                        "Snapping click to element center"
-                    );
-                    x = cx;
-                    y = cy;
-                    targeting_info = serde_json::json!({
-                        "element_at_target": el.summary(),
-                        "snapped_to_center": true,
-                        "original_coords": [hit_x, hit_y],
-                        "snapped_coords": [cx, cy],
-                    });
-                } else {
-                    targeting_info = serde_json::json!({
-                        "element_at_target": el.summary(),
-                        "snapped_to_center": false,
-                        "targeting_hint": "Element found but has no bounds — clicking original coordinates",
-                    });
-                }
-            } else {
-                // AX miss — try vision oracle for precise coordinates
-                if let Some(oracle) = vision_oracle {
-                    tracing::info!(x, y, "AX miss — querying vision oracle");
-                    match tokio::task::spawn_blocking(|| {
+            if let Some(oracle) = vision_oracle.filter(|o| o.is_available()) {
+                let oracle_start = std::time::Instant::now();
+                tracing::info!(x, y, target = ?target, "Querying vision oracle");
+
+                let oracle_result = tokio::time::timeout(ORACLE_BUDGET, async {
+                    let frame = tokio::task::spawn_blocking(|| {
                         aura_screen::capture::capture_screen_high_res()
                     })
                     .await
+                    .map_err(|e| anyhow::anyhow!("Screenshot task panicked: {e}"))?
+                    .map_err(|e| anyhow::anyhow!("Screenshot capture failed: {e}"))?;
+
+                    // Bug 5: Check for censored screenshot before sending to oracle
+                    if let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD
+                        .decode(&frame.jpeg_base64)
+                        && let Ok(img) = image::load_from_memory_with_format(
+                            &jpeg_bytes,
+                            image::ImageFormat::Jpeg,
+                        )
                     {
-                        Ok(Ok(frame)) => {
-                            let mut oracle_result = oracle
+                        let rgb = img.to_rgb8();
+                        if aura_screen::capture::frame_looks_censored(
+                            rgb.as_raw(),
+                            rgb.width() as usize,
+                            rgb.height() as usize,
+                        ) {
+                            anyhow::bail!(
+                                "Screenshot appears censored — Screen Recording permission may be revoked"
+                            );
+                        }
+                    }
+
+                    // Capture frame's display origin now — same capture, no TOCTOU race.
+                    let frame_origin = (frame.display_origin_x, frame.display_origin_y);
+
+                    // Bug 8: Track elapsed time inside the oracle block to implement
+                    // budget-aware retry (skip retry if less than 2s remain).
+                    let oracle_inner_start = std::time::Instant::now();
+
+                    let target_ref = target.as_deref();
+                    let mut result = oracle
+                        .find_element_coordinates(
+                            &frame.jpeg_base64,
+                            x, y,
+                            frame.width, frame.height,
+                            frame.logical_width, frame.logical_height,
+                            target_ref,
+                            frame.display_origin_x, frame.display_origin_y,
+                        )
+                        .await;
+
+                    // Single retry on failure (Err only, not Ok(None))
+                    // Bug 8: Only retry if enough budget remains (>= 2s elapsed means skip)
+                    if result.is_err() {
+                        let elapsed_so_far = oracle_inner_start.elapsed();
+                        if elapsed_so_far < Duration::from_secs(2) {
+                            tracing::warn!(
+                                "Vision oracle attempt 1 failed, retrying ({:.1}s remaining)",
+                                (Duration::from_secs(4) - elapsed_so_far).as_secs_f64()
+                            );
+                            result = oracle
                                 .find_element_coordinates(
                                     &frame.jpeg_base64,
-                                    x,
-                                    y,
-                                    frame.width,
-                                    frame.height,
-                                    frame.logical_width,
-                                    frame.logical_height,
+                                    x, y,
+                                    frame.width, frame.height,
+                                    frame.logical_width, frame.logical_height,
+                                    target_ref,
+                                    frame.display_origin_x, frame.display_origin_y,
                                 )
                                 .await;
-
-                            // Single retry on failure
-                            if oracle_result.is_err() {
-                                tracing::warn!("Vision oracle attempt 1 failed, retrying");
-                                oracle_result = oracle
-                                    .find_element_coordinates(
-                                        &frame.jpeg_base64,
-                                        x,
-                                        y,
-                                        frame.width,
-                                        frame.height,
-                                        frame.logical_width,
-                                        frame.logical_height,
-                                    )
-                                    .await;
-                            }
-
-                            match oracle_result {
-                                Ok((ox, oy)) => {
-                                    tracing::info!(
-                                        original_x = x,
-                                        original_y = y,
-                                        oracle_x = ox,
-                                        oracle_y = oy,
-                                        "Vision oracle refined coordinates"
-                                    );
-                                    x = ox;
-                                    y = oy;
-                                    targeting_info = serde_json::json!({
-                                        "vision_oracle": true,
-                                        "original_coords": [hit_x, hit_y],
-                                        "oracle_coords": [ox, oy],
-                                    });
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Vision oracle failed after retry, using raw coordinates"
-                                    );
-                                    targeting_info = serde_json::json!({
-                                        "element_at_target": null,
-                                        "snapped_to_center": false,
-                                        "vision_oracle_error": format!("{e}"),
-                                        "targeting_hint": "Vision oracle failed — using original coordinates",
-                                    });
-                                }
-                            }
+                        } else {
+                            tracing::warn!(
+                                elapsed_ms = elapsed_so_far.as_millis() as u64,
+                                "Vision oracle attempt 1 failed, skipping retry (insufficient budget)"
+                            );
                         }
-                        _ => {
-                            tracing::warn!("Failed to capture screenshot for vision oracle");
+                    }
+
+                    // Return the oracle result together with the frame's display origin so
+                    // the delta comparison uses the same origin the oracle saw (Bug 2 fix).
+                    Ok::<(anyhow::Result<Option<(f64, f64)>>, (f64, f64)), anyhow::Error>((result, frame_origin))
+                })
+                .await;
+
+                let elapsed_ms = oracle_start.elapsed().as_millis() as u64;
+
+                // Destructure the oracle result to separate the frame's display origin from
+                // the oracle coordinate result. For error/timeout paths we fall back to the
+                // separately-fetched display_origin (Bug 2 fix).
+                enum OracleOutcome {
+                    Found((f64, f64), (f64, f64)),     // (coords, frame_origin)
+                    NotFound((f64, f64)),              // frame_origin
+                    Failed(anyhow::Error, (f64, f64)), // (error, frame_origin)
+                    TimedOut,
+                }
+                let outcome = match oracle_result {
+                    Ok(Ok((Ok(Some(coords)), origin))) => OracleOutcome::Found(coords, origin),
+                    Ok(Ok((Ok(None), origin))) => OracleOutcome::NotFound(origin),
+                    Ok(Ok((Err(e), origin))) => OracleOutcome::Failed(e, origin),
+                    Ok(Err(e)) => OracleOutcome::Failed(e, display_origin),
+                    Err(_elapsed) => OracleOutcome::TimedOut,
+                };
+
+                match outcome {
+                    // Oracle found the target
+                    OracleOutcome::Found((ox, oy), frame_display_origin) => {
+                        // Use the frame's display origin for a fair delta comparison —
+                        // this is the origin the oracle actually saw (Bug 2 fix).
+                        let global_raw_x = raw_x + frame_display_origin.0;
+                        let global_raw_y = raw_y + frame_display_origin.1;
+                        let delta =
+                            ((ox - global_raw_x).powi(2) + (oy - global_raw_y).powi(2)).sqrt();
+
+                        // Axis-swap detection: if swapping ox/oy produces a much closer match,
+                        // Gemini likely returned [x,y] instead of [y,x] (Bug 1 fix).
+                        let swapped_delta =
+                            ((oy - global_raw_x).powi(2) + (ox - global_raw_y).powi(2)).sqrt();
+                        let likely_swapped = swapped_delta < delta * 0.5 && delta > 50.0;
+                        if likely_swapped {
+                            tracing::warn!(
+                                delta = format!("{:.1}", delta),
+                                swapped_delta = format!("{:.1}", swapped_delta),
+                                "Oracle likely returned [x,y] instead of [y,x] — discarding"
+                            );
+                            oracle.record_success();
+                            x = global_raw_x;
+                            y = global_raw_y;
                             targeting_info = serde_json::json!({
-                                "element_at_target": null,
-                                "snapped_to_center": false,
-                                "targeting_hint": "No interactive element found — screenshot capture failed",
+                                "vision_oracle": false,
+                                "raw_coords": [raw_x, raw_y],
+                                "oracle_coords": [ox, oy],
+                                "delta_px": (delta * 10.0).round() / 10.0,
+                                "elapsed_ms": elapsed_ms,
+                                "targeting_hint": "Oracle axis swap detected — using raw coords",
+                            });
+                        } else if delta > MAX_ORACLE_DELTA {
+                            tracing::warn!(
+                                delta = format!("{:.1}", delta),
+                                max = MAX_ORACLE_DELTA,
+                                "Oracle delta too large — discarding, using raw coords"
+                            );
+                            oracle.record_success(); // API worked, just result was weird
+                            // Use frame's display origin (same as delta comparison, Bug 2 fix)
+                            x = raw_x + frame_display_origin.0;
+                            y = raw_y + frame_display_origin.1;
+                            targeting_info = serde_json::json!({
+                                "vision_oracle": false,
+                                "raw_coords": [raw_x, raw_y],
+                                "oracle_coords": [ox, oy],
+                                "delta_px": (delta * 10.0).round() / 10.0,
+                                "elapsed_ms": elapsed_ms,
+                                "targeting_hint": "Oracle delta exceeded threshold — using raw coords",
+                            });
+                        } else {
+                            oracle.record_success();
+                            x = ox; // Already includes display origin from oracle
+                            y = oy;
+                            targeting_info = serde_json::json!({
+                                "vision_oracle": true,
+                                "raw_coords": [raw_x, raw_y],
+                                "oracle_coords": [ox, oy],
+                                "delta_px": (delta * 10.0).round() / 10.0,
+                                "elapsed_ms": elapsed_ms,
                             });
                         }
                     }
-                } else {
-                    targeting_info = serde_json::json!({
-                        "element_at_target": null,
-                        "snapped_to_center": false,
-                        "targeting_hint": "No interactive element found at coordinates — click may miss",
-                    });
+                    // Oracle says target not visible (NotFound) — NOT a failure
+                    OracleOutcome::NotFound(frame_display_origin) => {
+                        oracle.record_success(); // API worked correctly
+                        // Use frame's display origin (same capture the oracle saw, Bug 2 fix)
+                        x = raw_x + frame_display_origin.0;
+                        y = raw_y + frame_display_origin.1;
+                        tracing::info!(
+                            elapsed_ms,
+                            "Vision oracle: target not visible, using raw coords"
+                        );
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_not_found": true,
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle: target not visible — using raw coordinates",
+                        });
+                    }
+                    // Real API/parse failure — increments circuit breaker
+                    OracleOutcome::Failed(e, frame_display_origin) => {
+                        oracle.record_failure();
+                        // Use frame's display origin when available, else fallback (Bug 2 fix)
+                        x = raw_x + frame_display_origin.0;
+                        y = raw_y + frame_display_origin.1;
+                        tracing::warn!(error = %e, elapsed_ms, "Vision oracle failed");
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_error": format!("{e}"),
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle failed — using raw coordinates",
+                        });
+                    }
+                    OracleOutcome::TimedOut => {
+                        // Timeout — increments circuit breaker
+                        oracle.record_failure();
+                        // Apply display origin to raw coords (multi-monitor fix)
+                        x = raw_x + display_origin.0;
+                        y = raw_y + display_origin.1;
+                        tracing::warn!("Vision oracle timed out after 4s");
+                        targeting_info = serde_json::json!({
+                            "vision_oracle": false,
+                            "raw_coords": [raw_x, raw_y],
+                            "oracle_error": "timeout",
+                            "elapsed_ms": elapsed_ms,
+                            "targeting_hint": "Oracle timed out — using raw coordinates",
+                        });
+                    }
                 }
+            } else {
+                // Oracle unavailable (not configured or circuit breaker tripped)
+                // Apply display origin to raw coords (multi-monitor fix)
+                x = raw_x + display_origin.0;
+                y = raw_y + display_origin.1;
+                let reason = if vision_oracle.is_some() {
+                    "circuit_breaker"
+                } else {
+                    "not_configured"
+                };
+                targeting_info = serde_json::json!({
+                    "vision_oracle": false,
+                    "raw_coords": [raw_x, raw_y],
+                    "oracle_skipped": reason,
+                    "targeting_hint": "Oracle unavailable — using raw coordinates",
+                });
+            }
+
+            // Bug 3: Detect app switch during oracle latency
+            let post_oracle_app = tokio::task::spawn_blocking(|| {
+                aura_screen::macos::get_frontmost_app().unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            if !pre_oracle_app.is_empty()
+                && !post_oracle_app.is_empty()
+                && pre_oracle_app != post_oracle_app
+            {
+                tracing::warn!(
+                    pre_app = %pre_oracle_app,
+                    post_app = %post_oracle_app,
+                    "Frontmost app changed during oracle — falling back to raw coords"
+                );
+                x = raw_x + display_origin.0;
+                y = raw_y + display_origin.1;
+                targeting_info = serde_json::json!({
+                    "vision_oracle": false,
+                    "raw_coords": [raw_x, raw_y],
+                    "app_switch_detected": true,
+                    "pre_app": pre_oracle_app,
+                    "post_app": post_oracle_app,
+                    "targeting_hint": "App changed during oracle — using raw coordinates",
+                });
             }
 
             // Pre-move cursor to click target so apps register hover state
@@ -583,20 +792,6 @@ pub(crate) async fn execute_tool(
             .await
         }
         "activate_app" => {
-            const BLOCKED_APPS: &[&str] = &[
-                "terminal",
-                "iterm",
-                "iterm2",
-                "kitty",
-                "alacritty",
-                "warp",
-                "hyper",
-                "tabby",
-                "rio",
-                "wezterm",
-                "ghostty",
-            ];
-
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if name.is_empty() {
                 return serde_json::json!({
@@ -606,7 +801,7 @@ pub(crate) async fn execute_tool(
             }
 
             let name_lower = name.to_lowercase();
-            if BLOCKED_APPS
+            if BLOCKED_TERMINAL_APPS
                 .iter()
                 .any(|b| name_lower == *b || name_lower.contains(b))
             {
@@ -861,6 +1056,287 @@ pub(crate) async fn execute_tool(
                         "available_items": last_seen_items,
                     })
                 }
+            }
+        }
+        "select_text" => {
+            let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("all");
+
+            match method {
+                "all" => {
+                    // Cmd+A
+                    let keycode = aura_input::keyboard::keycode_from_name("a").unwrap();
+                    run_with_pid_fallback(
+                        move |pid| aura_input::keyboard::press_key_pid(keycode, &["cmd"], pid),
+                        "select_all_pid",
+                        move || aura_input::keyboard::press_key(keycode, &["cmd"]),
+                        "select_all_hid",
+                    )
+                    .await
+                }
+                "word" => {
+                    let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let lx = dims.to_logical_x(raw_x);
+                    let ly = dims.to_logical_y(raw_y);
+                    // Double-click to select word
+                    run_with_pid_fallback(
+                        move |pid| aura_input::mouse::click_pid(lx, ly, "left", 2, &[], pid),
+                        "word_select_pid",
+                        move || aura_input::mouse::click(lx, ly, "left", 2, &[]),
+                        "word_select_hid",
+                    )
+                    .await
+                }
+                "line" => {
+                    let raw_x = args.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let raw_y = args.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let lx = dims.to_logical_x(raw_x);
+                    let ly = dims.to_logical_y(raw_y);
+                    // Triple-click to select line
+                    run_with_pid_fallback(
+                        move |pid| aura_input::mouse::click_pid(lx, ly, "left", 3, &[], pid),
+                        "line_select_pid",
+                        move || aura_input::mouse::click(lx, ly, "left", 3, &[]),
+                        "line_select_hid",
+                    )
+                    .await
+                }
+                "to_start" => {
+                    // Cmd+Shift+Up to select from cursor to document start
+                    let keycode = aura_input::keyboard::keycode_from_name("up").unwrap();
+                    run_with_pid_fallback(
+                        move |pid| {
+                            aura_input::keyboard::press_key_pid(keycode, &["cmd", "shift"], pid)
+                        },
+                        "select_to_start_pid",
+                        move || aura_input::keyboard::press_key(keycode, &["cmd", "shift"]),
+                        "select_to_start_hid",
+                    )
+                    .await
+                }
+                "to_end" => {
+                    // Cmd+Shift+Down to select from cursor to document end
+                    let keycode = aura_input::keyboard::keycode_from_name("down").unwrap();
+                    run_with_pid_fallback(
+                        move |pid| {
+                            aura_input::keyboard::press_key_pid(keycode, &["cmd", "shift"], pid)
+                        },
+                        "select_to_end_pid",
+                        move || aura_input::keyboard::press_key(keycode, &["cmd", "shift"]),
+                        "select_to_end_hid",
+                    )
+                    .await
+                }
+                other => {
+                    serde_json::json!({
+                        "success": false,
+                        "error": format!("Unknown select_text method: {other}. Use: all, word, line, to_start, to_end"),
+                    })
+                }
+            }
+        }
+        "run_javascript" => {
+            let app = args.get("app").and_then(|v| v.as_str()).unwrap_or("Safari");
+            let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
+
+            if code.is_empty() {
+                return serde_json::json!({ "success": false, "error": "code parameter is required" });
+            }
+
+            // Resolve browser name for AppleScript targeting
+            let (script_app, bundle_hint) = match app {
+                "Chrome" => ("Google Chrome", "com.google.Chrome"),
+                _ => ("Safari", "com.apple.Safari"),
+            };
+
+            // Pre-check Automation permission
+            let bundle = bundle_hint.to_string();
+            let perm = tokio::task::spawn_blocking(move || {
+                aura_bridge::automation::check_automation_permission(&bundle)
+            })
+            .await
+            .unwrap_or(aura_bridge::automation::AutomationPermission::Unknown(-1));
+            if perm == aura_bridge::automation::AutomationPermission::Denied {
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Automation permission for {script_app} is denied. \
+                         Grant it in System Settings > Privacy & Security > Automation."
+                    ),
+                    "error_kind": "automation_denied",
+                });
+            }
+
+            // Escape backslashes and double quotes for AppleScript string embedding
+            let escaped_code = code.replace('\\', "\\\\").replace('"', "\\\"");
+
+            // Build the AppleScript that executes JS in the browser
+            let script = if app == "Chrome" {
+                format!(
+                    "tell application \"Google Chrome\" to execute front window's active tab javascript \"{}\"",
+                    escaped_code
+                )
+            } else {
+                format!(
+                    "tell application \"Safari\" to do JavaScript \"{}\" in document 1",
+                    escaped_code
+                )
+            };
+
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(30)
+                .min(MAX_APPLESCRIPT_TIMEOUT_SECS);
+            let result = executor
+                .run(&script, ScriptLanguage::AppleScript, timeout)
+                .await;
+
+            if !result.success && is_automation_denied(&result.stderr) {
+                return serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Automation permission for {script_app} was denied. \
+                         Grant it in System Settings > Privacy & Security > Automation."
+                    ),
+                    "error_kind": "automation_denied",
+                    "stderr": result.stderr,
+                });
+            }
+
+            serde_json::json!({
+                "success": result.success,
+                "result": result.stdout,
+                "stderr": result.stderr,
+            })
+        }
+        "run_shell_command" => {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd_args: Vec<String> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Validate command is in allowlist
+            let abs_path = match ALLOWED_SHELL_COMMANDS
+                .iter()
+                .find(|(name, _)| *name == command)
+            {
+                Some((_, path)) => *path,
+                None => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Command '{}' is not allowed. Allowed: {}",
+                            command,
+                            ALLOWED_SHELL_COMMANDS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                        ),
+                    });
+                }
+            };
+
+            // Block sudo in any argument
+            if cmd_args.iter().any(|a| a == "sudo") {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "sudo is not allowed in shell commands",
+                });
+            }
+
+            // Block shell metacharacters in any argument
+            for arg in &cmd_args {
+                if let Some(meta) = SHELL_METACHARACTERS.iter().find(|m| arg.contains(*m)) {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Shell metacharacter '{}' is not allowed in arguments", meta),
+                    });
+                }
+                if arg.contains('\0') {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": "Null bytes are not allowed in arguments",
+                    });
+                }
+            }
+
+            // Block dangerous defaults domains
+            if command == "defaults" && cmd_args.len() >= 2 {
+                let subcommand = cmd_args[0].as_str();
+                let domain = &cmd_args[1];
+                if (subcommand == "write" || subcommand == "delete")
+                    && let Some(blocked) = BLOCKED_DEFAULTS_DOMAINS
+                        .iter()
+                        .find(|d| domain.starts_with(*d))
+                {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("defaults domain '{}' is blocked for security", blocked),
+                    });
+                }
+            }
+
+            // Block `open -a <terminal>` — same safety gate as activate_app
+            if command == "open" && cmd_args.len() >= 2 && cmd_args[0] == "-a" {
+                let app_lower = cmd_args[1].to_lowercase();
+                if BLOCKED_TERMINAL_APPS
+                    .iter()
+                    .any(|b| app_lower == *b || app_lower.contains(b))
+                {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": "Cannot open terminal apps via run_shell_command for safety. Ask the user to open it manually.",
+                    });
+                }
+            }
+
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(15)
+                .min(MAX_SHELL_TIMEOUT_SECS);
+
+            let abs_path_owned = abs_path.to_string();
+            let shell_fut = tokio::task::spawn_blocking(move || {
+                let output = std::process::Command::new(&abs_path_owned)
+                    .args(&cmd_args)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output();
+
+                match output {
+                    Ok(out) => {
+                        let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        stdout.truncate(MAX_SHELL_OUTPUT_BYTES);
+                        stderr.truncate(MAX_SHELL_OUTPUT_BYTES);
+                        serde_json::json!({
+                            "success": out.status.success(),
+                            "exit_code": out.status.code(),
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        })
+                    }
+                    Err(e) => serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to execute command: {e}"),
+                    }),
+                }
+            });
+            match tokio::time::timeout(Duration::from_secs(timeout), shell_fut).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Task panicked: {e}"),
+                }),
+                Err(_) => serde_json::json!({
+                    "success": false,
+                    "error": format!("Command timed out after {timeout} seconds"),
+                }),
             }
         }
         other => serde_json::json!({

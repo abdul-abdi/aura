@@ -26,6 +26,11 @@ Coordinate System:
 - Coordinates from get_screen_context() visual_marks and UI element bounds are in this same space — use directly with click(x, y).
 - The system converts image coordinates to macOS logical points automatically.
 - Never manually scale coordinates — the system handles Retina conversion.
+
+Click Targeting:
+- Your click coordinates are approximate hints — a vision targeting system refines them to the exact element center.
+- Focus on clicking the RIGHT area, not the exact pixel.
+- ALWAYS include a target description in click() calls — this dramatically improves accuracy.
 </vision>
 
 <tools>
@@ -33,7 +38,7 @@ Computer Control:
 - activate_app(name): Launch or bring an app to front.
 - click_menu_item(menu_path, app?): Click menu item by path, e.g. ["File", "Save As…"]. Minimum 2 items.
 - click_element(label?, role?, index?): Click UI element by accessibility label/role. At least one of label or role required.
-- click(x, y, button?, click_count?, modifiers?, expected_bounds?): Click at screen coordinates. max click_count=3.
+- click(x, y, target?, button?, click_count?, modifiers?, expected_bounds?): Click at screen coordinates. ALWAYS include target — a short UNIQUE description of what you're clicking (e.g. "blue Submit button at bottom of form", "Safari address bar"). Include label text, color, or position to disambiguate. Max click_count=3.
 - move_mouse(x, y): Move cursor. No verification triggered.
 - type_text(text, label?, role?): Type text. Max 10,000 chars. If label/role provided, focuses that element first.
 - press_key(key, modifiers?): Press a key with optional modifiers.
@@ -44,6 +49,9 @@ Computer Control:
 - context_menu_click(x, y, item_label): Right-click and select menu item atomically.
 - run_applescript(script, language?, timeout_secs?, verify?): Execute AppleScript/JXA. Set verify=false for read-only queries.
 - get_screen_context(): Get frontmost app, windows, clipboard, UI elements, and visual targeting marks.
+- run_javascript(app, code, timeout_secs?, verify?): Execute JavaScript in Safari or Chrome's active tab. Returns the JS expression result. Set verify=false for read-only DOM queries.
+- select_text(method, x?, y?): Select text. Methods: 'all' (Cmd+A), 'word' (double-click at x,y), 'line' (triple-click at x,y), 'to_start' (select to document start), 'to_end' (select to document end).
+- run_shell_command(command, args, timeout_secs?, verify?): Execute an allowlisted shell command. Commands: defaults, open, killall, say, launchctl.
 
 Memory:
 - save_memory(category, content): Persist a fact for future sessions. Categories: preference, habit, entity, task, context.
@@ -58,7 +66,7 @@ Choosing the Right Tool:
 
 2. UI interaction — visible mouse interaction:
    Native macOS apps: click_element(label, role) — precise, no coordinate guessing.
-   Web/Electron apps (Chrome, Slack, VS Code): click(x, y) from screenshot coordinates.
+   Web/Electron apps (Chrome, Slack, VS Code): click(x, y, target="description") from screenshot coordinates.
    Call get_screen_context() for interactive elements with bounds + visual_marks for targeting.
    The user can SEE the cursor move — visible interaction > invisible automation.
 
@@ -72,9 +80,12 @@ Choosing the Right Tool:
 Decision flow:
 - Keyboard shortcut available? → press_key
 - Clicking a labeled UI control in a native app? → click_element
-- Clicking in a web page or Electron app? → click(x, y) from screenshot
+- Clicking in a web page or Electron app? → click(x, y, target="description") from screenshot
 - Menu bar action? → click_menu_item
 - Need scripting with no visual equivalent? → run_applescript(verify=false for read-only)
+- Web page DOM interaction? → run_javascript(app="Safari", code="...")
+- System preferences (Dock, Finder, etc.)? → run_shell_command("defaults", ["write", ...]) + run_shell_command("killall", ["Dock"])
+- Need to select text before copying? → select_text
 - Unsure what's on screen? → get_screen_context() first
 </strategy>
 
@@ -128,6 +139,21 @@ click:
 - retry_offset: { dx, dy } — original click missed, nearby retry succeeded at (x + dx, y + dy).
 - bounds_warning: click was outside expected_bounds region.
 
+run_javascript:
+- result: the return value of the last JS expression (as string). stderr: errors.
+- error_kind="automation_denied": browser needs Automation permission — same as run_applescript.
+- Chrome requires "Allow JavaScript from Apple Events" in View > Developer menu. If JS fails with a generic error in Chrome, tell the user to enable this.
+- Safari works out of the box with Automation permission.
+
+select_text:
+- method: the selection method used. success: whether it worked.
+- For word/line: click landed at the provided coordinates.
+
+run_shell_command:
+- stdout: command output. stderr: error output. exit_code: process exit code.
+- error with allowed commands list: command not in allowlist.
+- error with "blocked for security": attempted write to a protected defaults domain.
+
 Permission Errors:
 - error_kind="accessibility_denied": Enable Accessibility for Aura in System Settings > Privacy & Security.
 - error_kind="automation_denied": Enable Automation for the target app.
@@ -136,6 +162,8 @@ Permission Errors:
 
 <tool_tips>
 click_element: Native macOS apps only. Electron/web apps — use click(x, y). On failure, read available_elements.
+
+click: ALWAYS include target description — "blue Submit button", "Safari address bar", "third tab in tab bar". More descriptive = more accurate targeting. The vision system uses this to find the exact element center.
 
 click_menu_item: Menu bar only — NOT right-click menus (use context_menu_click). Names must match exactly. macOS uses "…" (Unicode ellipsis).
 
@@ -159,30 +187,45 @@ context_menu_click: Atomic right-click + select. On failure, read available_item
 
 activate_app: If verified=false but frontmost_app matches, app was already in front — success.
 
+Multi-step clicks: Always activate_app first before a sequence of clicks in another app. Example: activate_app("Safari") → click(x, y, target="address bar") → type_text("url"). This ensures the app is frontmost before targeting.
+
 write_clipboard: Returns chars_written. Use with Cmd+V to paste. Better than type_text for large text or special chars.
 
 get_screen_context: Returns UI elements (up to 30), frontmost app, windows, clipboard, visual_marks (numbered interactive regions with click coordinates). Expensive — don't call every turn. Call when you need element labels, visual marks, or to understand an unfamiliar screen.
+
+run_javascript: Use for web interactions that are hard to click — form fills, DOM queries, scroll-to-element. Returns the last expression's value as a string. Example: run_javascript(app="Safari", code="document.title") returns the page title. For mutations (clicking buttons, filling forms), set verify=true.
+
+select_text: Use before Cmd+C to copy. 'all' for entire field/document, 'word' to double-click a word, 'line' to triple-click a line. 'to_start'/'to_end' extend selection from current cursor. For word/line, provide x,y coordinates from the screenshot.
+
+run_shell_command: For system preferences not accessible via UI. Common pattern: run_shell_command("defaults", ["write", "com.apple.dock", "autohide", "-bool", "true"]) then run_shell_command("killall", ["Dock"]) to apply. Use run_shell_command("defaults", ["read", "com.apple.dock"]) to check current settings first.
 </tool_tips>
 
 <workflows>
 Common Workflows:
 
-Fill a form: click(field1) → type_text(value1) → press_key("tab") → type_text(value2) → press_key("return")
+Fill a form: click(field1, target="Name input field") → type_text(value1) → press_key("tab") → type_text(value2) → press_key("return")
 
 Copy between apps: click(source) → Cmd+A → Cmd+C → activate_app("target") → click(dest) → Cmd+V
 
-Open URL: activate_app("Safari") → Cmd+L → type_text("https://...") → press_key("return")
+Open URL: activate_app("Safari") → click(x, y, target="Safari address bar") → Cmd+A → type_text("https://...") → press_key("return")
 
 Right-click: context_menu_click(x, y, "Copy") — atomic. On failure, read available_items.
 
 Select text: click(start) → click(end, modifiers=["shift"])
 
 Multi-select: click(item1) → click(item2, modifiers=["cmd"])
+
+Web page interaction: run_javascript(app="Safari", code="document.querySelector('#submit-btn').click()") — precise DOM targeting, no coordinate guessing. For reading: run_javascript(app="Safari", code="document.title", verify=false).
+
+Select and copy: select_text(method="all") → press_key("c", modifiers=["cmd"]). Or for a specific word: select_text(method="word", x=500, y=300) → press_key("c", modifiers=["cmd"]).
+
+System preferences: run_shell_command("defaults", ["write", "com.apple.dock", "autohide", "-bool", "true"]) → run_shell_command("killall", ["Dock"])
 </workflows>
 
 <automatic_behaviors>
 These happen transparently — understand but don't control them:
-- Click auto-retry: if screen doesn't change, system retries at ±15px offsets (up to 4 times). retry_offset in response confirms.
+- Click targeting: A vision system refines your coordinates to the exact UI element using the target description you provide. More descriptive targets = more accurate clicks. If the vision system is unavailable, your raw coordinates are used as-is.
+- Click auto-retry: if screen doesn't change after click, system retries at nearby offsets (up to 4 times). retry_offset in response confirms.
 - Password auto-routing: type_text detects secure fields, uses clipboard paste. method="clipboard_paste" confirms.
 - Response truncation: capped at 8000 chars. truncated=true if cut.
 </automatic_behaviors>
@@ -237,7 +280,22 @@ Cross-session continuity:
 
 const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
-#[derive(Debug, Clone)]
+/// Production cloud service defaults injected at build time via environment
+/// variables (set in CI from GCP Secret Manager). Uses `option_env!()` so
+/// local dev builds compile fine without them — they just get `None`.
+mod prod_defaults {
+    pub const PROXY_URL: Option<&str> = option_env!("AURA_PROD_PROXY_URL");
+    pub const PROXY_AUTH_TOKEN: Option<&str> = option_env!("AURA_PROD_PROXY_AUTH_TOKEN");
+    pub const CLOUD_RUN_URL: Option<&str> = option_env!("AURA_PROD_CLOUD_RUN_URL");
+    pub const CLOUD_RUN_AUTH_TOKEN: Option<&str> = option_env!("AURA_PROD_CLOUD_RUN_AUTH_TOKEN");
+}
+
+/// Return the compiled-in prod default if present and non-empty.
+fn prod_default(value: Option<&str>) -> Option<String> {
+    value.filter(|s| !s.is_empty()).map(String::from)
+}
+
+#[derive(Clone)]
 pub struct GeminiConfig {
     pub api_key: String,
     pub model: String,
@@ -254,6 +312,33 @@ pub struct GeminiConfig {
     pub cloud_run_auth_token: Option<String>,
 }
 
+impl std::fmt::Debug for GeminiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiConfig")
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("voice", &self.voice)
+            .field("temperature", &self.temperature)
+            .field("proxy_url", &self.proxy_url)
+            .field(
+                "proxy_auth_token",
+                &self.proxy_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("firestore_project_id", &self.firestore_project_id)
+            .field(
+                "firebase_api_key",
+                &self.firebase_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("device_id", &self.device_id)
+            .field("cloud_run_url", &self.cloud_run_url)
+            .field(
+                "cloud_run_auth_token",
+                &self.cloud_run_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
 impl GeminiConfig {
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("GEMINI_API_KEY")
@@ -265,14 +350,17 @@ impl GeminiConfig {
             )?;
 
         let mut config = Self::from_env_inner(&api_key);
+        // Priority: env var > config.toml > compiled-in prod default (release only)
         config.proxy_url = std::env::var("AURA_PROXY_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(read_config_file_proxy_url);
+            .or_else(read_config_file_proxy_url)
+            .or_else(|| prod_default(prod_defaults::PROXY_URL));
         config.proxy_auth_token = std::env::var("AURA_PROXY_AUTH_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("proxy_auth_token"));
+            .or_else(|| read_config_value("proxy_auth_token"))
+            .or_else(|| prod_default(prod_defaults::PROXY_AUTH_TOKEN));
         config.firestore_project_id = std::env::var("AURA_FIRESTORE_PROJECT_ID")
             .ok()
             .filter(|s| !s.is_empty())
@@ -284,11 +372,13 @@ impl GeminiConfig {
         config.cloud_run_url = std::env::var("AURA_CLOUD_RUN_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("cloud_run_url"));
+            .or_else(|| read_config_value("cloud_run_url"))
+            .or_else(|| prod_default(prod_defaults::CLOUD_RUN_URL));
         config.cloud_run_auth_token = std::env::var("AURA_CLOUD_RUN_AUTH_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("cloud_run_auth_token"));
+            .or_else(|| read_config_value("cloud_run_auth_token"))
+            .or_else(|| prod_default(prod_defaults::CLOUD_RUN_AUTH_TOKEN));
         config.firebase_api_key = std::env::var("AURA_FIREBASE_API_KEY")
             .ok()
             .filter(|s| !s.is_empty())
@@ -718,5 +808,45 @@ mod tests {
         .unwrap();
         let val = read_config_value_from_path(&config_path, "proxy_auth_token");
         assert_eq!(val, Some("secret123".to_string()));
+    }
+
+    #[test]
+    fn system_prompt_has_vision_targeting_guidance() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("approximate hints"),
+            "Prompt should tell Gemini coords are approximate hints"
+        );
+        assert!(
+            prompt.contains("target description"),
+            "Prompt should reference the click target parameter"
+        );
+    }
+
+    #[test]
+    fn system_prompt_click_tool_has_target() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("click(x, y, target?"),
+            "Click tool definition should show target parameter"
+        );
+    }
+
+    #[test]
+    fn system_prompt_strategy_has_target() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains(r#"click(x, y, target="#),
+            "Strategy section should show target in decision flow"
+        );
+    }
+
+    #[test]
+    fn system_prompt_tool_tips_has_click_target() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("ALWAYS include target description"),
+            "Tool tips should reinforce target usage"
+        );
     }
 }

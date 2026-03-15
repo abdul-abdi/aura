@@ -4,9 +4,12 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
 const REST_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -21,6 +24,8 @@ pub struct VisionOracle {
     client: reqwest::Client,
     api_key: String,
     model: String,
+    consecutive_failures: AtomicU32,
+    tripped_until: AtomicU64, // epoch millis
 }
 
 impl VisionOracle {
@@ -33,6 +38,8 @@ impl VisionOracle {
             client,
             api_key: api_key.to_string(),
             model: DEFAULT_MODEL.to_string(),
+            consecutive_failures: AtomicU32::new(0),
+            tripped_until: AtomicU64::new(0),
         }
     }
 
@@ -43,43 +50,66 @@ impl VisionOracle {
     /// - `hint_x`, `hint_y`: Gemini Live's approximate logical coords
     /// - `img_w`, `img_h`: the JPEG image dimensions (pixels)
     /// - `screen_w`, `screen_h`: logical screen dimensions (macOS points)
+    /// - `target`: optional description of the UI element to find
+    /// - `display_origin_x`, `display_origin_y`: global display origin for multi-monitor support
     ///
-    /// Returns `Ok((logical_x, logical_y))` on success.
+    /// Returns `Ok(Some((logical_x, logical_y)))` on success, `Ok(None)` if target not found.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_element_coordinates(
         &self,
         screenshot_b64: &str,
         hint_x: f64,
         hint_y: f64,
-        img_w: u32,
-        img_h: u32,
+        _img_w: u32,
+        _img_h: u32,
         screen_w: u32,
         screen_h: u32,
-    ) -> Result<(f64, f64)> {
-        // Convert logical hint coords to image-space pixels for the prompt
-        let img_hint_x = (hint_x / screen_w as f64 * img_w as f64) as u32;
-        let img_hint_y = (hint_y / screen_h as f64 * img_h as f64) as u32;
+        target: Option<&str>,
+        display_origin_x: f64,
+        display_origin_y: f64,
+    ) -> Result<Option<(f64, f64)>> {
+        if screen_w == 0 || screen_h == 0 {
+            anyhow::bail!("Invalid screen dimensions: {}x{}", screen_w, screen_h);
+        }
 
-        let prompt = format!(
-            "You are a UI element locator. Given a screenshot, find the clickable UI element \
-             nearest to pixel ({}, {}) in this {}x{} image. \
-             Return ONLY the center point as [y, x] normalized to 0-1000. No other text.",
-            img_hint_x, img_hint_y, img_w, img_h
-        );
+        // Normalize hint coords to 0-1000 (same coordinate system as oracle output)
+        let norm_hint_x = (hint_x / screen_w as f64 * 1000.0) as u32;
+        let norm_hint_y = (hint_y / screen_h as f64 * 1000.0) as u32;
+
+        let prompt = match target {
+            Some(desc) => format!(
+                "You are a precise UI click targeting system for macOS.\n\n\
+                 Target: {desc}\n\
+                 Hint: approximately [{norm_hint_y}, {norm_hint_x}] (0-1000 normalized)\n\n\
+                 Rules:\n\
+                 - Find the element matching the target description, not just the nearest element to the hint\n\
+                 - Return the CENTER of the element, not an edge\n\
+                 - If multiple elements match, prefer the one closest to the hint\n\
+                 - If the target is on a canvas or content area (not a UI control), return the hint unchanged\n\
+                 - If the target is not visible or is covered by another element, return [-1, -1]\n\
+                 - Return ONLY [y, x] normalized to 0-1000. No other text."
+            ),
+            None => format!(
+                "You are a precise UI click targeting system for macOS.\n\n\
+                 Hint: approximately [{norm_hint_y}, {norm_hint_x}] (0-1000 normalized)\n\n\
+                 Find the nearest clickable UI element to the hint coordinates.\n\
+                 If no clickable element is visible near the hint, return [-1, -1].\n\
+                 Return ONLY the center point as [y, x] normalized to 0-1000. No other text."
+            ),
+        };
 
         let body = serde_json::json!({
             "contents": [{
                 "parts": [
                     { "text": prompt },
                     {
-                        "inline_data": { "mime_type": "image/jpeg", "data": screenshot_b64 },
-                        "media_resolution": { "level": "MEDIA_RESOLUTION_ULTRA_HIGH" }
+                        "inline_data": { "mime_type": "image/jpeg", "data": screenshot_b64 }
                     }
                 ]
             }],
             "generationConfig": {
                 "temperature": 0.0,
-                "maxOutputTokens": 50,
+                "maxOutputTokens": 100,
                 "mediaResolution": "MEDIA_RESOLUTION_ULTRA_HIGH"
             }
         });
@@ -120,25 +150,66 @@ impl VisionOracle {
 
         let elapsed = start.elapsed();
 
+        // Check for NotFound sentinel BEFORE parsing coordinates
+        if is_not_found_sentinel(text) {
+            tracing::info!(
+                elapsed_ms = elapsed.as_millis() as u64,
+                "Vision oracle: target not visible (returned [-1, -1])"
+            );
+            return Ok(None);
+        }
+
         let (norm_y, norm_x) = parse_normalized_coords(text).context(format!(
             "Vision oracle returned unparseable coords: {text:?}"
         ))?;
 
-        // Note: denormalize takes (norm_x, norm_y) — swap from Gemini's [y,x] to standard (x,y)
-        let (logical_x, logical_y) = denormalize(norm_x, norm_y, screen_w, screen_h);
+        let (local_x, local_y) = denormalize(norm_x, norm_y, screen_w, screen_h);
+        let global_x = local_x + display_origin_x;
+        let global_y = local_y + display_origin_y;
 
         tracing::info!(
             hint_x,
             hint_y,
             norm_y,
             norm_x,
-            logical_x,
-            logical_y,
+            logical_x = global_x,
+            logical_y = global_y,
             elapsed_ms = elapsed.as_millis() as u64,
             "Vision oracle returned coordinates"
         );
 
-        Ok((logical_x, logical_y))
+        Ok(Some((global_x, global_y)))
+    }
+
+    pub fn is_available(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        now >= self.tripped_until.load(Ordering::Acquire)
+    }
+
+    pub fn record_failure(&self) {
+        let prev = self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
+        if prev + 1 >= CIRCUIT_BREAKER_THRESHOLD {
+            let trip_until = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+                + CIRCUIT_BREAKER_COOLDOWN_SECS * 1000;
+            self.tripped_until.store(trip_until, Ordering::Release);
+            tracing::warn!(
+                cooldown_secs = CIRCUIT_BREAKER_COOLDOWN_SECS,
+                "Vision oracle circuit breaker tripped"
+            );
+        }
+    }
+
+    pub fn record_success(&self) {
+        let prev = self.consecutive_failures.swap(0, Ordering::AcqRel);
+        if prev >= CIRCUIT_BREAKER_THRESHOLD {
+            tracing::info!("Vision oracle circuit breaker recovered");
+        }
     }
 }
 
@@ -176,6 +247,25 @@ fn parse_normalized_coords(text: &str) -> Option<(f64, f64)> {
     }
 
     None
+}
+
+/// Check if oracle returned the "not found" sentinel [-1, -1]
+fn is_not_found_sentinel(text: &str) -> bool {
+    if let Some(start) = text.find('[')
+        && let Some(end) = text[start..].find(']')
+    {
+        let inner = &text[start + 1..start + end];
+        let nums: Vec<f64> = inner
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<f64>().ok())
+            .collect();
+        if nums.len() >= 2 && nums[0] == -1.0 && nums[1] == -1.0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_coords(y: f64, x: f64) -> Option<(f64, f64)> {
@@ -301,5 +391,52 @@ mod tests {
     #[test]
     fn reject_whitespace_brackets() {
         assert_eq!(parse_normalized_coords("[  ,  ]"), None);
+    }
+
+    #[test]
+    fn not_found_sentinel_detected() {
+        assert!(is_not_found_sentinel("[-1, -1]"));
+        assert!(is_not_found_sentinel("The target is not visible [-1, -1]"));
+    }
+
+    #[test]
+    fn not_found_sentinel_rejects_valid_coords() {
+        assert!(!is_not_found_sentinel("[456, 723]"));
+        assert!(!is_not_found_sentinel("no coordinates"));
+        assert!(!is_not_found_sentinel("[-1, 500]")); // only one -1
+    }
+
+    #[test]
+    fn normalize_hint_coords() {
+        let norm_x = (960.0_f64 / 1920.0 * 1000.0) as u32;
+        let norm_y = (540.0_f64 / 1080.0 * 1000.0) as u32;
+        assert_eq!(norm_x, 500);
+        assert_eq!(norm_y, 500);
+    }
+
+    #[test]
+    fn circuit_breaker_initially_available() {
+        let oracle = VisionOracle::new("fake-key");
+        assert!(oracle.is_available());
+    }
+
+    #[test]
+    fn circuit_breaker_trips_after_threshold() {
+        let oracle = VisionOracle::new("fake-key");
+        oracle.record_failure();
+        oracle.record_failure();
+        oracle.record_failure();
+        assert!(!oracle.is_available());
+    }
+
+    #[test]
+    fn circuit_breaker_resets_on_success() {
+        let oracle = VisionOracle::new("fake-key");
+        oracle.record_failure();
+        oracle.record_failure();
+        oracle.record_success();
+        assert!(oracle.is_available());
+        oracle.record_failure();
+        assert!(oracle.is_available()); // only 1 failure, not 3
     }
 }

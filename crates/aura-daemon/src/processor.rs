@@ -663,11 +663,16 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
 
                             let pre_hash = if tools::is_state_changing_tool(&name) {
-                                // Allow tools to opt out of verification (e.g. run_applescript with verify: false)
+                                // Allow tools to opt out of verification (e.g. run_applescript with verify: false).
+                                // Some tools default to verify=false (read-heavy tools like run_javascript, run_shell_command).
+                                let default_verify = !matches!(
+                                    name.as_str(),
+                                    "run_javascript" | "run_shell_command"
+                                );
                                 let verify = args
                                     .get("verify")
                                     .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
+                                    .unwrap_or(default_verify);
                                 if verify {
                                     Some(tool_last_hash.load(Ordering::Acquire))
                                 } else {
@@ -799,7 +804,15 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             args.get("y").and_then(|v| v.as_f64()),
                                         )
                                     {
-                                        let offsets = tools::spiral_offsets(tools::SPIRAL_RADIUS);
+                                        // Bug 7: Scale spiral radius from logical pixels to image pixels
+                                        // so offsets produce ~40 logical-pixel steps after to_logical conversion
+                                        let img_scale = if tool_dims.logical_w > 0 {
+                                            tool_dims.img_w as f64 / tool_dims.logical_w as f64
+                                        } else {
+                                            1.0
+                                        };
+                                        let scaled_radius = (tools::SPIRAL_RADIUS as f64 * img_scale).round() as i32;
+                                        let offsets = tools::spiral_offsets(scaled_radius);
                                         // Skip offset[0] (0,0) — that's the original click we already tried
                                         for (i, &(dx, dy)) in offsets.iter().skip(1).take(tools::MAX_CLICK_RETRIES).enumerate() {
                                             let retry_x = orig_x + dx as f64;
