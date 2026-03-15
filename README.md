@@ -152,15 +152,26 @@ The loop that runs continuously while Aura is active:
 
 ## Get started
 
-**1. Clone and build**
+**1. Prerequisites**
+
+> | Dependency | Install |
+> |---|---|
+> | **Xcode Command Line Tools** | `xcode-select --install` |
+> | **Rust 1.85+** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+>
+> Verify both are installed:
+> ```bash
+> xcode-select -p    # should print /Library/Developer/CommandLineTools or Xcode path
+> cargo --version    # should print cargo 1.85.0 or higher
+> ```
+
+**2. Clone**
 
 > ```bash
 > git clone https://github.com/abdul-abdi/aura.git && cd aura
 > ```
->
-> Requires **Rust 1.85+** and **Xcode Command Line Tools**.
 
-**2. Build, install, and launch**
+**3. Build, install, and launch**
 
 > ```bash
 > bash scripts/dev.sh
@@ -168,7 +179,7 @@ The loop that runs continuously while Aura is active:
 >
 > This builds the Rust daemon + SwiftUI app, code-signs with stable identifiers, installs `Aura.app` to `/Applications`, and launches it. One command.
 
-**3. First launch — onboarding**
+**4. First launch — onboarding**
 
 > Aura walks you through setup on first launch:
 >
@@ -186,7 +197,7 @@ The loop that runs continuously while Aura is active:
 >
 > **Step 3 — Done.** The daemon launches, connects to Gemini, and the green dot appears in your menu bar.
 
-**4. Start talking**
+**5. Start talking**
 
 > You're live. Aura is listening.
 
