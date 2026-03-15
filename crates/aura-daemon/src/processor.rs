@@ -1272,9 +1272,9 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             }).await;
                                             tracing::info!("Session consolidation complete");
 
-                                            // Sync facts to Firestore if config is available
-                                            // Skip if memory agent already handled it (avoids dual writes)
-                                            if !memory_agent_handled && let (Some(project_id), Some(device_id), Some(fb_key)) =
+                                            // Sync facts to Firestore if config is available.
+                                            // Always sync regardless of source (memory agent or local).
+                                            if let (Some(project_id), Some(device_id), Some(fb_key)) =
                                                 (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
                                                 && let Err(e) = super::cloud::sync_session_to_firestore(
                                                     &response.facts,
