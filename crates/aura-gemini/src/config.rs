@@ -26,6 +26,11 @@ Coordinate System:
 - Coordinates from get_screen_context() visual_marks and UI element bounds are in this same space — use directly with click(x, y).
 - The system converts image coordinates to macOS logical points automatically.
 - Never manually scale coordinates — the system handles Retina conversion.
+
+Click Targeting:
+- Your click coordinates are approximate hints — a vision targeting system refines them to the exact element center.
+- Focus on clicking the RIGHT area, not the exact pixel.
+- ALWAYS include a target description in click() calls — this dramatically improves accuracy.
 </vision>
 
 <tools>
@@ -33,7 +38,7 @@ Computer Control:
 - activate_app(name): Launch or bring an app to front.
 - click_menu_item(menu_path, app?): Click menu item by path, e.g. ["File", "Save As…"]. Minimum 2 items.
 - click_element(label?, role?, index?): Click UI element by accessibility label/role. At least one of label or role required.
-- click(x, y, button?, click_count?, modifiers?, expected_bounds?): Click at screen coordinates. max click_count=3.
+- click(x, y, target?, button?, click_count?, modifiers?, expected_bounds?): Click at screen coordinates. ALWAYS include target — a short UNIQUE description of what you're clicking (e.g. "blue Submit button at bottom of form", "Safari address bar"). Include label text, color, or position to disambiguate. Max click_count=3.
 - move_mouse(x, y): Move cursor. No verification triggered.
 - type_text(text, label?, role?): Type text. Max 10,000 chars. If label/role provided, focuses that element first.
 - press_key(key, modifiers?): Press a key with optional modifiers.
@@ -58,7 +63,7 @@ Choosing the Right Tool:
 
 2. UI interaction — visible mouse interaction:
    Native macOS apps: click_element(label, role) — precise, no coordinate guessing.
-   Web/Electron apps (Chrome, Slack, VS Code): click(x, y) from screenshot coordinates.
+   Web/Electron apps (Chrome, Slack, VS Code): click(x, y, target="description") from screenshot coordinates.
    Call get_screen_context() for interactive elements with bounds + visual_marks for targeting.
    The user can SEE the cursor move — visible interaction > invisible automation.
 
@@ -72,7 +77,7 @@ Choosing the Right Tool:
 Decision flow:
 - Keyboard shortcut available? → press_key
 - Clicking a labeled UI control in a native app? → click_element
-- Clicking in a web page or Electron app? → click(x, y) from screenshot
+- Clicking in a web page or Electron app? → click(x, y, target="description") from screenshot
 - Menu bar action? → click_menu_item
 - Need scripting with no visual equivalent? → run_applescript(verify=false for read-only)
 - Unsure what's on screen? → get_screen_context() first
@@ -137,6 +142,8 @@ Permission Errors:
 <tool_tips>
 click_element: Native macOS apps only. Electron/web apps — use click(x, y). On failure, read available_elements.
 
+click: ALWAYS include target description — "blue Submit button", "Safari address bar", "third tab in tab bar". More descriptive = more accurate targeting. The vision system uses this to find the exact element center.
+
 click_menu_item: Menu bar only — NOT right-click menus (use context_menu_click). Names must match exactly. macOS uses "…" (Unicode ellipsis).
 
 press_key: Keys: a-z, 0-9, return, escape, tab, space, delete, forwarddelete, up, down, left, right, home, end, pageup, pagedown, f1-f12, punctuation (-, =, [, ], \, ;, ', comma, period, /). Modifiers: cmd, shift, alt, ctrl.
@@ -167,11 +174,11 @@ get_screen_context: Returns UI elements (up to 30), frontmost app, windows, clip
 <workflows>
 Common Workflows:
 
-Fill a form: click(field1) → type_text(value1) → press_key("tab") → type_text(value2) → press_key("return")
+Fill a form: click(field1, target="Name input field") → type_text(value1) → press_key("tab") → type_text(value2) → press_key("return")
 
 Copy between apps: click(source) → Cmd+A → Cmd+C → activate_app("target") → click(dest) → Cmd+V
 
-Open URL: activate_app("Safari") → Cmd+L → type_text("https://...") → press_key("return")
+Open URL: activate_app("Safari") → click(x, y, target="Safari address bar") → Cmd+A → type_text("https://...") → press_key("return")
 
 Right-click: context_menu_click(x, y, "Copy") — atomic. On failure, read available_items.
 
@@ -182,7 +189,8 @@ Multi-select: click(item1) → click(item2, modifiers=["cmd"])
 
 <automatic_behaviors>
 These happen transparently — understand but don't control them:
-- Click auto-retry: if screen doesn't change, system retries at ±15px offsets (up to 4 times). retry_offset in response confirms.
+- Click targeting: A vision system refines your coordinates to the exact UI element using the target description you provide. More descriptive targets = more accurate clicks. If the vision system is unavailable, your raw coordinates are used as-is.
+- Click auto-retry: if screen doesn't change after click, system retries at nearby offsets (up to 4 times). retry_offset in response confirms.
 - Password auto-routing: type_text detects secure fields, uses clipboard paste. method="clipboard_paste" confirms.
 - Response truncation: capped at 8000 chars. truncated=true if cut.
 </automatic_behaviors>
@@ -718,5 +726,45 @@ mod tests {
         .unwrap();
         let val = read_config_value_from_path(&config_path, "proxy_auth_token");
         assert_eq!(val, Some("secret123".to_string()));
+    }
+
+    #[test]
+    fn system_prompt_has_vision_targeting_guidance() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("approximate hints"),
+            "Prompt should tell Gemini coords are approximate hints"
+        );
+        assert!(
+            prompt.contains("target description"),
+            "Prompt should reference the click target parameter"
+        );
+    }
+
+    #[test]
+    fn system_prompt_click_tool_has_target() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("click(x, y, target?"),
+            "Click tool definition should show target parameter"
+        );
+    }
+
+    #[test]
+    fn system_prompt_strategy_has_target() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains(r#"click(x, y, target="#),
+            "Strategy section should show target in decision flow"
+        );
+    }
+
+    #[test]
+    fn system_prompt_tool_tips_has_click_target() {
+        let prompt = DEFAULT_SYSTEM_PROMPT;
+        assert!(
+            prompt.contains("ALWAYS include target description"),
+            "Tool tips should reinforce target usage"
+        );
     }
 }
