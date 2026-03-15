@@ -16,5 +16,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 sha2 = "0.10"
 subtle = "2"
+hex = "0.4"
 chrono = "0.4.44"
 futures = "0.3.32"
