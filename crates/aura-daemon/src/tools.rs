@@ -27,6 +27,31 @@ const SCROLL_MAX: i32 = 1000;
 /// Maximum timeout allowed for a single run_applescript call.
 const MAX_APPLESCRIPT_TIMEOUT_SECS: u64 = 120;
 
+/// Maximum timeout for shell commands.
+const MAX_SHELL_TIMEOUT_SECS: u64 = 60;
+
+/// Maximum output size from shell commands.
+const MAX_SHELL_OUTPUT_BYTES: usize = 10_240;
+
+/// Allowlisted shell commands with their absolute paths.
+const ALLOWED_SHELL_COMMANDS: &[(&str, &str)] = &[
+    ("defaults", "/usr/bin/defaults"),
+    ("open", "/usr/bin/open"),
+    ("killall", "/usr/bin/killall"),
+    ("say", "/usr/bin/say"),
+    ("launchctl", "/bin/launchctl"),
+];
+
+/// Blocked `defaults` domains that could compromise system security.
+const BLOCKED_DEFAULTS_DOMAINS: &[&str] = &[
+    "com.apple.security",
+    "com.apple.loginwindow",
+    "com.apple.screensaver",
+];
+
+/// Shell metacharacters that must not appear in any argument (injection prevention).
+const SHELL_METACHARACTERS: &[&str] = &["|", ";", "`", "$(", ">", "<", "&&", "||"];
+
 pub(crate) async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
@@ -1180,6 +1205,112 @@ pub(crate) async fn execute_tool(
                 "result": result.stdout,
                 "stderr": result.stderr,
             })
+        }
+        "run_shell_command" => {
+            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd_args: Vec<String> = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
+            // Validate command is in allowlist
+            let abs_path = match ALLOWED_SHELL_COMMANDS.iter().find(|(name, _)| *name == command) {
+                Some((_, path)) => *path,
+                None => {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Command '{}' is not allowed. Allowed: {}",
+                            command,
+                            ALLOWED_SHELL_COMMANDS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                        ),
+                    });
+                }
+            };
+
+            // Block sudo in any argument
+            if cmd_args.iter().any(|a| a == "sudo") {
+                return serde_json::json!({
+                    "success": false,
+                    "error": "sudo is not allowed in shell commands",
+                });
+            }
+
+            // Block shell metacharacters in any argument
+            for arg in &cmd_args {
+                if let Some(meta) = SHELL_METACHARACTERS.iter().find(|m| arg.contains(*m)) {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": format!("Shell metacharacter '{}' is not allowed in arguments", meta),
+                    });
+                }
+                if arg.contains('\0') {
+                    return serde_json::json!({
+                        "success": false,
+                        "error": "Null bytes are not allowed in arguments",
+                    });
+                }
+            }
+
+            // Block dangerous defaults domains
+            if command == "defaults" && cmd_args.len() >= 2 {
+                let subcommand = cmd_args[0].as_str();
+                let domain = &cmd_args[1];
+                if subcommand == "write" || subcommand == "delete" {
+                    if let Some(blocked) = BLOCKED_DEFAULTS_DOMAINS
+                        .iter()
+                        .find(|d| domain.starts_with(*d))
+                    {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": format!("defaults domain '{}' is blocked for security", blocked),
+                        });
+                    }
+                }
+            }
+
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(15)
+                .min(MAX_SHELL_TIMEOUT_SECS);
+            let _ = timeout; // reserved for future async timeout support
+
+            let abs_path_owned = abs_path.to_string();
+            let result = tokio::task::spawn_blocking(move || {
+                let output = std::process::Command::new(&abs_path_owned)
+                    .args(&cmd_args)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output();
+
+                match output {
+                    Ok(out) => {
+                        let mut stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        stdout.truncate(MAX_SHELL_OUTPUT_BYTES);
+                        stderr.truncate(MAX_SHELL_OUTPUT_BYTES);
+                        serde_json::json!({
+                            "success": out.status.success(),
+                            "exit_code": out.status.code(),
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        })
+                    }
+                    Err(e) => serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to execute command: {e}"),
+                    }),
+                }
+            })
+            .await
+            .unwrap_or_else(|e| serde_json::json!({
+                "success": false,
+                "error": format!("Task panicked: {e}"),
+            }));
+
+            result
         }
         other => serde_json::json!({
             "success": false,
