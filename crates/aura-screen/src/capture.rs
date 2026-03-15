@@ -33,6 +33,11 @@ pub struct CapturedFrame {
     pub logical_width: u32,
     /// Logical display height in macOS points (used for coordinate mapping).
     pub logical_height: u32,
+    /// Display origin X in global macOS coordinate space (for multi-monitor).
+    /// Primary display is (0, 0). Secondary displays have non-zero origins.
+    pub display_origin_x: f64,
+    /// Display origin Y in global macOS coordinate space.
+    pub display_origin_y: f64,
 }
 
 unsafe extern "C" {
@@ -167,6 +172,8 @@ fn capture_screen_with_params(max_width: u32, jpeg_quality: u8) -> Result<Captur
         scale_factor,
         logical_width: logical_w,
         logical_height: logical_h,
+        display_origin_x: display_bounds.origin.x,
+        display_origin_y: display_bounds.origin.y,
     })
 }
 
@@ -227,6 +234,16 @@ pub fn annotate_with_som(jpeg_bytes: &[u8]) -> Option<(String, Vec<crate::som::S
     annotated.write_with_encoder(encoder).ok()?;
 
     Some((BASE64.encode(&buf), marks))
+}
+
+/// Get the display origin (global coordinate offset) for the display under the mouse cursor.
+/// Returns (origin_x, origin_y) for multi-monitor support.
+/// Primary display is (0.0, 0.0). Secondary displays have non-zero origins.
+pub fn get_active_display_origin() -> Option<(f64, f64)> {
+    let display_id = active_display_id()?;
+    let display = CGDisplay::new(display_id);
+    let bounds = display.bounds();
+    Some((bounds.origin.x, bounds.origin.y))
 }
 
 #[cfg(test)]
@@ -370,6 +387,23 @@ mod tests {
         // Verify the function signature compiles — actual capture requires
         // Screen Recording permission and will fail in CI.
         let _fn_ptr: fn() -> Result<CapturedFrame> = capture_screen_high_res;
+    }
+
+    #[test]
+    fn captured_frame_has_display_origin() {
+        let frame = CapturedFrame {
+            jpeg_base64: String::new(),
+            hash: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 2.0,
+            logical_width: 1440,
+            logical_height: 900,
+            display_origin_x: 0.0,
+            display_origin_y: 0.0,
+        };
+        assert_eq!(frame.display_origin_x, 0.0);
+        assert_eq!(frame.display_origin_y, 0.0);
     }
 }
 
