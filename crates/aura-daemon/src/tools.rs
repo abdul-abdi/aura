@@ -271,6 +271,9 @@ pub(crate) async fn execute_tool(
                     .map_err(|e| anyhow::anyhow!("Screenshot task panicked: {e}"))?
                     .map_err(|e| anyhow::anyhow!("Screenshot capture failed: {e}"))?;
 
+                    // Capture frame's display origin now — same capture, no TOCTOU race.
+                    let frame_origin = (frame.display_origin_x, frame.display_origin_y);
+
                     let target_ref = target.as_deref();
                     let mut result = oracle
                         .find_element_coordinates(
@@ -298,29 +301,71 @@ pub(crate) async fn execute_tool(
                             .await;
                     }
 
-                    result
+                    // Return the oracle result together with the frame's display origin so
+                    // the delta comparison uses the same origin the oracle saw (Bug 2 fix).
+                    Ok::<(anyhow::Result<Option<(f64, f64)>>, (f64, f64)), anyhow::Error>((result, frame_origin))
                 })
                 .await;
 
                 let elapsed_ms = oracle_start.elapsed().as_millis() as u64;
 
-                match oracle_result {
+                // Destructure the oracle result to separate the frame's display origin from
+                // the oracle coordinate result. For error/timeout paths we fall back to the
+                // separately-fetched display_origin (Bug 2 fix).
+                enum OracleOutcome {
+                    Found((f64, f64), (f64, f64)),      // (coords, frame_origin)
+                    NotFound((f64, f64)),                 // frame_origin
+                    Failed(anyhow::Error, (f64, f64)),   // (error, frame_origin)
+                    TimedOut,
+                }
+                let outcome = match oracle_result {
+                    Ok(Ok((Ok(Some(coords)), origin))) => OracleOutcome::Found(coords, origin),
+                    Ok(Ok((Ok(None), origin)))          => OracleOutcome::NotFound(origin),
+                    Ok(Ok((Err(e), origin)))             => OracleOutcome::Failed(e, origin),
+                    Ok(Err(e))                           => OracleOutcome::Failed(e, display_origin),
+                    Err(_elapsed)                        => OracleOutcome::TimedOut,
+                };
+
+                match outcome {
                     // Oracle found the target
-                    Ok(Ok(Some((ox, oy)))) => {
-                        // Compare in global coords: raw also needs display origin for fair delta
-                        let global_raw_x = raw_x + display_origin.0;
-                        let global_raw_y = raw_y + display_origin.1;
+                    OracleOutcome::Found((ox, oy), frame_display_origin) => {
+                        // Use the frame's display origin for a fair delta comparison —
+                        // this is the origin the oracle actually saw (Bug 2 fix).
+                        let global_raw_x = raw_x + frame_display_origin.0;
+                        let global_raw_y = raw_y + frame_display_origin.1;
                         let delta = ((ox - global_raw_x).powi(2) + (oy - global_raw_y).powi(2)).sqrt();
-                        if delta > MAX_ORACLE_DELTA {
+
+                        // Axis-swap detection: if swapping ox/oy produces a much closer match,
+                        // Gemini likely returned [x,y] instead of [y,x] (Bug 1 fix).
+                        let swapped_delta = ((oy - global_raw_x).powi(2) + (ox - global_raw_y).powi(2)).sqrt();
+                        let likely_swapped = swapped_delta < delta * 0.5 && delta > 50.0;
+                        if likely_swapped {
+                            tracing::warn!(
+                                delta = format!("{:.1}", delta),
+                                swapped_delta = format!("{:.1}", swapped_delta),
+                                "Oracle likely returned [x,y] instead of [y,x] — discarding"
+                            );
+                            oracle.record_success();
+                            x = global_raw_x;
+                            y = global_raw_y;
+                            targeting_info = serde_json::json!({
+                                "vision_oracle": false,
+                                "raw_coords": [raw_x, raw_y],
+                                "oracle_coords": [ox, oy],
+                                "delta_px": (delta * 10.0).round() / 10.0,
+                                "elapsed_ms": elapsed_ms,
+                                "targeting_hint": "Oracle axis swap detected — using raw coords",
+                            });
+                        } else if delta > MAX_ORACLE_DELTA {
                             tracing::warn!(
                                 delta = format!("{:.1}", delta),
                                 max = MAX_ORACLE_DELTA,
                                 "Oracle delta too large — discarding, using raw coords"
                             );
                             oracle.record_success(); // API worked, just result was weird
-                            // Apply display origin to raw coords (multi-monitor fix)
-                            x = raw_x + display_origin.0;
-                            y = raw_y + display_origin.1;
+                            // Use frame's display origin (same as delta comparison, Bug 2 fix)
+                            x = raw_x + frame_display_origin.0;
+                            y = raw_y + frame_display_origin.1;
                             targeting_info = serde_json::json!({
                                 "vision_oracle": false,
                                 "raw_coords": [raw_x, raw_y],
@@ -343,11 +388,11 @@ pub(crate) async fn execute_tool(
                         }
                     }
                     // Oracle says target not visible (NotFound) — NOT a failure
-                    Ok(Ok(None)) => {
+                    OracleOutcome::NotFound(frame_display_origin) => {
                         oracle.record_success(); // API worked correctly
-                        // Apply display origin to raw coords (multi-monitor fix)
-                        x = raw_x + display_origin.0;
-                        y = raw_y + display_origin.1;
+                        // Use frame's display origin (same capture the oracle saw, Bug 2 fix)
+                        x = raw_x + frame_display_origin.0;
+                        y = raw_y + frame_display_origin.1;
                         tracing::info!(elapsed_ms, "Vision oracle: target not visible, using raw coords");
                         targeting_info = serde_json::json!({
                             "vision_oracle": false,
@@ -358,11 +403,11 @@ pub(crate) async fn execute_tool(
                         });
                     }
                     // Real API/parse failure — increments circuit breaker
-                    Ok(Err(e)) => {
+                    OracleOutcome::Failed(e, frame_display_origin) => {
                         oracle.record_failure();
-                        // Apply display origin to raw coords (multi-monitor fix)
-                        x = raw_x + display_origin.0;
-                        y = raw_y + display_origin.1;
+                        // Use frame's display origin when available, else fallback (Bug 2 fix)
+                        x = raw_x + frame_display_origin.0;
+                        y = raw_y + frame_display_origin.1;
                         tracing::warn!(error = %e, elapsed_ms, "Vision oracle failed");
                         targeting_info = serde_json::json!({
                             "vision_oracle": false,
@@ -372,7 +417,7 @@ pub(crate) async fn execute_tool(
                             "targeting_hint": "Oracle failed — using raw coordinates",
                         });
                     }
-                    Err(_) => {
+                    OracleOutcome::TimedOut => {
                         // Timeout — increments circuit breaker
                         oracle.record_failure();
                         // Apply display origin to raw coords (multi-monitor fix)
