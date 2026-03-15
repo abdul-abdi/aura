@@ -259,6 +259,13 @@ pub(crate) async fn execute_tool(
             .flatten()
             .unwrap_or((0.0, 0.0));
 
+            // Bug 3: Capture frontmost app before oracle so we can detect an app switch
+            let pre_oracle_app = tokio::task::spawn_blocking(|| {
+                aura_screen::macos::get_frontmost_app().unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+
             if let Some(oracle) = vision_oracle.filter(|o| o.is_available()) {
                 let oracle_start = std::time::Instant::now();
                 tracing::info!(x, y, target = ?target, "Querying vision oracle");
@@ -271,8 +278,33 @@ pub(crate) async fn execute_tool(
                     .map_err(|e| anyhow::anyhow!("Screenshot task panicked: {e}"))?
                     .map_err(|e| anyhow::anyhow!("Screenshot capture failed: {e}"))?;
 
+                    // Bug 5: Check for censored screenshot before sending to oracle
+                    if let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD
+                        .decode(&frame.jpeg_base64)
+                    {
+                        if let Ok(img) = image::load_from_memory_with_format(
+                            &jpeg_bytes,
+                            image::ImageFormat::Jpeg,
+                        ) {
+                            let rgb = img.to_rgb8();
+                            if aura_screen::capture::frame_looks_censored(
+                                rgb.as_raw(),
+                                rgb.width() as usize,
+                                rgb.height() as usize,
+                            ) {
+                                anyhow::bail!(
+                                    "Screenshot appears censored — Screen Recording permission may be revoked"
+                                );
+                            }
+                        }
+                    }
+
                     // Capture frame's display origin now — same capture, no TOCTOU race.
                     let frame_origin = (frame.display_origin_x, frame.display_origin_y);
+
+                    // Bug 8: Track elapsed time inside the oracle block to implement
+                    // budget-aware retry (skip retry if less than 2s remain).
+                    let oracle_inner_start = std::time::Instant::now();
 
                     let target_ref = target.as_deref();
                     let mut result = oracle
@@ -287,18 +319,30 @@ pub(crate) async fn execute_tool(
                         .await;
 
                     // Single retry on failure (Err only, not Ok(None))
+                    // Bug 8: Only retry if enough budget remains (>= 2s elapsed means skip)
                     if result.is_err() {
-                        tracing::warn!("Vision oracle attempt 1 failed, retrying");
-                        result = oracle
-                            .find_element_coordinates(
-                                &frame.jpeg_base64,
-                                x, y,
-                                frame.width, frame.height,
-                                frame.logical_width, frame.logical_height,
-                                target_ref,
-                                frame.display_origin_x, frame.display_origin_y,
-                            )
-                            .await;
+                        let elapsed_so_far = oracle_inner_start.elapsed();
+                        if elapsed_so_far < Duration::from_secs(2) {
+                            tracing::warn!(
+                                "Vision oracle attempt 1 failed, retrying ({:.1}s remaining)",
+                                (Duration::from_secs(4) - elapsed_so_far).as_secs_f64()
+                            );
+                            result = oracle
+                                .find_element_coordinates(
+                                    &frame.jpeg_base64,
+                                    x, y,
+                                    frame.width, frame.height,
+                                    frame.logical_width, frame.logical_height,
+                                    target_ref,
+                                    frame.display_origin_x, frame.display_origin_y,
+                                )
+                                .await;
+                        } else {
+                            tracing::warn!(
+                                elapsed_ms = elapsed_so_far.as_millis() as u64,
+                                "Vision oracle attempt 1 failed, skipping retry (insufficient budget)"
+                            );
+                        }
                     }
 
                     // Return the oracle result together with the frame's display origin so
@@ -444,6 +488,33 @@ pub(crate) async fn execute_tool(
                     "raw_coords": [raw_x, raw_y],
                     "oracle_skipped": reason,
                     "targeting_hint": "Oracle unavailable — using raw coordinates",
+                });
+            }
+
+            // Bug 3: Detect app switch during oracle latency
+            let post_oracle_app = tokio::task::spawn_blocking(|| {
+                aura_screen::macos::get_frontmost_app().unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+            if !pre_oracle_app.is_empty()
+                && !post_oracle_app.is_empty()
+                && pre_oracle_app != post_oracle_app
+            {
+                tracing::warn!(
+                    pre_app = %pre_oracle_app,
+                    post_app = %post_oracle_app,
+                    "Frontmost app changed during oracle — falling back to raw coords"
+                );
+                x = raw_x + display_origin.0;
+                y = raw_y + display_origin.1;
+                targeting_info = serde_json::json!({
+                    "vision_oracle": false,
+                    "raw_coords": [raw_x, raw_y],
+                    "app_switch_detected": true,
+                    "pre_app": pre_oracle_app,
+                    "post_app": post_oracle_app,
+                    "targeting_hint": "App changed during oracle — using raw coordinates",
                 });
             }
 
