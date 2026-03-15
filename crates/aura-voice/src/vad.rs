@@ -20,7 +20,7 @@ pub struct VoiceDetector {
 
 impl VoiceDetector {
     pub fn new() -> Result<Self, String> {
-        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Quality);
+        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::VeryAggressive);
         Ok(Self {
             vad,
             pre_roll: Vec::with_capacity(PRE_ROLL_FRAMES),

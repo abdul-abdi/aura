@@ -15,7 +15,8 @@ pub const CHANNELS: u16 = 1;
 const PREFERRED_RATES: &[u32] = &[48_000, 44_100, 96_000, 88_200, 16_000];
 
 /// Number of input frames per resampler chunk. Must match `SincFixedIn::new` chunk_size.
-const RESAMPLE_CHUNK_SIZE: usize = 1024;
+/// 512 frames ≈ 10.7ms at 48kHz — half the previous 1024, reducing accumulation latency.
+const RESAMPLE_CHUNK_SIZE: usize = 512;
 
 pub struct AudioCapture {
     device: Device,
@@ -101,11 +102,14 @@ impl AudioCapture {
 
         let resampler_state: Option<Arc<Mutex<ResampleState>>> =
             if (ratio - 1.0).abs() > f64::EPSILON {
+                // Voice-grade resampling: sinc_len=32 and oversampling_factor=32
+                // are sufficient for 16kHz speech (vs 128/128 studio-grade).
+                // This is ~4x faster with no audible difference for voice.
                 let params = SincInterpolationParameters {
-                    sinc_len: 128,
+                    sinc_len: 32,
                     f_cutoff: 0.925,
                     interpolation: SincInterpolationType::Linear,
-                    oversampling_factor: 128,
+                    oversampling_factor: 32,
                     window: WindowFunction::BlackmanHarris2,
                 };
                 let resampler = SincFixedIn::<f32>::new(

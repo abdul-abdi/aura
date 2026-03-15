@@ -35,9 +35,12 @@ fn save_keychain_token(token: &str) -> Result<(), String> {
     let status = std::process::Command::new("security")
         .args([
             "add-generic-password",
-            "-s", "com.aura.desktop",
-            "-a", "device_token",
-            "-w", token,
+            "-s",
+            "com.aura.desktop",
+            "-a",
+            "device_token",
+            "-w",
+            token,
             "-U", // Update if exists
         ])
         .status()
@@ -45,7 +48,9 @@ fn save_keychain_token(token: &str) -> Result<(), String> {
     if status.success() {
         Ok(())
     } else {
-        Err(format!("security add-generic-password failed with {status}"))
+        Err(format!(
+            "security add-generic-password failed with {status}"
+        ))
     }
 }
 

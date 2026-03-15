@@ -7,14 +7,14 @@ use aura_screen::capture::CaptureTrigger;
 use tokio_util::sync::CancellationToken;
 
 /// Screen is considered idle after this many consecutive unchanged captures.
-/// 10 × 500 ms = 5 s of no change → switch to slow polling.
-const IDLE_THRESHOLD: u32 = 10;
+/// 5 × 500 ms = 2.5 s of no change → switch to slow polling.
+const IDLE_THRESHOLD: u32 = 5;
 
-/// Fast capture interval used while the screen is actively changing.
+/// Fast capture interval — 2 FPS while screen is actively changing.
 const FAST_INTERVAL_MS: u64 = 500;
 
 /// Slow capture interval used while the screen is idle.
-const SLOW_INTERVAL_MS: u64 = 2000;
+const SLOW_INTERVAL_MS: u64 = 1500;
 
 /// Spawn the background screen capture loop.
 ///
@@ -41,6 +41,7 @@ pub(crate) fn spawn_screen_capture(
         let mut last_res: (u32, u32) = (0, 0);
         let mut censored_warned = false;
         let mut idle_skip_count: u32 = 0;
+        let mut frame_count: u32 = 0;
         let mut interval = tokio::time::interval(Duration::from_millis(FAST_INTERVAL_MS));
         interval.tick().await; // skip first immediate tick
 
@@ -95,13 +96,17 @@ pub(crate) fn spawn_screen_capture(
                 );
             }
 
-            // Check every new frame for censorship (Screen Recording not granted).
-            // Decode the base64 back to check pixel content for censorship detection.
-            if let Ok(jpeg_bytes) = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &frame.jpeg_base64,
-            ) && let Ok(img) =
-                image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+            frame_count += 1;
+
+            // Check for censorship periodically (not every frame — it's expensive).
+            // Decodes base64→JPEG→pixels. Check first 3 frames then every 20th.
+            if (frame_count <= 3 || frame_count.is_multiple_of(20))
+                && let Ok(jpeg_bytes) = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &frame.jpeg_base64,
+                )
+                && let Ok(img) =
+                    image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
             {
                 let rgb = img.to_rgb8();
                 if aura_screen::capture::frame_looks_censored(

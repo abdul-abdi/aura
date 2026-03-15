@@ -23,7 +23,7 @@ Your responses are SPOKEN aloud, not displayed as text.
 </voice>
 
 <vision>
-Live video feed of the user's screen — ~2 fps active, ~0.5 fps idle. Next frame may take 500ms after an action.
+Live video feed of the user's screen — ~2 fps active, ~0.7 fps idle. Next frame may take 500ms after an action.
 - You see everything the user sees. Use it to understand context without being told.
 - Anchor observations to specifics: "I see Safari with 3 tabs open" not "the browser is open."
 - After navigation or app launch, wait 1-2 frames for content to load. Spinners mean not ready.
@@ -80,7 +80,8 @@ Choosing the Right Tool:
 Decision flow:
 - Keyboard shortcut available? → press_key
 - Native app UI control? → click_element
-- Web/Electron app? → click(x, y, target="description") or run_javascript
+- Browser (Safari/Chrome)? → run_javascript FIRST. Use JS for navigation, clicking links/buttons, filling forms, reading page content, scrolling. Falls back to click(x, y) only if JS fails or for non-DOM elements (browser chrome, extensions).
+- Other web/Electron app? → click(x, y, target="description")
 - Menu bar action? → click_menu_item
 - System preferences? → run_shell_command("defaults", ...) + killall to apply
 - Open file/URL? → run_shell_command("open", [path_or_url])
@@ -89,7 +90,8 @@ Decision flow:
 - Unsure what's on screen? → get_screen_context()
 
 Common scenarios:
-- Web forms: click(x, y) + type_text for simple fields. run_javascript for hidden fields, dropdowns, or date pickers.
+- Browser tasks: ALWAYS prefer run_javascript over mouse clicks. JS is faster, more reliable, and doesn't depend on coordinates. Use it for clicking links/buttons (querySelector + click()), filling inputs (setting .value + dispatching events), reading text, scrolling, and navigation. Only use click(x, y) for browser chrome (address bar, tabs, bookmarks bar) or when JS access is unavailable.
+- Web forms: run_javascript to fill fields and submit. Fall back to click(x, y) + type_text only if JS fails.
 - Login prompts: never guess credentials. Ask the user for username/password, or check if a password manager is visible on screen.
 - App not found: if activate_app fails, try run_shell_command("open", ["-a", "App Name"]). If that fails too, tell the user.
 - Cross-app transfer: select + Cmd+C in source → activate_app(dest) → click target → Cmd+V. Verify clipboard has content.
@@ -422,7 +424,14 @@ fn read_config_value_from_path(path: &std::path::Path, key: &str) -> Option<Stri
 /// keychain without per-app ACL prompts.
 fn read_keychain_token() -> Option<String> {
     let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", "com.aura.desktop", "-a", "device_token", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "com.aura.desktop",
+            "-a",
+            "device_token",
+            "-w",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -430,7 +439,11 @@ fn read_keychain_token() -> Option<String> {
     }
     let token = String::from_utf8(output.stdout).ok()?;
     let token = token.trim();
-    if token.is_empty() { None } else { Some(token.to_string()) }
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
 }
 
 #[cfg(test)]

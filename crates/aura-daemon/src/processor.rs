@@ -1195,14 +1195,12 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                             if let Some(messages) = messages {
                                 // Try memory agent first, fall back to existing consolidation
-                                let mut memory_agent_handled = false;
                                 let consolidation_result = if let (Some(url), Some(token), Some(did)) =
                                     (&cloud_run_url, &cloud_run_auth_token, &cloud_run_device_id)
                                 {
                                     match ingest_to_memory_agent(url, token, did, &es_sid, &messages).await {
                                         Some(resp) => {
                                             tracing::info!("Memory agent ingested session successfully");
-                                            memory_agent_handled = true;
                                             // Fire-and-forget consolidation trigger
                                             let consolidate_url = format!("{url}/consolidate");
                                             let consolidate_token = token.clone();
@@ -1272,9 +1270,9 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                             }).await;
                                             tracing::info!("Session consolidation complete");
 
-                                            // Sync facts to Firestore if config is available
-                                            // Skip if memory agent already handled it (avoids dual writes)
-                                            if !memory_agent_handled && let (Some(project_id), Some(device_id), Some(fb_key)) =
+                                            // Sync facts to Firestore if config is available.
+                                            // Always sync regardless of source (memory agent or local).
+                                            if let (Some(project_id), Some(device_id), Some(fb_key)) =
                                                 (&firestore_project_id, &cloud_run_device_id, &firebase_api_key)
                                                 && let Err(e) = super::cloud::sync_session_to_firestore(
                                                     &response.facts,

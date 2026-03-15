@@ -7,25 +7,18 @@ final class FloatingPanel: NSPanel {
     init() {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 380, height: 520),
-            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
 
         isFloatingPanel = true
         level = .floating
-        titlebarAppearsTransparent = true
-        titleVisibility = .hidden
         isMovableByWindowBackground = true
         backgroundColor = .clear
         isOpaque = false
         hasShadow = true
         animationBehavior = .utilityWindow
-
-        // Hide traffic light buttons — this is a menu bar popup, not a window
-        standardWindowButton(.closeButton)?.isHidden = true
-        standardWindowButton(.miniaturizeButton)?.isHidden = true
-        standardWindowButton(.zoomButton)?.isHidden = true
 
         // Size constraints
         minSize = NSSize(width: 320, height: 400)

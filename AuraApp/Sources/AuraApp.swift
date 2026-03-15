@@ -65,9 +65,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         dotColorTimer?.invalidate()
         dotColorTimer = nil
-        appState.requestShutdown()
+
+        // Send SIGTERM to daemon — the Rust side catches this and runs
+        // graceful shutdown (disconnect → consolidation → memory agent ingest).
+        // Then wait for it to finish (up to 12s) before the app exits.
+        if let process = daemonProcess, process.isRunning {
+            process.terminate() // sends SIGTERM
+            let deadline = Date().addingTimeInterval(12.0)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if process.isRunning {
+                process.interrupt() // SIGINT fallback
+            }
+        }
+
         connection?.disconnect()
-        terminateDaemon()
+        daemonProcess = nil
     }
 
     // MARK: - Status Item

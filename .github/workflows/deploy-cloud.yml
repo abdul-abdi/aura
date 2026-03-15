@@ -126,6 +126,7 @@ jobs:
             --timeout 3600 \
             --no-cpu-throttling \
             --set-secrets="AURA_PROXY_AUTH_TOKEN=aura-proxy-auth-token:latest" \
+            --set-env-vars="GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
             --quiet
 
       - name: Health check

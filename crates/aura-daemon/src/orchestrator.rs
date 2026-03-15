@@ -37,14 +37,16 @@ const CALIBRATION_CHUNK_COUNT: usize = 100;
 const MIC_BRIDGE_CAPACITY: usize = 256;
 
 /// Multiplier applied to the barge-in threshold while audio is actively
-/// playing.  Speaker bleed-through on MacBook hardware can reach 0.03-0.05
-/// RMS at high volume, so we inflate the threshold to avoid false triggers.
-const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.8;
+/// playing.  Must be high enough to filter speaker bleed (0.005-0.03 RMS)
+/// but low enough that normal speech (0.05-0.3 RMS) passes through.
+/// 1.5x is a middle ground: 1.3x was too sensitive on MacBook speakers,
+/// 1.8x swallowed real user speech.
+const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.5;
 
 /// Number of consecutive audio chunks that must exceed the barge-in energy
 /// threshold before we forward audio during playback.  Prevents transient
 /// loud passages in the AI's speech from triggering a false barge-in.
-/// At ~5 ms per chunk, 3 chunks ≈ 15 ms of sustained speech.
+/// At ~10 ms per chunk (512-sample resampler), 3 chunks ≈ 30 ms.
 const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 3;
 
 /// Destructive action guardrail injected into the system prompt.
@@ -313,21 +315,11 @@ pub(crate) async fn run_daemon(
         // Consecutive frames above threshold during playback (prevents transients).
         let mut barge_in_streak: u32 = 0;
 
-        // VAD for speech detection (replaces energy-threshold gating).
-        // VoiceDetector wraps a raw C pointer and is not Send by default.
-        // This task has sole ownership and never shares it across threads,
-        // so the unsafe Send impl is sound.
-        struct SendableVad(aura_voice::vad::VoiceDetector);
-        // SAFETY: sole ownership, single-task access, no concurrent mutation.
-        unsafe impl Send for SendableVad {}
-        let mut vad: Option<SendableVad> = match aura_voice::vad::VoiceDetector::new() {
-            Ok(v) => Some(SendableVad(v)),
-            Err(e) => {
-                tracing::warn!("VAD init failed, falling back to energy gating: {e}");
-                None
-            }
-        };
-        let mut vad_accumulator: Vec<f32> = Vec::with_capacity(aura_voice::vad::VAD_FRAME_SIZE);
+        // Client-side VAD removed: all non-playback audio is streamed directly
+        // to Gemini, which runs its own server-side VAD for turn detection.
+        // This eliminates ~330ms of client-side latency (30ms frame accumulation
+        // + 300ms hangover) and simplifies the pipeline.
+        // Energy-based barge-in gating during playback is kept.
 
         loop {
             tokio::select! {
@@ -367,59 +359,38 @@ pub(crate) async fn run_daemon(
                     prev_playing = currently_playing;
 
                     if currently_playing {
-                        if let Some(ref mut v) = vad {
-                            // Accumulate into VAD-sized frames
-                            vad_accumulator.extend_from_slice(&samples);
-                            let mut any_speech = false;
-                            while vad_accumulator.len() >= aura_voice::vad::VAD_FRAME_SIZE {
-                                let frame_f32: Vec<f32> = vad_accumulator.drain(..aura_voice::vad::VAD_FRAME_SIZE).collect();
-                                let frame_i16: Vec<i16> = frame_f32.iter()
-                                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                                    .collect();
-                                if v.0.is_speech(&frame_i16) {
-                                    any_speech = true;
-                                }
-                            }
-                            if !any_speech {
-                                continue; // VAD says no speech — skip
-                            }
-                            if barge_in_streak == 0 {
-                                tracing::info!("Barge-in: VAD detected speech during playback");
-                            }
-                            barge_in_streak = barge_in_streak.saturating_add(1);
-                            if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
-                                continue;
-                            }
-                        } else {
-                            // Fallback: original energy-based gating
-                            let energy = processor::rms_energy(&samples);
-                            let base = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
-                            let threshold = base * PLAYBACK_THRESHOLD_MULTIPLIER;
-                            if energy < threshold {
-                                barge_in_streak = 0;
-                                continue; // Below threshold — likely speaker echo
-                            }
-                            // Require sustained speech across consecutive frames
-                            // to avoid transient spikes from loud AI passages.
-                            barge_in_streak = barge_in_streak.saturating_add(1);
-                            if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
-                                continue; // Not enough consecutive frames yet
-                            }
-                            if barge_in_streak == BARGE_IN_CONSECUTIVE_FRAMES {
-                                tracing::info!(
-                                    energy,
-                                    threshold,
-                                    "Barge-in: sustained user speech detected during playback"
-                                );
-                            }
-                            // Don't reset streak — keep forwarding all above-threshold
-                            // frames so Gemini receives continuous audio for VAD.
+                        // During playback, use energy-based gating to filter
+                        // speaker bleed-through (0.005-0.03 RMS) while allowing
+                        // direct user speech (0.05-0.3 RMS) to trigger barge-in.
+                        let energy = processor::rms_energy(&samples);
+                        let base = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
+                        let threshold = base * PLAYBACK_THRESHOLD_MULTIPLIER;
+                        if energy < threshold {
+                            barge_in_streak = 0;
+                            continue; // Below threshold — likely speaker echo
                         }
+                        // Require sustained speech across consecutive frames
+                        // to avoid transient spikes from loud AI passages.
+                        barge_in_streak = barge_in_streak.saturating_add(1);
+                        if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
+                            continue; // Not enough consecutive frames yet
+                        }
+                        if barge_in_streak == BARGE_IN_CONSECUTIVE_FRAMES {
+                            tracing::info!(
+                                energy,
+                                threshold,
+                                "Barge-in: sustained user speech detected during playback"
+                            );
+                        }
+                        // Don't reset streak — keep forwarding all above-threshold
+                        // frames so Gemini receives continuous audio for VAD.
                     } else if gemini_speaking {
-                        // Gemini is still sending audio data but the pre-buffer
-                        // hasn't flushed to the hardware yet (~80 ms window).
-                        // Mute to prevent premature interruption before the
-                        // user hears anything.
+                        // Gemini is sending audio but the pre-buffer hasn't
+                        // flushed to hardware yet. This window lasts until the
+                        // network delivers ~40ms of audio chunks (can be 100-500ms
+                        // wall-clock with jitter). Mute to prevent unfiltered mic
+                        // audio from triggering a false barge-in before the user
+                        // even hears the response.
                         continue;
                     } else if let Some(stopped_at) = playback_stopped_at {
                         // Post-playback reverb guard: energy-gate for 300 ms
@@ -436,27 +407,8 @@ pub(crate) async fn run_daemon(
                         playback_stopped_at = None;
                     }
 
-                    // VAD gate for non-playback audio
-                    if !currently_playing
-                        && playback_stopped_at.is_none()
-                        && let Some(ref mut v) = vad
-                    {
-                        vad_accumulator.extend_from_slice(&samples);
-                        let mut any_speech = false;
-                        while vad_accumulator.len() >= aura_voice::vad::VAD_FRAME_SIZE {
-                            let frame_f32: Vec<f32> = vad_accumulator.drain(..aura_voice::vad::VAD_FRAME_SIZE).collect();
-                            let frame_i16: Vec<i16> = frame_f32.iter()
-                                .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                                .collect();
-                            if v.0.is_speech(&frame_i16) {
-                                any_speech = true;
-                            }
-                        }
-                        if !any_speech {
-                            continue; // Not speech — don't send to Gemini
-                        }
-                    }
-
+                    // Non-playback audio: stream directly to Gemini.
+                    // Gemini's server-side VAD handles turn detection.
                     if let Err(e) = audio_session.send_audio(&samples) {
                         tracing::warn!("Gemini session closed, stopping audio bridge: {e}");
                         break;
@@ -497,18 +449,31 @@ pub(crate) async fn run_daemon(
         }
     });
 
-    // Run until either processor exits, Ctrl+C, or IPC shutdown
+    // Run until either processor exits, Ctrl+C, or IPC shutdown.
+    // We need processor_handle after the select to await graceful shutdown,
+    // so track whether the processor already finished naturally.
     let ipc_session = Arc::clone(&session);
     let ipc_bus = bus.clone();
-    let ipc_cancel = cancel.clone();
+    let _ipc_cancel = cancel.clone();
+    let mut processor_done = false;
+    let mut processor_handle = processor_handle;
+
+    // Listen for SIGTERM (sent by SwiftUI app's process.terminate())
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+
     tokio::select! {
-        _ = processor_handle => {
+        _ = &mut processor_handle => {
             tracing::info!("Processor finished, ending session");
+            processor_done = true;
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("Ctrl+C received, shutting down");
             bus.send(AuraEvent::Shutdown);
-            cancel.cancel();
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM received, shutting down gracefully");
+            bus.send(AuraEvent::Shutdown);
         }
         _ = async {
             while let Some(cmd) = ipc_cmd_rx.recv().await {
@@ -516,7 +481,6 @@ pub(crate) async fn run_daemon(
                     UICommand::Shutdown => {
                         tracing::info!("Shutdown requested via IPC");
                         ipc_bus.send(AuraEvent::Shutdown);
-                        ipc_cancel.cancel();
                     }
                     UICommand::SendText { text } => {
                         tracing::info!(len = text.len(), "Text input via IPC");
@@ -538,11 +502,25 @@ pub(crate) async fn run_daemon(
         }
     }
 
-    // Shutdown
+    // Graceful shutdown: disconnect the WebSocket FIRST so the processor
+    // receives the Disconnected event and runs consolidation + ingest.
+    // cancel.cancel() must come AFTER disconnect — the processor's select
+    // loop has a cancel.cancelled() branch that would skip the Disconnected
+    // handler if cancelled first.
     let _ = ipc_tx.send(DaemonEvent::Shutdown);
-    cancel.cancel();
     mic_shutdown.store(true, Ordering::Release);
     session.disconnect();
+
+    if !processor_done {
+        tracing::info!("Waiting for processor to finish end-of-session consolidation...");
+        match tokio::time::timeout(Duration::from_secs(15), processor_handle).await {
+            Ok(_) => tracing::info!("Processor finished gracefully"),
+            Err(_) => tracing::warn!("Processor timed out after 15s, exiting anyway"),
+        }
+    }
+
+    // Now cancel everything else (screen capture, IPC, etc.)
+    cancel.cancel();
 
     Ok(())
 }

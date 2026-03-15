@@ -12,7 +12,8 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from google.adk.runners import InMemoryRunner
+from google.adk import Runner
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel
 
@@ -38,10 +39,18 @@ if config.LEGACY_AUTH_ENABLED and not config.AUTH_TOKEN:
 # Rate-limiting semaphore
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-# One runner per agent, created at module level
-_ingest_runner = InMemoryRunner(agent=ingest_agent)
-_consolidate_runner = InMemoryRunner(agent=consolidate_agent)
-_query_runner = InMemoryRunner(agent=query_agent)
+# One runner per agent, with shared session service
+_session_service = InMemorySessionService()
+_APP_NAME = "aura-memory-agent"
+_ingest_runner = Runner(
+    agent=ingest_agent, app_name=_APP_NAME, session_service=_session_service
+)
+_consolidate_runner = Runner(
+    agent=consolidate_agent, app_name=_APP_NAME, session_service=_session_service
+)
+_query_runner = Runner(
+    agent=query_agent, app_name=_APP_NAME, session_service=_session_service
+)
 
 # ---------------------------------------------------------------------------
 # Device token cache
@@ -178,12 +187,18 @@ async def _check_auth_with_device(token: str, device_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _run_agent(runner: InMemoryRunner, user_id: str, message: str) -> str:
+async def _run_agent(runner: Runner, user_id: str, message: str) -> str:
     """Run an ADK agent and return the final text response."""
+    session_id = f"req-{uuid.uuid4().hex}"
+    await _session_service.create_session(
+        app_name=_APP_NAME,
+        user_id=user_id,
+        session_id=session_id,
+    )
     parts: list[str] = []
     async for event in runner.run_async(
         user_id=user_id,
-        session_id=f"req-{uuid.uuid4().hex}",
+        session_id=session_id,
         new_message=types.UserContent(parts=[types.Part(text=message)]),
     ):
         if event.is_final_response() and event.content:
