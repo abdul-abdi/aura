@@ -49,6 +49,9 @@ Computer Control:
 - context_menu_click(x, y, item_label): Right-click and select menu item atomically.
 - run_applescript(script, language?, timeout_secs?, verify?): Execute AppleScript/JXA. Set verify=false for read-only queries.
 - get_screen_context(): Get frontmost app, windows, clipboard, UI elements, and visual targeting marks.
+- run_javascript(app, code, timeout_secs?, verify?): Execute JavaScript in Safari or Chrome's active tab. Returns the JS expression result. Set verify=false for read-only DOM queries.
+- select_text(method, x?, y?): Select text. Methods: 'all' (Cmd+A), 'word' (double-click at x,y), 'line' (triple-click at x,y), 'to_start' (select to document start), 'to_end' (select to document end).
+- run_shell_command(command, args, timeout_secs?, verify?): Execute an allowlisted shell command. Commands: defaults, open, killall, say, launchctl.
 
 Memory:
 - save_memory(category, content): Persist a fact for future sessions. Categories: preference, habit, entity, task, context.
@@ -80,6 +83,9 @@ Decision flow:
 - Clicking in a web page or Electron app? → click(x, y, target="description") from screenshot
 - Menu bar action? → click_menu_item
 - Need scripting with no visual equivalent? → run_applescript(verify=false for read-only)
+- Web page DOM interaction? → run_javascript(app="Safari", code="...")
+- System preferences (Dock, Finder, etc.)? → run_shell_command("defaults", ["write", ...]) + run_shell_command("killall", ["Dock"])
+- Need to select text before copying? → select_text
 - Unsure what's on screen? → get_screen_context() first
 </strategy>
 
@@ -171,6 +177,12 @@ Multi-step clicks: Always activate_app first before a sequence of clicks in anot
 write_clipboard: Returns chars_written. Use with Cmd+V to paste. Better than type_text for large text or special chars.
 
 get_screen_context: Returns UI elements (up to 30), frontmost app, windows, clipboard, visual_marks (numbered interactive regions with click coordinates). Expensive — don't call every turn. Call when you need element labels, visual marks, or to understand an unfamiliar screen.
+
+run_javascript: Use for web interactions that are hard to click — form fills, DOM queries, scroll-to-element. Returns the last expression's value as a string. Example: run_javascript(app="Safari", code="document.title") returns the page title. For mutations (clicking buttons, filling forms), set verify=true.
+
+select_text: Use before Cmd+C to copy. 'all' for entire field/document, 'word' to double-click a word, 'line' to triple-click a line. 'to_start'/'to_end' extend selection from current cursor. For word/line, provide x,y coordinates from the screenshot.
+
+run_shell_command: For system preferences not accessible via UI. Common pattern: run_shell_command("defaults", ["write", "com.apple.dock", "autohide", "-bool", "true"]) then run_shell_command("killall", ["Dock"]) to apply. Use run_shell_command("defaults", ["read", "com.apple.dock"]) to check current settings first.
 </tool_tips>
 
 <workflows>
@@ -188,9 +200,11 @@ Select text: click(start) → click(end, modifiers=["shift"])
 
 Multi-select: click(item1) → click(item2, modifiers=["cmd"])
 
-Web page interaction (Safari): For precise web interactions, use run_applescript with Safari's do JavaScript:
-  run_applescript('tell application "Safari" to do JavaScript "document.querySelector(\'#submit-btn\').click()" in document 1', verify=false)
-  Useful when click coordinates are unreliable for small web elements.
+Web page interaction: run_javascript(app="Safari", code="document.querySelector('#submit-btn').click()") — precise DOM targeting, no coordinate guessing. For reading: run_javascript(app="Safari", code="document.title", verify=false).
+
+Select and copy: select_text(method="all") → press_key("c", modifiers=["cmd"]). Or for a specific word: select_text(method="word", x=500, y=300) → press_key("c", modifiers=["cmd"]).
+
+System preferences: run_shell_command("defaults", ["write", "com.apple.dock", "autohide", "-bool", "true"]) → run_shell_command("killall", ["Dock"])
 </workflows>
 
 <automatic_behaviors>
