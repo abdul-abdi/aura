@@ -154,14 +154,14 @@ Tools execute asynchronously (max 8 concurrent). Safe action chains — like cli
 
 Every tool call passes through these gates before execution:
 
-1. **Blocked app list** — Terminal, iTerm, Kitty, Warp, Alacritty blocked entirely
-2. **Shell injection detection** — rejects metacharacters (`|`, `;`, `` ` ``, `$`, `>`, `<`)
-3. **Obfuscation detection** — catches AppleScript concatenation tricks (`"do" & " shell" & " script"`)
-4. **JXA blocked** — JavaScript for Automation disabled unconditionally
-5. **Automation permission preflight** — checks macOS TCC before running
-6. **Input clamping** — coordinates bounded to screen, text capped at 10K chars
-7. **Destructive action guardrail** — requires spoken confirmation for deletions/quits
-8. **Timeouts** — 60s shell, 120s AppleScript, 10KB output cap
+1. **Blocked app list** — Terminal, iTerm, Kitty, Warp, Alacritty, Hyper, Tabby, Rio, WezTerm blocked from activation and `open`
+2. **`do shell script` blocked** — AppleScript's shell escape hatch is rejected entirely (not filtered, blocked), plus `run script` (dynamic eval)
+3. **Shell metacharacter rejection** — `run_shell_command` rejects `|`, `;`, `` ` ``, `$()`, `>`, `<`, `&&`, `||`, and `sudo`
+4. **Obfuscation detection** — catches AppleScript concatenation tricks (`"do" & " shell" & " script"`)
+5. **JXA blocked** — JavaScript for Automation disabled unconditionally
+6. **Input clamping** — scroll bounded to ±1000, text capped at 10K chars
+7. **Destructive action guardrail** — system prompt instructs Gemini to confirm before deletions (prompt-level, not code-enforced)
+8. **Timeouts** — 60s for all scripts, 10KB output cap
 
 ## Threading model
 

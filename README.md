@@ -96,13 +96,13 @@ The entire pipeline — voice capture, screen analysis, tool execution — runs 
 |---|---|---|
 | **Talk** | Real-time voice conversation | 16kHz capture, 24kHz playback, barge-in detection |
 | **See** | Understands your screen | 2 FPS capture with change detection, reads accessibility labels |
-| **Click** | Precise mouse control | Move, click (left/right, single/double/triple), scroll, drag |
+| **Click** | Mouse control | Move, click (left/right, single/double/triple), scroll, drag — coordinate accuracy depends on Gemini's vision |
 | **Type** | Keyboard automation | Type text, press shortcuts (Cmd+C, Cmd+V, etc.), special keys |
 | **Script** | AppleScript & shell | Control any macOS app — open files, switch tabs, manage windows |
 | **Search** | Live web answers | Google Search grounding for real-time facts, weather, news |
-| **Ground** | Anti-hallucination | Screen verification, accessibility cross-check, Search grounding |
+| **Ground** | Anti-hallucination | Continuous screen feedback, accessibility data, Search grounding, vision oracle fallback |
 | **Remember** | Persistent memory | SQLite-backed session history across restarts |
-| **Protect** | Defense-in-depth safety | Pattern blocklists, input clamping, obfuscation detection |
+| **Protect** | Defense-in-depth safety | Shell script blocking, metacharacter rejection, obfuscation detection, terminal app blocking |
 
 ## Example commands
 
@@ -128,7 +128,7 @@ Gemini calls these through the Live API's function calling protocol. Every tool 
 | **Scripts** | `run_applescript`, `run_javascript`, `run_shell_command` |
 | **Memory** | `save_memory`, `recall_memory` |
 | **Context** | `get_screen_context`, `write_clipboard` |
-| **System** | `shutdown_aura` |
+| **System** | `shutdown_aura`, `key_state` |
 | **Web** | Google Search (grounding tool — built into Gemini) |
 
 Tools execute asynchronously (max 8 concurrent). Safe action chains — like click → type → enter — pipeline without screen verification, up to 3 deep with 30ms settle delays.
@@ -138,17 +138,18 @@ Tools execute asynchronously (max 8 concurrent). Safe action chains — like cli
 The loop that runs continuously while Aura is active:
 
 ```
- 1. Mic captures 16kHz PCM in 100ms chunks
- 2. Voice Activity Detection checks energy against ambient threshold
- 3. Active audio streams to Gemini Live API over WebSocket
- 4. Screen capture sends 2 FPS JPEG (skips unchanged frames via perceptual hash)
- 5. Gemini processes audio + vision simultaneously
- 6. Gemini responds with:
-    ├─ Speech → 24kHz PCM decoded and played through system speaker
+ 1. Mic captures audio, resamples to 16kHz PCM in ~10ms chunks (512-sample sinc resampler)
+ 2. During playback: energy gating filters speaker bleed (1.3x ambient threshold, 2 consecutive frames)
+    Otherwise: all audio streams directly to Gemini (server-side VAD handles turn detection)
+ 3. Screen capture sends 2 FPS JPEG (skips unchanged frames via FNV-1a perceptual hash)
+ 4. Gemini processes audio + vision simultaneously
+ 5. Gemini responds with:
+    ├─ Speech → 24kHz PCM decoded, 40ms pre-buffered, played through system speaker
     ├─ Tool call → dispatched to native macOS tool → result fed back to Gemini
-    └─ Both → speech streams while tools execute in parallel
- 7. Barge-in: if user speaks during playback → playback stops → Gemini notified
- 8. Screen re-captured after tool execution → Gemini sees the result of its action
+    └─ Both → speech streams while tools execute in parallel (max 8 concurrent)
+ 6. Barge-in: if user speaks during playback → playback stops → 300ms reverb guard → Gemini notified
+ 7. Screen continuously captured at 2 FPS — Gemini sees results of its actions on the next frame
+ 8. Session rotates every 10 min to prevent latency degradation (resumption handle preserved)
  9. Loop continues until session ends
 ```
 
@@ -299,17 +300,19 @@ This enables Firestore, creates Secret Manager entries, deploys the memory agent
 
 AI controlling your desktop can't afford to hallucinate. Aura uses three layers to keep Gemini grounded:
 
-1. **Screen verification** — After every click or navigation, Aura captures the screen and feeds it back to Gemini, closing the perception-action loop. Gemini sees the result of its own actions and self-corrects.
-2. **Accessibility cross-check** — Before clicking a UI element, Aura reads the macOS accessibility tree (element roles, labels, bounds) and cross-references it with Gemini's visual understanding. If the accessibility data contradicts the model's target, a secondary **Gemini 3 Flash vision oracle** refines the coordinates from a fresh screenshot.
+1. **Continuous screen feedback** — Aura captures the screen at 2 FPS during active changes. After Gemini takes an action (click, type, navigate), the next frame shows the result, closing the perception-action loop. Gemini sees what changed and self-corrects if something went wrong.
+2. **Accessibility + vision dual input** — Alongside screenshots, Aura reads the macOS accessibility tree (element roles, labels, bounds) and provides both to Gemini. This gives the model structured UI data to complement pixel-level vision. When coordinate-based clicking fails, a secondary **Gemini 3 Flash vision oracle** re-analyzes a fresh screenshot to refine the target (with circuit breaker: 3 failures → 30s cooldown).
 3. **Google Search grounding** — Factual questions (weather, news, definitions) are answered via Google Search as a Gemini tool, grounding responses in real-time web results instead of parametric memory.
 
 ## Safety
 
 Aura runs AI-generated actions on your machine. We take that seriously.
 
-Every script passes through **pattern blocklists** that catch destructive commands (`rm -rf`, `sudo`, `mkfs`). Every input is **clamped** to safe ranges. **Obfuscation detection** catches commands split across variables to bypass filters. An **automation permission preflight** checks access before running scripts. And a **destructive action guardrail** requires spoken confirmation before anything that permanently deletes data.
+AppleScript's `do shell script` is **blocked entirely** — not filtered, blocked. The same applies to `run script` (dynamic eval). **Obfuscation detection** catches concatenation tricks that try to reassemble blocked commands (`"do" & " shell" & " script"`). **JXA** (JavaScript for Automation) is disabled unconditionally. Shell commands executed via `run_shell_command` reject **metacharacters** (`|`, `;`, `` ` ``, `$()`, `>`, `<`, `&&`, `||`) and **sudo**. Scroll inputs are **clamped** to ±1000. Text input is capped at 10K characters. Shell commands time out at 60s with a 10KB output cap.
 
-Terminal apps (Terminal, iTerm, Warp, etc.) are blocked entirely from script execution to prevent unintended command runs.
+The system prompt instructs Gemini to **confirm destructive actions** (file deletion, emptying trash) before executing — this is a prompt-level guardrail, not a code-enforced gate.
+
+Terminal emulators (Terminal, iTerm, Kitty, Alacritty, Warp, Hyper, Tabby, Rio, WezTerm) are blocked from activation and from `open -a` / `open -b` to prevent accidental command execution.
 
 ---
 
