@@ -54,33 +54,6 @@ A small green dot appears in your menu bar. That's Aura, always listening.
 
 When you speak, your voice streams in real-time to Google's Gemini Live API. Aura simultaneously watches your screen at 2 frames per second, so it always knows what you're looking at. When Gemini decides to act, it calls one of Aura's native tools — and your Mac responds instantly.
 
-```
-    ┌─────────┐  16kHz audio   ┌─────────────────────┐
-    │   You   │ ─────────────→ │                     │
-    │  speak  │                │  Gemini Live API    │
-    └─────────┘                │  (bidirectional WS) │
-                               │                     │
-    ┌─────────┐  2 FPS JPEG    │  sees + hears you   │
-    │ Screen  │ ─────────────→ │  simultaneously     │
-    │ capture │                └──────────┬──────────┘
-    └─────────┘                           │
-                                 speaks back (24kHz)
-                                 OR calls tools
-                                          │
-                     ┌────────────────────┼────────────────────┐
-                     ▼                    ▼                    ▼
-               ┌──────────┐        ┌──────────┐        ┌──────────┐
-               │  Click   │        │   Type   │        │  Script  │
-               │  Scroll  │        │   Keys   │        │  Shell   │
-               │  Drag    │        │   Text   │        │  Apps    │
-               └──────────┘        └──────────┘        └──────────┘
-                     │                    │                    │
-                     └────────────────────┼────────────────────┘
-                                          ▼
-                                   Screen updates
-                                   (loop continues)
-```
-
 The entire pipeline — voice capture, screen analysis, tool execution — runs as native Rust. No Electron. No browser. No latency from web tech. Just raw speed on bare metal macOS.
 
 ## What Aura can do
@@ -213,50 +186,67 @@ The device token for Cloud Run proxy authentication is stored in the **macOS log
 
 ## Architecture
 
-10 Rust crates + a SwiftUI shell, each with one job. No Electron. No web views. Pure native macOS.
+10 Rust crates + a SwiftUI shell + cloud infrastructure, each with one job. No Electron. No web views. Pure native macOS.
 
 ```
-┌─ USER HARDWARE ───────────────────────────────────────────────────────────┐
-│  Microphone (16kHz)    Speaker (24kHz)    Display    Keyboard & Mouse    │
-└──────┬──────────────────────┬──────────────────┬──────────────┬──────────┘
-       │                      ▲                  │              ▲
-       ▼                      │                  ▼              │
-┌─ AURA DAEMON (orchestrator + event bus) ──────────────────────────────────┐
-│                                                                           │
-│  aura-voice ──────→ aura-gemini ←──────── aura-screen                    │
-│  (capture/playback)  (Live API WS)         (2 FPS + accessibility)       │
-│                          │                                                │
-│                    tool calls from Gemini                                 │
-│                          │                                                │
-│           ┌──────────────┼──────────────┐                                │
-│           ▼              ▼              ▼                                 │
-│      aura-input    aura-bridge    aura-memory                            │
-│      (mouse/kbd)   (AppleScript)  (SQLite FTS5)                          │
-│                                                                           │
-│  aura-menubar ←──── IPC (Unix socket, JSONL) ────→ SwiftUI App          │
-│  (Cocoa status dot)                                                       │
-└───────────────────────────────────────────────────────────────────────────┘
-       │                                                        │
-       ▼                                                        ▼
-┌─ GOOGLE CLOUD ────────────────────────────────────────────────────────────┐
-│  aura-proxy (Cloud Run)     memory-agent (Cloud Run)     Firestore       │
-│  WebSocket relay            Gemini-powered session       facts & sessions│
-│  per-device auth            consolidation via ADK        per device      │
-└───────────────────────────────────────────────────────────────────────────┘
+┌──────────────┐   Unix Socket    ┌──────────────────────────────────────────┐
+│  AuraApp     │◄──── IPC ───────►│         aura-daemon (Rust core)          │
+│  (SwiftUI)   │    (JSONL)       │  orchestrator + processor + event bus    │
+│  Menu bar UI │                  │  screen capture loop (2 FPS)             │
+│  Onboarding  │                  │  tool execution + verification           │
+│  Permissions │                  │  safety gates + action pipelining        │
+└──────────────┘                  └───┬────┬────┬────┬────┬────┬────────────┘
+                                      │    │    │    │    │    │
+                          ┌───────────┘    │    │    │    │    └──────────┐
+                          ▼                ▼    │    ▼    ▼              ▼
+                   ┌────────────┐  ┌──────────┐│┌────────────┐  ┌────────────┐
+                   │aura-screen │  │aura-voice ││ aura-input  │  │aura-bridge │
+                   │ Capture    │  │ Mic 16kHz ││ CGEvent     │  │ osascript  │
+                   │ AX tree    │  │ Playback  ││ Mouse/Key   │  │ AppleScript│
+                   │ SoM marks  │  │ Barge-in  ││ Drag/Scroll │  │ JXA        │
+                   └────────────┘  └──────────┘│└────────────┘  └────────────┘
+                                               │
+         ┌─────────────────────────────────────┼───────────────┐
+         ▼                                     ▼               ▼
+┌─────────────────┐              ┌───────────────────┐  ┌─────────────┐
+│ Gemini Live API │              │ Vision Oracle      │  │ aura-memory │
+│ Bidirectional WS│              │ Gemini 3 Flash REST│  │ SQLite      │
+│ Audio + Vision  │              │ Click refinement   │  │ Sessions    │
+│ Tool calls back │              │ Circuit breaker    │  │ FTS5 search │
+└────────┬────────┘              └───────────────────┘  └─────────────┘
+         │
+         ▼
+┌─────────────────┐       ┌───────────────┐
+│ Cloud Run       │──────►│ Firestore     │
+│ aura-proxy      │       │ Cross-session │
+│ memory-agent    │       │ Device auth   │
+│ (Python ADK)    │       │ Facts         │
+└─────────────────┘       └───────────────┘
 ```
+
+### Rust crates
 
 | Crate | Purpose |
 |---|---|
-| `aura-daemon` | Orchestrator — event bus, tool dispatch, session lifecycle |
-| `aura-gemini` | Bidirectional WebSocket client for Gemini Live API |
-| `aura-voice` | CoreAudio capture + rodio playback + barge-in detection |
-| `aura-screen` | Screen capture, perceptual change detection, accessibility tree |
-| `aura-bridge` | AppleScript execution with multi-layer safety gates |
-| `aura-input` | CGEvent synthetic mouse + keyboard input |
+| `aura-daemon` | Orchestrator — event bus, tool dispatch, session lifecycle, verification pipeline |
+| `aura-gemini` | Bidirectional WebSocket client for Gemini Live API + Vision Oracle (REST) |
+| `aura-voice` | CoreAudio capture + rodio playback + WebRTC VAD + barge-in detection |
+| `aura-screen` | Screen capture, perceptual change detection, accessibility tree, SoM annotation |
+| `aura-bridge` | AppleScript/JXA execution with multi-layer safety gates |
+| `aura-input` | CGEvent synthetic mouse + keyboard input (PID-targeted + HID fallback) |
 | `aura-memory` | SQLite persistence (WAL mode, FTS5 full-text search) |
 | `aura-menubar` | Cocoa FFI — NSStatusItem, NSPopover, context menu |
 | `aura-proxy` | Cloud Run WebSocket relay with per-device auth |
 | `aura-firestore` | Firestore REST client for cross-device memory sync |
+
+### Other components
+
+| Component | Purpose |
+|---|---|
+| **AuraApp** (SwiftUI) | Menu bar app shell — onboarding, permissions, daemon lifecycle, chat UI via Unix socket IPC |
+| **memory-agent** (Python) | Cloud Run FastAPI service — Gemini ADK agent for session consolidation and fact extraction |
+| **consolidation** (Rust) | Batch tool for memory summarization across Firestore documents |
+| **Vision Oracle** | Separate Gemini 3 Flash REST call (not Live WS) for click coordinate refinement with circuit breaker |
 
 Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md)
 

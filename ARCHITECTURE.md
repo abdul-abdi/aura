@@ -12,54 +12,191 @@ This is only possible because of the Gemini Live API's native audio streaming an
 
 ## System overview
 
-Native Rust (10 crates) + SwiftUI shell. No Electron, no web views. CoreAudio for sound, CoreGraphics for input, Cocoa for UI, and a direct bidirectional WebSocket to Gemini.
+Native Rust (10 crates) + SwiftUI shell + cloud infrastructure. No Electron, no web views. CoreAudio for sound, CoreGraphics for input, Cocoa for UI, and a direct bidirectional WebSocket to Gemini.
 
-| Crate | Role |
-|---|---|
-| `aura-daemon` | Central orchestrator — event bus, tool dispatch, session lifecycle |
-| `aura-gemini` | Gemini Live API bidirectional WebSocket client |
-| `aura-voice` | CoreAudio mic capture (16kHz) + rodio playback (24kHz) + barge-in |
-| `aura-screen` | Screen capture, perceptual change detection, accessibility tree |
-| `aura-bridge` | AppleScript execution with multi-layer safety gates |
-| `aura-input` | Synthetic mouse + keyboard via CoreGraphics CGEvents |
-| `aura-memory` | SQLite persistence with FTS5 full-text search |
-| `aura-menubar` | Native Cocoa menu bar UI (status dot + popover chat) |
-| `aura-proxy` | Cloud Run WebSocket relay with per-device auth |
-| `aura-firestore` | Firestore REST client for cross-device memory sync |
+### Complete component map
+
+```
+┌──────────────┐   Unix Socket    ┌──────────────────────────────────────────┐
+│  AuraApp     │◄──── IPC ───────►│         aura-daemon (Rust core)          │
+│  (SwiftUI)   │    (JSONL)       │                                          │
+│              │                  │  orchestrator.rs  — session lifecycle     │
+│  15 Swift    │  Daemon → UI:    │  processor.rs    — tool exec, verify,    │
+│  source files│  DotColor,       │                    spiral retry, pipeline │
+│              │  Transcript,     │  screen_capture.rs — 2 FPS background    │
+│  Onboarding  │  ToolStatus,     │  tools.rs         — 20 tool handlers     │
+│  Permissions │  Shutdown        │  tool_helpers.rs  — click fallbacks,     │
+│  Chat UI     │                  │                    coordinate mapping     │
+│  Keychain    │  UI → Daemon:    │  bus.rs           — event bus             │
+│              │  SendText,       │  ipc.rs           — Unix socket server    │
+│              │  ToggleMic,      │  cloud.rs         — memory agent client   │
+│              │  Reconnect       │  pipeline.rs      — safe continuation     │
+└──────────────┘                  └───┬────┬────┬────┬────┬────┬────────────┘
+                                      │    │    │    │    │    │
+                          ┌───────────┘    │    │    │    │    └──────────┐
+                          ▼                ▼    │    ▼    ▼              ▼
+                   ┌────────────┐  ┌──────────┐│┌────────────┐  ┌────────────┐
+                   │aura-screen │  │aura-voice ││ aura-input  │  │aura-bridge │
+                   │            │  │           ││             │  │            │
+                   │capture.rs  │  │audio.rs   ││keyboard.rs  │  │script.rs   │
+                   │ JPEG 1920px│  │ CPAL 16kHz││ type_text   │  │ osascript  │
+                   │ Q80, 2 FPS │  │ sinc      ││ press_key   │  │ timeout 60s│
+                   │ hash detect│  │ resample  ││ key_state   │  │ 10KB cap   │
+                   │            │  │           ││             │  │            │
+                   │accessiblty │  │playback.rs││mouse.rs     │  │automation  │
+                   │ AX tree    │  │ rodio     ││ click/drag  │  │ .rs        │
+                   │ 50 elements│  │ 24kHz     ││ PID-targeted│  │ app detect │
+                   │ 5 depth    │  │ 40ms pre- ││ HID fallback│  │ permission │
+                   │ 500ms cap  │  │ buffer    ││ 15ms delay  │  │ check      │
+                   │            │  │           ││             │  │            │
+                   │som.rs      │  │vad.rs     ││accessibility│  └────────────┘
+                   │ Sobel edge │  │ WebRTC VAD││ .rs         │
+                   │ 30 marks   │  │           ││ permission  │
+                   │ region det.│  │           ││ check       │
+                   │            │  │           ││             │
+                   │context.rs  │  └──────────┘│└────────────┘
+                   │ app + window│             │
+                   │ metadata   │             │
+                   └────────────┘             │
+                                              │
+         ┌────────────────────────────────────┼───────────────┐
+         ▼                                    ▼               ▼
+┌─────────────────┐             ┌───────────────────┐  ┌─────────────┐
+│ Gemini Live API │             │ Vision Oracle      │  │ aura-memory │
+│                 │             │ (in aura-gemini)   │  │             │
+│ Bidirectional WS│             │                    │  │store.rs     │
+│ v1beta.Bidi     │             │vision_oracle.rs    │  │ SQLite WAL  │
+│ GenerateContent │             │ Gemini 3 Flash REST│  │ FTS5 search │
+│                 │             │ 2560px Q92 capture │  │ sessions    │
+│ Audio + Vision  │             │ 0-1000 normalized  │  │ facts       │
+│ up simultaneously│            │ 150px delta guard  │  │ settings    │
+│                 │             │ Axis-swap detect   │  │             │
+│ Speech + Tools  │             │ 4s budget, 1 retry │  │consolidate  │
+│ down            │             │ Circuit breaker:   │  │ .rs         │
+│                 │             │  3 fail → 30s cool │  │ summarize   │
+│ session.rs      │             └───────────────────┘  └─────────────┘
+│ config.rs       │
+│ protocol.rs     │
+│ tools.rs (defs) │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐       ┌───────────────────┐
+│ Cloud Run       │──────►│ Firestore         │
+│                 │       │                   │
+│ aura-proxy      │       │ facts collection  │
+│  relay.rs       │       │  per-device scope │
+│  WebSocket      │       │  deterministic IDs│
+│  bridge         │       │                   │
+│  device auth    │       │ sessions          │
+│                 │       │  summaries        │
+│ memory-agent    │       │                   │
+│  Python FastAPI │       │ Anonymous Firebase│
+│  Gemini ADK     │       │  auth + token     │
+│  /ingest        │       │  cache            │
+│  /query         │       │                   │
+│  /consolidate   │       └───────────────────┘
+│  rate limited   │
+└─────────────────┘
+
+Infrastructure:
+┌──────────────────────────┐    ┌─────────────────────────┐
+│ infrastructure/          │    │ scripts/                │
+│  consolidation/ (Rust)   │    │  dev.sh     — build+run │
+│   batch memory summarize │    │  bundle.sh  — .app pack │
+│                          │    │  deploy-gcp.sh — cloud  │
+│  memory-agent/ (Python)  │    │  deploy-proxy.sh        │
+│   server.py — FastAPI    │    │  uninstall.sh           │
+│   agent.py  — ADK agent  │    └─────────────────────────┘
+│   tools.py  — Firestore  │
+│   config.py              │    ┌─────────────────────────┐
+└──────────────────────────┘    │ .github/workflows/      │
+                                │  ci.yml      — test/lint│
+                                │  release.yml — sign/dist│
+                                │  deploy-cloud.yml       │
+                                │  auto-tag.yml           │
+                                └─────────────────────────┘
+```
+
+### Crate summary
+
+| Crate | Role | Key files |
+|---|---|---|
+| `aura-daemon` | Central orchestrator — event bus, tool dispatch, session lifecycle, verification pipeline | orchestrator.rs, processor.rs (76KB), tools.rs (63KB), screen_capture.rs |
+| `aura-gemini` | Gemini Live API bidirectional WebSocket client + Vision Oracle REST | session.rs, config.rs (system prompt), tools.rs (tool schemas), vision_oracle.rs |
+| `aura-voice` | CoreAudio mic capture (16kHz) + rodio playback (24kHz) + barge-in | audio.rs, playback.rs, vad.rs |
+| `aura-screen` | Screen capture, perceptual change detection, accessibility tree, SoM annotation | capture.rs, accessibility.rs (46KB), som.rs, macos.rs |
+| `aura-bridge` | AppleScript/JXA execution with multi-layer safety gates | script.rs, automation.rs |
+| `aura-input` | Synthetic mouse + keyboard via CoreGraphics CGEvents (PID-targeted + HID) | mouse.rs, keyboard.rs, accessibility.rs |
+| `aura-memory` | SQLite persistence with WAL mode and FTS5 full-text search | store.rs, consolidate.rs |
+| `aura-menubar` | Native Cocoa menu bar UI (status dot + popover chat) | app.rs, status_item.rs, popover.rs |
+| `aura-proxy` | Cloud Run WebSocket relay with per-device auth | lib.rs, relay.rs, firestore.rs |
+| `aura-firestore` | Firestore REST client for cross-device memory sync | lib.rs, auth.rs, client.rs |
+
+### Non-Rust components
+
+| Component | Language | Location | Purpose |
+|---|---|---|---|
+| **AuraApp** | Swift (SwiftUI) | `AuraApp/Sources/` (15 files) | Menu bar app shell — onboarding, permissions, daemon lifecycle, chat UI, Keychain access. Communicates with daemon over Unix domain socket (JSONL protocol). |
+| **memory-agent** | Python (FastAPI) | `infrastructure/memory-agent/` | Cloud Run service — ingests session transcripts, extracts structured facts via Gemini ADK agent, serves cross-session context queries. Rate-limited, HMAC auth. |
+| **consolidation** | Rust | `infrastructure/consolidation/` | Batch CLI tool — processes Firestore memories for summarization across documents. |
+
+## Click targeting pipeline
+
+The most complex subsystem — how Gemini's intent becomes a physical click on the right element.
+
+```
+Gemini calls click(x, y, target="Submit button")
+  │
+  ▼
+COORDINATE SCALING (< 1ms)
+  Gemini's 1920px image coords → macOS logical points
+  x_logical = x × (logical_w / img_w)    e.g. 1440/1920 = 0.75×
+  │
+  ▼
+VISION ORACLE (500ms–3s)                         ┌─ axis-swap detection
+  Fresh 2560px Q92 screenshot ──► Gemini 3 Flash ─┤  (discard if swapped)
+  + target description           REST API         ├─ 150px delta guard
+  + hint coordinates (0–1000)                     │  (discard if too far)
+  Returns refined coordinates ◄──────────────────┘
+  │
+  ├─ Oracle succeeded → use refined coords
+  ├─ Oracle failed/timed out → use raw coords + display origin
+  └─ Circuit breaker tripped (3 fails) → skip oracle for 30s
+  │
+  ▼
+DISPLAY ORIGIN (multi-monitor)
+  + display_origin.x, display_origin.y for correct screen
+  │
+  ▼
+PRE-MOVE HOVER (40ms)
+  move_mouse → 40ms sleep → apps register hover state
+  │
+  ▼
+CLICK DELIVERY
+  Try 1: PID-targeted CGEvent (direct to app process)
+  Try 2: HID CGEvent (through window server)
+  │
+  ▼
+VERIFICATION (100ms–2s)
+  Screen hash polling: 50ms × 20 checks (did screen change?)
+  │
+  ├─ Hash changed → verified ✓
+  └─ Hash unchanged → SPIRAL RETRY
+       4 offsets at ±40px (N, E, S, W)
+       Re-click at each offset, check hash after each
+       │
+       └─ Still unchanged → verified ✗, report to Gemini
+
+Separate path: click_element(label, role)
+  → AX tree label search (no coordinates needed)
+  → AXPress (deterministic, ~5ms)
+  → If AXPress fails: AX element bounds → center → PID click → HID click
+```
+
+**Coordinate error budget:** Gemini estimates ±10–30px in image space. FrameDims scaling reduces to ±7.5–22.5 logical points. A macOS menu item is ~18px tall — coordinate-only clicking is ~50% accurate on small targets. The Vision Oracle narrows this to ±5–10px (~65–70% accuracy) at the cost of 500ms–3s latency.
 
 ## Multimodal data flow
-
-```
-            ┌───────────────────────────────────────────┐
-            │          Gemini Live API                   │
-            │   model: gemini-2.5-flash-native-audio     │
-            │   protocol: bidirectional WebSocket         │
-            │   context: 500K token sliding window        │
-            └─────────┬──────────────────┬──────────────┘
-           audio/video│ (streaming up)   │ audio response
-           16kHz PCM  │                  │ 24kHz PCM
-           2 FPS JPEG │                  │ tool calls
-                      │                  │ text/transcription
-          ┌───────────┘                  └────────────┐
-          ▼                                           ▼
-  ┌──────────────┐                         ┌──────────────┐
-  │  Microphone  │                         │   Speaker    │
-  │  16kHz mono  │                         │  24kHz mono  │
-  └──────────────┘                         └──────────────┘
-          ▲                                           ▲
-          │          ┌──────────────────┐              │
-          └──────────│  aura-daemon     │──────────────┘
-                     │  (orchestrator)  │
-                     └──┬────┬────┬────┬┘
-                        │    │    │    │
-            ┌───────────┘    │    │    └───────────┐
-            ▼                ▼    ▼                ▼
-      ┌──────────┐    ┌────────┐ ┌────────┐  ┌──────────┐
-      │  Screen  │    │ Input  │ │ Bridge │  │  Memory  │
-      │  2 FPS   │    │ mouse  │ │ Apple- │  │ SQLite   │
-      │  capture │    │ kbd    │ │ Script │  │ FTS5     │
-      └──────────┘    └────────┘ └────────┘  └──────────┘
-```
 
 The loop is continuous: voice and vision stream up, Gemini responds with speech or tool calls, tool results feed back to Gemini, and the cycle repeats. The user never leaves their workflow — Aura operates _inside_ whatever app they're already using.
 
@@ -171,13 +308,37 @@ Every tool call passes through these gates before execution:
 | **std::thread** | cpal mic capture stream | cpal's `Stream` is `!Send` |
 | **tokio runtime** | Gemini WS, tool execution, IPC, screen capture, playback | Async I/O + concurrency |
 
+## SwiftUI shell (AuraApp)
+
+The user-facing macOS app — 15 Swift source files in `AuraApp/Sources/`. This is what the user launches from `/Applications/Aura.app`.
+
+| File | Purpose |
+|---|---|
+| `AuraApp.swift` | App entry point, SwiftUI `@main` |
+| `AppState.swift` | Observable state — connection status, mic toggle, dot color |
+| `DaemonConnection.swift` | Unix socket client to Rust daemon (JSONL protocol) |
+| `ContentView.swift` | Root navigation (welcome → permissions → conversation) |
+| `ConversationView.swift` | Main chat interface with message history |
+| `MessageBubble.swift` | Chat bubble component (user vs assistant styling) |
+| `TextInputView.swift` | Text input with character count |
+| `StatusHeader.swift` | Connection indicator (dot color + label) |
+| `FloatingPanel.swift` | Floating window management for popover chat |
+| `DotView.swift` | Animated menu bar status dot |
+| `WelcomeView.swift` | First-run onboarding — API key entry, config write |
+| `PermissionsView.swift` | Permission checklist UI (mic, screen recording, accessibility) |
+| `PermissionChecker.swift` | Polls macOS TCC status every 2s, auto-advances when granted |
+| `KeychainHelper.swift` | Read/write device token in macOS login Keychain |
+| `Protocol.swift` | `DaemonEvent` enum codec — mirrors Rust daemon's IPC messages |
+
+**Lifecycle:** AuraApp starts → writes config → launches `aura-daemon` as a subprocess → connects via Unix socket at `~/Library/Application Support/aura/daemon.sock` → relays events bidirectionally.
+
 ## IPC protocol
 
-The Rust daemon and SwiftUI app communicate over a Unix socket using JSONL:
+The Rust daemon and SwiftUI app communicate over a Unix domain socket using JSONL (one JSON object per line):
 
-**Daemon → UI:** `DotColor` (status), `Transcript` (speech), `ToolStatus` (execution), `Status` (connection), `Shutdown`
+**Daemon → UI:** `DotColor` (status indicator), `Transcript` (speech text), `ToolStatus` (execution progress), `Status` (connection state), `Shutdown`
 
-**UI → Daemon:** `SendText`, `ToggleMic`, `Reconnect`, `Shutdown`
+**UI → Daemon:** `SendText` (typed message), `ToggleMic` (mute/unmute), `Reconnect` (force new session), `Shutdown` (graceful exit)
 
 ## Resilience & error handling
 
@@ -201,18 +362,6 @@ Aura includes Google Search as a Gemini tool, enabling live web answers mid-conv
 ## Google Cloud integration
 
 Aura uses Google Cloud for persistent memory and network resilience:
-
-```
-┌──────────────────┐    ┌──────────────────────┐    ┌───────────────┐
-│  aura-proxy      │    │  memory-agent        │    │  Firestore    │
-│  Cloud Run       │    │  Cloud Run           │    │  (GCP)        │
-│                  │    │                      │    │               │
-│  WebSocket relay │    │  FastAPI + Gemini    │    │  Facts &      │
-│  for Gemini API  │    │  session consol-     │    │  sessions     │
-│  Per-device auth │    │  idation via ADK     │    │  per device   │
-│  Token registry  │    │                      │    │               │
-└──────────────────┘    └──────────────────────┘    └───────────────┘
-```
 
 - **Proxy relay (Cloud Run):** WebSocket bridge to Gemini Live API for restricted networks. Handles per-device registration, token-based auth (constant-time comparison), and concurrent connection limiting. Bidirectional frame relay with 1 MiB message limits.
 
