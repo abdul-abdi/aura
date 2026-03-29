@@ -106,13 +106,21 @@ final class AudioEngine {
 
         let sourceSampleRate = hwFormat.sampleRate
 
+        // Pre-allocate format and buffer outside the tap — avoid ObjC allocations on audio thread.
+        let monoFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceSampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+        // 4096 covers typical buffer sizes (2048 requested, engine may deliver more)
+        let monoBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: 4096)!
+
         // Install tap with hardware format (NOT 16kHz).
         // Requesting a non-native format silently fails without voice processing.
         inputNode.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) { [weak self] buffer, _ in
             guard let self else { return }
             self.tapFireCount.withLock { $0 += 1 }
-
-            let captureTime = CFAbsoluteTimeGetCurrent()
 
             // Extract channel 0 into a mono view for RMS + conversion
             guard let floatData = buffer.floatChannelData else { return }
@@ -140,19 +148,10 @@ final class AudioEngine {
                 self.silentFrameCount.withLock { $0 = 0 }
             }
 
-            // Create a mono buffer from channel 0 for PCMConverter
-            let monoFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: sourceSampleRate,
-                channels: 1,
-                interleaved: false
-            )!
-            guard let monoBuffer = AVAudioPCMBuffer(
-                pcmFormat: monoFormat,
-                frameCapacity: buffer.frameLength
-            ) else { return }
-            monoBuffer.frameLength = buffer.frameLength
-            monoBuffer.floatChannelData![0].update(from: samples, count: frameCount)
+            // Copy channel 0 into pre-allocated mono buffer (no allocation)
+            let usableFrames = min(UInt32(frameCount), monoBuffer.frameCapacity)
+            monoBuffer.frameLength = AVAudioFrameCount(usableFrames)
+            monoBuffer.floatChannelData![0].update(from: samples, count: Int(usableFrames))
 
             // Resample to 16kHz + PCM16 encode
             guard let pcmData = PCMConverter.convertToGeminiFormat(
@@ -161,6 +160,7 @@ final class AudioEngine {
             ) else { return }
 
             let base64 = PCMConverter.encodeBase64(pcmData)
+            let captureTime = CFAbsoluteTimeGetCurrent()
 
             Task { @MainActor [weak self] in
                 self?.lastCaptureTime = captureTime

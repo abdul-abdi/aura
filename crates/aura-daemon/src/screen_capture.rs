@@ -40,6 +40,7 @@ pub(crate) fn spawn_screen_capture(
     tokio::spawn(async move {
         let mut last_res: (u32, u32) = (0, 0);
         let mut censored_warned = false;
+        let mut first_frame_logged = false;
         let mut idle_skip_count: u32 = 0;
         let mut frame_count: u32 = 0;
         let mut interval = tokio::time::interval(Duration::from_millis(FAST_INTERVAL_MS));
@@ -85,8 +86,9 @@ pub(crate) fn spawn_screen_capture(
             }
             last_frame_hash.store(frame.hash, Ordering::Release);
 
-            // On first non-duplicate frame, log at INFO so it's visible without --verbose.
-            if !censored_warned {
+            // Log first frame at INFO so it's visible without --verbose.
+            if !first_frame_logged {
+                first_frame_logged = true;
                 tracing::info!(
                     width = frame.width,
                     height = frame.height,

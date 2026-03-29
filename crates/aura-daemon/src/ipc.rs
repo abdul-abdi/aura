@@ -133,7 +133,9 @@ async fn handle_client(
                         }
                         match serde_json::from_str::<UICommand>(&text) {
                             Ok(cmd) => {
-                                tracing::debug!(?cmd, "IPC command received");
+                                if !matches!(&cmd, UICommand::AudioFrame { .. }) {
+                                    tracing::debug!(?cmd, "IPC command received");
+                                }
                                 if cmd_tx.send(cmd).await.is_err() {
                                     tracing::warn!("IPC command channel closed");
                                     break;
