@@ -1,0 +1,88 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#04081D"/>
+      <stop offset="1" stop-color="#030514"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" stroke="#17335C" stroke-opacity="0.24"/>
+    </pattern>
+    <marker id="arrowMint" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#57EFB5"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#5A9DFF"/>
+    </marker>
+    <marker id="arrowAmber" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#FFB65E"/>
+    </marker>
+    <style>
+      .h1 { font: 700 34px 'SF Pro Display','Segoe UI',Arial,sans-serif; fill: #DFEAFF; }
+      .sub { font: 500 17px 'SF Pro Text','Segoe UI',Arial,sans-serif; fill: #9BB4D6; }
+      .nodeTitle { font: 700 21px 'SF Pro Display','Segoe UI',Arial,sans-serif; fill: #ECF5FF; }
+      .nodeBody { font: 520 14px 'SF Pro Text','Segoe UI',Arial,sans-serif; fill: #A0B7D8; }
+      .step { font: 700 15px 'SF Pro Display','Segoe UI',Arial,sans-serif; fill: #EAF3FF; }
+      .label { font: 600 13px 'SF Mono','Menlo','Consolas',monospace; fill: #89AFDE; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+
+  <text x="72" y="78" class="h1">Aura Live Interaction Loop</text>
+  <text x="72" y="108" class="sub">Minimal sequence: hears, sees, reasons, acts, verifies, repeats</text>
+
+  <rect x="110" y="280" width="220" height="130" rx="16" fill="#10213F" fill-opacity="0.84" stroke="#57EFB5" stroke-width="1.8"/>
+  <text x="136" y="332" class="nodeTitle">Hear</text>
+  <text x="136" y="358" class="nodeBody">Mic 16kHz stream</text>
+  <text x="136" y="380" class="nodeBody">Barge-in detector</text>
+
+  <rect x="370" y="280" width="240" height="130" rx="16" fill="#102747" fill-opacity="0.84" stroke="#5A9DFF" stroke-width="1.8"/>
+  <text x="398" y="332" class="nodeTitle">See</text>
+  <text x="398" y="358" class="nodeBody">2 FPS JPEG + AX tree</text>
+  <text x="398" y="380" class="nodeBody">UI grounding context</text>
+
+  <rect x="650" y="260" width="300" height="170" rx="18" fill="#102747" fill-opacity="0.84" stroke="#5A9DFF" stroke-width="2"/>
+  <text x="680" y="328" class="nodeTitle">Gemini Live API</text>
+  <text x="680" y="356" class="nodeBody">Multimodal reasoning + tool calls</text>
+  <text x="680" y="380" class="nodeBody">Speech and action can happen together</text>
+
+  <rect x="990" y="280" width="230" height="130" rx="16" fill="#2B2316" fill-opacity="0.84" stroke="#FFB65E" stroke-width="1.8"/>
+  <text x="1018" y="332" class="nodeTitle">Act</text>
+  <text x="1018" y="358" class="nodeBody">Click, type, script</text>
+  <text x="1018" y="380" class="nodeBody">Native macOS tools</text>
+
+  <rect x="1260" y="280" width="230" height="130" rx="16" fill="#10213F" fill-opacity="0.84" stroke="#57EFB5" stroke-width="1.8"/>
+  <text x="1288" y="332" class="nodeTitle">Speak + Verify</text>
+  <text x="1288" y="358" class="nodeBody">24kHz playback</text>
+  <text x="1288" y="380" class="nodeBody">Next frame checks result</text>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M330 345H370" stroke="#57EFB5" stroke-width="2.4" marker-end="url(#arrowMint)"/>
+    <path d="M610 345H650" stroke="#5A9DFF" stroke-width="2.4" marker-end="url(#arrowBlue)"/>
+    <path d="M950 345H990" stroke="#FFB65E" stroke-width="2.4" marker-end="url(#arrowAmber)"/>
+    <path d="M1220 345H1260" stroke="#57EFB5" stroke-width="2.4" marker-end="url(#arrowMint)"/>
+    <path d="M1375 410C1375 530 760 530 760 430" stroke="#5A9DFF" stroke-width="2.3" marker-end="url(#arrowBlue)"/>
+  </g>
+
+  <text x="1368" y="548" class="label" text-anchor="end">observe -> verify -> continue</text>
+
+  <g>
+    <circle cx="220" cy="248" r="14" fill="#0F2A24" stroke="#57EFB5"/><text x="215" y="253" class="step">1</text>
+    <circle cx="490" cy="248" r="14" fill="#102747" stroke="#5A9DFF"/><text x="485" y="253" class="step">2</text>
+    <circle cx="800" cy="228" r="14" fill="#102747" stroke="#5A9DFF"/><text x="795" y="233" class="step">3</text>
+    <circle cx="1105" cy="248" r="14" fill="#2B2316" stroke="#FFB65E"/><text x="1100" y="253" class="step">4</text>
+    <circle cx="1375" cy="248" r="14" fill="#0F2A24" stroke="#57EFB5"/><text x="1370" y="253" class="step">5</text>
+  </g>
+
+  <rect x="120" y="520" width="520" height="130" rx="16" fill="#1D1827" fill-opacity="0.84" stroke="#FF7DA2" stroke-width="1.6"/>
+  <text x="150" y="572" class="nodeTitle" font-size="20">Interruption path (barge-in)</text>
+  <text x="150" y="598" class="nodeBody">If user speaks while Aura is talking, playback is stopped immediately.</text>
+  <text x="150" y="620" class="nodeBody">Aura resumes listening and continues the same conversation naturally.</text>
+
+  <path d="M220 410C220 470 420 470 420 520" stroke="#FF7DA2" stroke-width="2.2" stroke-dasharray="7 7" fill="none" marker-end="url(#arrowAmber)"/>
+
+  <rect x="80" y="720" width="1450" height="94" rx="14" fill="#0F1B39" fill-opacity="0.72" stroke="#284F79"/>
+  <text x="110" y="762" class="nodeBody" font-size="16">Judge focus: Live, interruptible, context-aware interaction that avoids turn-based chatbot behavior.</text>
+  <text x="1496" y="762" class="nodeBody" font-size="16" text-anchor="end">Aura</text>
+</svg>

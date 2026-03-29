@@ -1,0 +1,85 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1600" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#04081D"/>
+      <stop offset="1" stop-color="#030514"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" stroke="#17335C" stroke-opacity="0.24"/>
+    </pattern>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#5A9DFF"/>
+    </marker>
+    <marker id="arrowMint" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#57EFB5"/>
+    </marker>
+    <marker id="arrowRose" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#FF7DA2"/>
+    </marker>
+    <style>
+      .h1 { font: 700 34px 'SF Pro Display','Segoe UI',Arial,sans-serif; fill: #DFEAFF; }
+      .sub { font: 500 17px 'SF Pro Text','Segoe UI',Arial,sans-serif; fill: #9BB4D6; }
+      .section { font: 620 13px 'SF Pro Display','Segoe UI',Arial,sans-serif; fill: #69DAB4; letter-spacing: 1.8px; text-transform: uppercase; }
+      .boxTitle { font: 700 22px 'SF Pro Display','Segoe UI',Arial,sans-serif; fill: #ECF5FF; }
+      .boxBody { font: 520 14px 'SF Pro Text','Segoe UI',Arial,sans-serif; fill: #A0B7D8; }
+      .label { font: 600 13px 'SF Mono','Menlo','Consolas',monospace; fill: #89AFDE; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#grid)"/>
+
+  <text x="72" y="78" class="h1">Aura Cloud + Memory Flow</text>
+  <text x="72" y="108" class="sub">Startup recall, session-end consolidation, and offline-safe retry in one view</text>
+
+  <text x="94" y="168" class="section">On device</text>
+  <text x="894" y="168" class="section">Google Cloud</text>
+
+  <rect x="80" y="190" width="680" height="590" rx="20" fill="#0C1838" fill-opacity="0.58" stroke="#28537E" stroke-width="1.4"/>
+  <rect x="840" y="190" width="680" height="590" rx="20" fill="#0E1E41" fill-opacity="0.58" stroke="#28537E" stroke-width="1.4"/>
+
+  <rect x="120" y="238" width="600" height="112" rx="14" fill="#10213F" fill-opacity="0.84" stroke="#57EFB5" stroke-width="1.8"/>
+  <text x="150" y="284" class="boxTitle">Session start</text>
+  <text x="150" y="309" class="boxBody">Aura loads local state and requests memory context</text>
+
+  <rect x="120" y="390" width="600" height="112" rx="14" fill="#10213F" fill-opacity="0.84" stroke="#57EFB5" stroke-width="1.8"/>
+  <text x="150" y="436" class="boxTitle">Session end</text>
+  <text x="150" y="461" class="boxBody">Aura sends transcript for ingest + consolidation</text>
+
+  <rect x="120" y="542" width="600" height="112" rx="14" fill="#1D1827" fill-opacity="0.84" stroke="#FF7DA2" stroke-width="1.7"/>
+  <text x="150" y="588" class="boxTitle">Fallback queue</text>
+  <text x="150" y="613" class="boxBody">If sync fails, write to pending_sync and retry next startup</text>
+
+  <rect x="880" y="238" width="600" height="112" rx="14" fill="#102747" fill-opacity="0.84" stroke="#5A9DFF" stroke-width="1.8"/>
+  <text x="910" y="284" class="boxTitle">memory-agent /query (Cloud Run)</text>
+  <text x="910" y="309" class="boxBody">Returns relevant past context before conversation starts</text>
+
+  <rect x="880" y="390" width="600" height="112" rx="14" fill="#102747" fill-opacity="0.84" stroke="#5A9DFF" stroke-width="1.8"/>
+  <text x="910" y="436" class="boxTitle">memory-agent /ingest + /consolidate (ADK)</text>
+  <text x="910" y="461" class="boxBody">Extracts facts, summarizes sessions, links long-term patterns</text>
+
+  <rect x="880" y="542" width="600" height="112" rx="14" fill="#102747" fill-opacity="0.84" stroke="#5A9DFF" stroke-width="1.8"/>
+  <text x="910" y="588" class="boxTitle">Firestore</text>
+  <text x="910" y="613" class="boxBody">Persistent facts and summaries across devices/sessions</text>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M720 294H880" stroke="#5A9DFF" stroke-width="2.4" marker-end="url(#arrowBlue)"/>
+    <path d="M880 330H720" stroke="#57EFB5" stroke-width="2.2" marker-end="url(#arrowMint)" stroke-dasharray="6 6"/>
+
+    <path d="M720 446H880" stroke="#5A9DFF" stroke-width="2.4" marker-end="url(#arrowBlue)"/>
+    <path d="M1180 502V542" stroke="#5A9DFF" stroke-width="2.4" marker-end="url(#arrowBlue)"/>
+
+    <path d="M880 598H720" stroke="#57EFB5" stroke-width="2.2" marker-end="url(#arrowMint)" stroke-dasharray="6 6"/>
+    <path d="M1020 502C1020 560 840 560 720 598" stroke="#FF7DA2" stroke-width="2.2" marker-end="url(#arrowRose)" stroke-dasharray="8 7"/>
+    <path d="M420 542V502" stroke="#FF7DA2" stroke-width="2.2" marker-end="url(#arrowRose)" stroke-dasharray="8 7"/>
+  </g>
+
+  <text x="736" y="280" class="label">startup recall</text>
+  <text x="734" y="432" class="label">session ingest</text>
+  <text x="736" y="620" class="label">context injection</text>
+  <text x="740" y="572" class="label">retry path</text>
+
+  <rect x="80" y="700" width="1450" height="94" rx="14" fill="#0F1B39" fill-opacity="0.72" stroke="#284F79"/>
+  <text x="110" y="742" class="boxBody" font-size="16">Judge focus: visible Cloud Run + Firestore architecture, explicit ADK role, and robust local fallback behavior.</text>
+  <text x="1496" y="742" class="boxBody" font-size="16" text-anchor="end">Aura</text>
+</svg>

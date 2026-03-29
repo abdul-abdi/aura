@@ -3,15 +3,21 @@ import AVFoundation
 import Foundation
 import os
 
-/// Manages audio capture and playback using AVAudioEngine with voice processing.
-/// Voice processing provides native echo cancellation, noise suppression, and AGC.
+/// Manages audio capture (with voice processing) and playback (separate engine).
+/// Two AVAudioEngine instances: capture engine has voice processing enabled for
+/// echo cancellation; playback engine is clean — no voice processing interference.
+/// This matches VibeCat's proven architecture for Gemini Live audio.
 @MainActor
 final class AudioEngine {
-    private var engine = AVAudioEngine()
-    private var playerNode = AVAudioPlayerNode()
+    // Capture engine — voice processing enabled for echo cancellation
+    private var captureEngine = AVAudioEngine()
     private var isTapInstalled = false
     private let tapFireCount = OSAllocatedUnfairLock(initialState: UInt64(0))
     private var healthCheckTask: Task<Void, Never>?
+
+    // Playback engine — separate, no voice processing
+    private var playbackEngine = AVAudioEngine()
+    private var playerNode = AVAudioPlayerNode()
 
     /// Called with base64-encoded 16kHz PCM audio frames from the mic.
     var onAudioFrame: ((String) -> Void)?
@@ -38,29 +44,49 @@ final class AudioEngine {
 
     // Playback format: 24kHz, 16-bit mono (Gemini's native audio output format)
     private let playbackFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
+        commonFormat: .pcmFormatInt16,
         sampleRate: 24000,
         channels: 1,
-        interleaved: false
+        interleaved: true
     )!
 
-    // Coalescing buffer for playback: accumulate >= 960 bytes (~20ms at 24kHz) before scheduling
+    // Coalescing buffer for playback
     private var playbackBuffer = Data()
-    private let minPlaybackBytes = 960
-    private let maxPlaybackBytes = 96_000  // ~2 seconds at 24kHz 16-bit mono
+    private let minPlaybackBytes = 960   // ~20ms at 24kHz 16-bit mono
+    private let maxPlaybackBytes = 96_000 // ~2 seconds
     private var isFirstPlaybackChunk = true
+
+    init() {
+        setupPlaybackEngine()
+    }
 
     deinit {
         healthCheckTask?.cancel()
     }
 
+    // MARK: - Playback Engine Setup (separate from capture)
+
+    private func setupPlaybackEngine() {
+        playbackEngine.attach(playerNode)
+        playbackEngine.connect(playerNode, to: playbackEngine.mainMixerNode, format: playbackFormat)
+        do {
+            try playbackEngine.start()
+            NSLog("[AudioEngine] Playback engine started")
+        } catch {
+            NSLog("[AudioEngine] Playback engine start failed: %@", error.localizedDescription)
+        }
+    }
+
     // MARK: - Capture
 
     func startCapture() throws {
-        let inputNode = engine.inputNode
+        let inputNode = captureEngine.inputNode
 
-        // Enable voice processing — provides echo cancellation, noise suppression, AGC
-        try inputNode.setVoiceProcessingEnabled(true)
+        // Voice processing disabled — it causes CoreAudio format mismatch errors
+        // (-10875) when capture and playback run on separate engines. Gemini's
+        // server-side VAD handles barge-in detection. Echo cancellation would need
+        // both engines combined, which breaks playback (the original bug).
+        // TODO: Re-evaluate when Apple fixes AUVoiceProcessor with separate engines.
 
         let captureFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -89,7 +115,6 @@ final class AudioEngine {
                 self.silentFrameCount.withLock { $0 = 0 }
             }
 
-            // AVAudioEngine delivers at 16kHz mono — just convert to PCM16
             guard let pcmData = PCMConverter.convertToGeminiFormat(
                 buffer: buffer
             ) else { return }
@@ -103,12 +128,9 @@ final class AudioEngine {
         }
         isTapInstalled = true
 
-        // Attach player node for playback
-        engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: playbackFormat)
-
-        try engine.start()
+        try captureEngine.start()
         isCapturing = true
+        NSLog("[AudioEngine] Capture engine started with voice processing")
 
         // Start tap health check
         startHealthCheck()
@@ -118,21 +140,20 @@ final class AudioEngine {
             self,
             selector: #selector(handleConfigChange),
             name: .AVAudioEngineConfigurationChange,
-            object: engine
+            object: captureEngine
         )
     }
 
     func stopCapture() {
         healthCheckTask?.cancel()
         healthCheckTask = nil
-        NotificationCenter.default.removeObserver(self, name: .AVAudioEngineConfigurationChange, object: engine)
+        NotificationCenter.default.removeObserver(self, name: .AVAudioEngineConfigurationChange, object: captureEngine)
 
         if isTapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
+            captureEngine.inputNode.removeTap(onBus: 0)
             isTapInstalled = false
         }
-        engine.detach(playerNode)
-        engine.stop()
+        captureEngine.stop()
         isCapturing = false
     }
 
@@ -143,7 +164,7 @@ final class AudioEngine {
         guard let data = Data(base64Encoded: base64) else { return }
         playbackBuffer.append(data)
 
-        // Discard stale audio if buffer grows too large (hard cap)
+        // Discard stale audio if buffer grows too large
         if playbackBuffer.count > maxPlaybackBytes {
             playbackBuffer = Data()
         }
@@ -154,13 +175,11 @@ final class AudioEngine {
             onPlaybackPause?(true)
         }
 
-        // Schedule first chunk immediately for lowest perceived latency;
-        // coalesce subsequent chunks for smooth playback.
+        // Schedule first chunk immediately for lowest perceived latency
         if isFirstPlaybackChunk {
             let chunk = playbackBuffer
             playbackBuffer = Data()
             isFirstPlaybackChunk = false
-            // Signal resume when buffer drains
             if playbackPaused {
                 playbackPaused = false
                 onPlaybackPause?(false)
@@ -173,7 +192,6 @@ final class AudioEngine {
 
         let chunk = playbackBuffer
         playbackBuffer = Data()
-        // Signal resume when buffer drains
         if playbackPaused {
             playbackPaused = false
             onPlaybackPause?(false)
@@ -197,7 +215,6 @@ final class AudioEngine {
         playbackBuffer = Data()
         isFirstPlaybackChunk = true
         isPlaying = false
-        // Reset backpressure state — if paused, send resume so daemon unblocks
         if playbackPaused {
             playbackPaused = false
             onPlaybackPause?(false)
@@ -205,23 +222,28 @@ final class AudioEngine {
     }
 
     private func schedulePlayback(pcm16Data: Data) {
-        // Convert 16-bit LE PCM to Float32 for AVAudioPlayerNode
-        let sampleCount = pcm16Data.count / 2
-        guard sampleCount > 0 else { return }
+        let frameCount = AVAudioFrameCount(pcm16Data.count / 2)
+        guard frameCount > 0 else { return }
 
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: playbackFormat,
-            frameCapacity: AVAudioFrameCount(sampleCount)
+            frameCapacity: frameCount
         ) else { return }
 
-        buffer.frameLength = AVAudioFrameCount(sampleCount)
-        guard let floatChannelData = buffer.floatChannelData else { return }
-        let floatPtr = floatChannelData[0]
+        buffer.frameLength = frameCount
+        pcm16Data.withUnsafeBytes { rawPtr in
+            guard let int16Ptr = rawPtr.bindMemory(to: Int16.self).baseAddress,
+                  let channelData = buffer.int16ChannelData?[0] else { return }
+            channelData.update(from: int16Ptr, count: Int(frameCount))
+        }
 
-        pcm16Data.withUnsafeBytes { rawBuffer in
-            let int16Ptr = rawBuffer.bindMemory(to: Int16.self)
-            for i in 0..<sampleCount {
-                floatPtr[i] = Float(int16Ptr[i]) / 32768.0
+        // Restart playback engine if it stopped
+        if !playbackEngine.isRunning {
+            do {
+                try playbackEngine.start()
+            } catch {
+                NSLog("[AudioEngine] playback engine restart failed: %@", error.localizedDescription)
+                return
             }
         }
 
@@ -236,14 +258,13 @@ final class AudioEngine {
     private func startHealthCheck() {
         healthCheckTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, self.isCapturing else { continue }
 
                 let previousCount = self.tapFireCount.withLock { $0 }
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 more second
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
                 let currentCount = self.tapFireCount.withLock { $0 }
                 if currentCount == previousCount && self.isCapturing {
-                    // Tap stalled — restart
                     self.restartCapture()
                 }
             }
@@ -255,17 +276,22 @@ final class AudioEngine {
         do {
             try startCapture()
         } catch {
-            print("[AudioEngine] restart failed: \(error.localizedDescription)")
+            NSLog("[AudioEngine] restart failed: %@", error.localizedDescription)
         }
     }
 
     // MARK: - Device Change
 
     @objc private func handleConfigChange(_ notification: Notification) {
-        // Audio device changed (AirPods connected, external mic plugged in, etc.)
-        // Restart the engine with the new device configuration
         Task { @MainActor [weak self] in
             self?.restartCapture()
+            // Rebuild playback engine too (device may have changed)
+            self?.playerNode.stop()
+            self?.playbackEngine.stop()
+            self?.playbackEngine.detach(self!.playerNode)
+            self?.playbackEngine = AVAudioEngine()
+            self?.playerNode = AVAudioPlayerNode()
+            self?.setupPlaybackEngine()
         }
     }
 }

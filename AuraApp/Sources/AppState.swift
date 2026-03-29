@@ -195,12 +195,16 @@ final class AppState {
             }
 
         case .playbackAudio(let update):
+            if audioEngine == nil { NSLog("[Aura] playbackAudio received but audioEngine is nil!") }
+            NSLog("[Aura] playbackAudio: \(update.audio.count) chars")
             audioEngine?.appendPlaybackAudio(update.audio)
 
         case .playbackStart:
+            NSLog("[Aura] playbackStart received, audioEngine=\(audioEngine != nil), isCapturing=\(isAudioCapturing)")
             audioEngine?.startPlaybackStream()
 
         case .playbackStop:
+            NSLog("[Aura] playbackStop received")
             audioEngine?.stopPlayback()
 
         case .interrupted:
