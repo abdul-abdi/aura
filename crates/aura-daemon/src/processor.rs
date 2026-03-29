@@ -15,8 +15,6 @@ use aura_daemon::event::AuraEvent;
 use aura_daemon::protocol::{DaemonEvent, DotColorName, RecentSessionInfo, Role, ToolRunStatus};
 use aura_gemini::session::GeminiEvent;
 use aura_memory::MessageRole;
-use aura_menubar::app::MenuBarMessage;
-use aura_menubar::status_item::DotColor;
 use aura_screen::capture::CaptureTrigger;
 use aura_screen::macos::MacOSScreenReader;
 
@@ -132,8 +130,6 @@ async fn ingest_to_memory_agent(
     Some(aura_memory::consolidate::ConsolidationResponse { summary, facts })
 }
 
-const OUTPUT_SAMPLE_RATE: u32 = 24_000;
-
 pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     let DaemonContext {
         session,
@@ -141,16 +137,14 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
         cancel,
         memory,
         session_id,
-        menubar_tx,
         ipc_tx,
-        player,
         cloud,
         flags,
     } = ctx;
     let SharedFlags {
         is_speaking,
         is_interrupted,
-        has_permission_error,
+        has_permission_error: _,
     } = flags;
     let CloudConfig {
         gemini_api_key,
@@ -280,16 +274,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         is_speaking.store(false, Ordering::Release);
                         bus.send(AuraEvent::GeminiConnected);
 
-                        // Enable pulsing dot + status (U2: don't clobber permission error)
-                        if let Some(ref tx) = menubar_tx
-                            && !has_permission_error.load(Ordering::Acquire)
-                        {
-                            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Green)).await;
-                            let _ = tx.send(MenuBarMessage::SetPulsing(true)).await;
-                            let _ = tx.send(MenuBarMessage::SetStatus {
-                                text: "Connected — Listening".into(),
-                            }).await;
-                        }
                         let _ = ipc_tx.send(DaemonEvent::DotColor {
                             color: DotColorName::Green,
                             pulsing: true,
@@ -431,12 +415,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
                         }
 
-                        // Always start audio stream
-                        if let Some(ref p) = player
-                            && let Err(e) = p.start_stream(OUTPUT_SAMPLE_RATE)
-                        {
-                            tracing::error!("Failed to start audio stream: {e}");
-                        }
                     }
                     Ok(GeminiEvent::AudioResponse { samples }) => {
                         // New audio from Gemini means the model is speaking again —
@@ -460,12 +438,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }).collect::<Vec<u8>>()
                         );
                         let _ = ipc_tx.send(DaemonEvent::PlaybackAudio { audio: base64_audio });
-
-                        if let Some(ref p) = player
-                            && let Err(e) = p.append(samples)
-                        {
-                            tracing::error!("Audio playback failed: {e}");
-                        }
                     }
                     Ok(GeminiEvent::ToolCall { id, name, args }) => {
                         tracing::info!(name = %name, "Tool call");
@@ -478,15 +450,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             .await;
                         }
 
-                        // Notify the popover that a tool is starting
-                        if let Some(ref tx) = menubar_tx {
-                            let _ = tx
-                                .send(MenuBarMessage::AddMessage {
-                                    text: format!("\u{1f527} Running: {name}"),
-                                    is_user: false,
-                                })
-                                .await;
-                        }
                         let _ = ipc_tx.send(DaemonEvent::ToolStatus {
                             name: name.clone(),
                             status: ToolRunStatus::Running,
@@ -510,9 +473,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 tracing::error!("Failed to send shutdown tool response: {e}");
                             }
                             tokio::time::sleep(Duration::from_secs(3)).await;
-                            if let Some(ref tx) = menubar_tx {
-                                let _ = tx.send(MenuBarMessage::Shutdown).await;
-                            }
                             let _ = ipc_tx.send(DaemonEvent::Shutdown);
                             bus.send(AuraEvent::Shutdown);
                             break;
@@ -640,7 +600,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         let tool_bus = bus.clone();
                         let tool_memory = Arc::clone(&memory);
                         let tool_session_id = session_id.clone();
-                        let tool_menubar_tx = menubar_tx.clone();
                         let tool_executor = executor.clone();
                         let tool_screen_reader = screen_reader.clone();
                         let tool_capture_trigger = capture_trigger.clone();
@@ -649,7 +608,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         let tool_state_mutex = state_change_mutex.clone();
                         let tool_tokens = Arc::clone(&active_tool_tokens);
                         let tool_inflight = Arc::clone(&tools_in_flight);
-                        let tool_permission_error = Arc::clone(&has_permission_error);
                         let tool_ipc_tx = ipc_tx.clone();
                         let tool_held_keys = Arc::clone(&held_keys);
                         let tool_last_hash = Arc::clone(&last_frame_hash);
@@ -691,17 +649,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                             // Increment tools-in-flight counter AFTER acquiring semaphore.
                             // This prevents counter leak when semaphore is closed.
-                            let prev = tool_inflight.fetch_add(1, Ordering::AcqRel);
-                            if prev == 0 {
-                                // Transition from idle to busy — set amber
-                                if let Some(ref tx) = tool_menubar_tx {
-                                    let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
-                                    let _ = tx.send(MenuBarMessage::SetColor(DotColor::Amber)).await;
-                                    let _ = tx.send(MenuBarMessage::SetStatus {
-                                        text: format!("Running {name}..."),
-                                    }).await;
-                                }
-                            }
+                            let _prev = tool_inflight.fetch_add(1, Ordering::AcqRel);
 
                             let pre_hash = if tools::is_state_changing_tool(&name) {
                                 // Allow tools to opt out of verification (e.g. run_applescript with verify: false).
@@ -808,7 +756,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                     // Pipelined: micro-settle only, skip full verification
                                     tokio::time::sleep(Duration::from_millis(super::pipeline::MICRO_SETTLE_MS)).await;
                                     tool_pipeline_chain.fetch_add(1, Ordering::Release);
-                                    verified = true; // Optimistic — errors caught at chain end
                                     if let Some(obj) = response.as_object_mut() {
                                         obj.insert("verified".to_string(), serde_json::json!("pipelined"));
                                         obj.insert("post_state".to_string(), serde_json::json!({}));
@@ -966,8 +913,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 if let Ok(mut prev) = tool_pipeline_last.lock() {
                                     *prev = Some(name.clone());
                                 }
-                            } else {
-                                verified = true; // non-state-changing tools are inherently "verified"
                             }
 
                             let tool_success = response
@@ -975,22 +920,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
 
-                            // Notify the popover that the tool completed
-                            if let Some(ref tx) = tool_menubar_tx {
-                                let status_msg = if tool_success && verified {
-                                    format!("\u{2705} Done: {name}")
-                                } else if tool_success && !verified {
-                                    format!("\u{26a0}\u{fe0f} Unverified: {name}")
-                                } else {
-                                    format!("\u{274c} Failed: {name}")
-                                };
-                                let _ = tx
-                                    .send(MenuBarMessage::AddMessage {
-                                        text: status_msg,
-                                        is_user: false,
-                                    })
-                                    .await;
-                            }
                             let tool_output = response.get("stdout")
                                 .or(response.get("context"))
                                 .or(response.get("error"))
@@ -1024,21 +953,9 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
 
                             // Decrement tools-in-flight counter (saturating to avoid underflow)
-                            let prev = tool_inflight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                            let _prev = tool_inflight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                                 Some(n.saturating_sub(1))
                             }).unwrap_or(0);
-                            let remaining = prev.saturating_sub(1);
-                            if remaining == 0
-                                && let Some(ref tx) = tool_menubar_tx
-                                && !tool_permission_error.load(Ordering::Acquire)
-                            {
-                                // All tools done — restore green status
-                                let _ = tx.send(MenuBarMessage::SetColor(DotColor::Green)).await;
-                                let _ = tx.send(MenuBarMessage::SetPulsing(true)).await;
-                                let _ = tx.send(MenuBarMessage::SetStatus {
-                                    text: "Connected — Listening".into(),
-                                }).await;
-                            }
 
                             // For non-state-changing tools, fire-and-forget screen capture
                             // (state-changing tools already triggered + awaited above)
@@ -1053,15 +970,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 tracing::error!("Failed to send tool response: {e}");
                             }
 
-                            // Show thinking indicator while Gemini processes the tool result
-                            if let Some(ref tx) = tool_menubar_tx {
-                                let _ = tx
-                                    .send(MenuBarMessage::AddMessage {
-                                        text: "\u{1f4ad} Thinking...".into(),
-                                        is_user: false,
-                                    })
-                                    .await;
-                            }
                         });
                     }
                     Ok(GeminiEvent::ToolCallCancellation { ids }) => {
@@ -1081,9 +989,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         is_speaking.store(false, Ordering::Release);
                         is_interrupted.store(true, Ordering::Release);
                         sent_playback_start = false;
-                        if let Some(ref p) = player {
-                            p.stop();
-                        }
                         bus.send(AuraEvent::BargeIn);
                         // Notify Swift to stop playback and notify UI
                         let _ = ipc_tx.send(DaemonEvent::Interrupted);
@@ -1138,13 +1043,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                     Ok(GeminiEvent::Error { message }) => {
                         tracing::error!(%message, "Gemini error");
 
-                        if let Some(ref tx) = menubar_tx {
-                            let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
-                            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
-                            let _ = tx.send(MenuBarMessage::SetStatus {
-                                text: format!("Error: {message}"),
-                            }).await;
-                        }
                         let _ = ipc_tx.send(DaemonEvent::DotColor {
                             color: DotColorName::Red,
                             pulsing: false,
@@ -1157,16 +1055,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         tracing::warn!(attempt, "Gemini reconnecting");
                         bus.send(AuraEvent::GeminiReconnecting { attempt });
 
-                        if let Some(ref tx) = menubar_tx {
-                            // U2: Don't clobber permission error status
-                            if !has_permission_error.load(Ordering::Acquire) {
-                                let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
-                                let _ = tx.send(MenuBarMessage::SetColor(DotColor::Amber)).await;
-                                let _ = tx.send(MenuBarMessage::SetStatus {
-                                    text: format!("Reconnecting (attempt {attempt})..."),
-                                }).await;
-                            }
-                        }
                         let _ = ipc_tx.send(DaemonEvent::DotColor {
                             color: DotColorName::Amber,
                             pulsing: true,
@@ -1189,13 +1077,6 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             }
                         }
 
-                        if let Some(ref tx) = menubar_tx {
-                            let _ = tx.send(MenuBarMessage::SetPulsing(false)).await;
-                            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Gray)).await;
-                            let _ = tx.send(MenuBarMessage::SetStatus {
-                                text: "Disconnected".into(),
-                            }).await;
-                        }
                         let _ = ipc_tx.send(DaemonEvent::DotColor {
                             color: DotColorName::Gray,
                             pulsing: false,

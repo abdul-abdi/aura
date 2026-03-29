@@ -1,12 +1,10 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use aura_gemini::session::GeminiLiveSession;
 use aura_memory::SessionMemory;
-use aura_menubar::app::MenuBarMessage;
-use aura_voice::playback::AudioPlayer;
 
 use crate::bus::EventBus;
 use crate::protocol::DaemonEvent;
@@ -53,9 +51,7 @@ pub struct DaemonContext {
     pub cancel: CancellationToken,
     pub memory: Arc<Mutex<SessionMemory>>,
     pub session_id: String,
-    pub menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     pub ipc_tx: broadcast::Sender<DaemonEvent>,
-    pub player: Option<AudioPlayer>,
     pub cloud: CloudConfig,
     pub flags: SharedFlags,
 }

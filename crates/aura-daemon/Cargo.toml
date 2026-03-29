@@ -4,8 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-aura-voice = { path = "../aura-voice" }
-aura-menubar = { path = "../aura-menubar" }
 aura-screen = { path = "../aura-screen" }
 aura-bridge = { path = "../aura-bridge" }
 aura-gemini = { path = "../aura-gemini" }

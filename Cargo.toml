@@ -2,12 +2,10 @@
 resolver = "2"
 members = [
     "crates/aura-daemon",
-    "crates/aura-voice",
     "crates/aura-screen",
     "crates/aura-bridge",
     "crates/aura-gemini",
     "crates/aura-memory",
-    "crates/aura-menubar",
     "crates/aura-proxy",
     "crates/aura-input",
     "crates/aura-firestore",

@@ -11,7 +11,6 @@ use aura_daemon::protocol::DaemonEvent;
 use aura_daemon::setup::AuraSetup;
 use aura_gemini::config::GeminiConfig;
 use aura_memory::SessionMemory;
-use aura_menubar::app::MenuBarApp;
 use tracing_subscriber::EnvFilter;
 
 mod cloud;
@@ -212,60 +211,29 @@ fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     let (ipc_tx, _) = broadcast::channel::<DaemonEvent>(IPC_BROADCAST_CAPACITY);
 
-    if cli.headless {
-        // No menu bar — run tokio directly with a single fresh session.
-        let session_id = {
-            let mem = memory
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Memory lock poisoned: {e}"))?;
-            mem.start_session()
-                .context("Failed to start memory session")?
-        };
-        tracing::info!(session_id = %session_id, "Session memory initialized");
-        let has_permission_error = Arc::new(AtomicBool::new(false));
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(orchestrator::run_daemon(
-            gemini_config,
-            bus,
-            cancel,
-            Arc::clone(&memory),
-            session_id,
-            None,
-            has_permission_error,
-            ipc_tx.clone(),
-            SessionMode::Fresh,
-        ))?;
-    } else {
-        // Create menu bar app (must run on main thread).
-        let (menu_app, menu_tx, reconnect_rx, shutdown_rx) = MenuBarApp::new();
-
-        // Spawn tokio runtime on a background thread and run the reconnect loop.
-        let bg_bus = bus.clone();
-        let bg_cancel = cancel.clone();
-        let bg_ipc_tx = ipc_tx.clone();
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Runtime::new() {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!("Failed to create tokio runtime: {e}");
-                    return;
-                }
-            };
-            rt.block_on(orchestrator::run_reconnect_loop(
-                gemini_config,
-                bg_bus,
-                bg_cancel,
-                memory,
-                menu_tx,
-                reconnect_rx,
-                shutdown_rx,
-                bg_ipc_tx,
-            ));
-        });
-
-        // Run menu bar on main thread (blocks forever)
-        menu_app.run();
-    }
+    // v2: Daemon is always launched headless by the SwiftUI app.
+    // The --headless flag is kept for backwards compatibility but the
+    // non-headless (native Cocoa menu bar) path has been removed.
+    let session_id = {
+        let mem = memory
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Memory lock poisoned: {e}"))?;
+        mem.start_session()
+            .context("Failed to start memory session")?
+    };
+    tracing::info!(session_id = %session_id, "Session memory initialized");
+    let has_permission_error = Arc::new(AtomicBool::new(false));
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(orchestrator::run_daemon(
+        gemini_config,
+        bus,
+        cancel,
+        Arc::clone(&memory),
+        session_id,
+        has_permission_error,
+        ipc_tx.clone(),
+        SessionMode::Fresh,
+    ))?;
 
     Ok(())
 }

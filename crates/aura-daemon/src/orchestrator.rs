@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use aura_daemon::bus::EventBus;
@@ -14,17 +14,9 @@ use aura_daemon::protocol::{DaemonEvent, DotColorName, UICommand};
 use aura_gemini::config::GeminiConfig;
 use aura_gemini::session::GeminiLiveSession;
 use aura_memory::SessionMemory;
-use aura_menubar::app::MenuBarMessage;
-use aura_menubar::status_item::DotColor;
-use aura_voice::audio::AudioCapture;
-use aura_voice::playback::AudioPlayer;
 
 use crate::cloud;
 use crate::processor;
-
-/// Bounded mic bridge channel capacity — prevents unbounded memory growth
-/// during backpressure from the Gemini WebSocket.
-const MIC_BRIDGE_CAPACITY: usize = 256;
 
 /// Destructive action guardrail injected into the system prompt.
 pub(crate) const DESTRUCTIVE_ACTION_GUARDRAIL: &str = "\n\nSafety — Destructive Actions:\
@@ -35,6 +27,7 @@ or any action that permanently destroys data, ALWAYS confirm with the user first
 
 /// Whether this session resumes a previous Gemini context or starts fresh.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Resume will be used when IPC-based reconnection is added
 pub(crate) enum SessionMode {
     /// Resume previous session via handle — no greeting.
     Resume { handle: String },
@@ -49,7 +42,6 @@ pub(crate) async fn run_daemon(
     cancel: CancellationToken,
     memory: Arc<Mutex<SessionMemory>>,
     session_id: String,
-    menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     has_permission_error: Arc<AtomicBool>,
     ipc_tx: broadcast::Sender<DaemonEvent>,
     session_mode: SessionMode,
@@ -90,16 +82,6 @@ pub(crate) async fn run_daemon(
     let mut ipc_cmd_rx = ipc::start_ipc_server(ipc_tx.clone(), cancel.clone());
 
     // Connect to Gemini Live API
-    if let Some(ref tx) = menubar_tx {
-        // U2: Don't overwrite permission error status
-        if !has_permission_error.load(Ordering::Acquire) {
-            let _ = tx
-                .send(MenuBarMessage::SetStatus {
-                    text: "Connecting...".into(),
-                })
-                .await;
-        }
-    }
     let _ = ipc_tx.send(DaemonEvent::DotColor {
         color: DotColorName::Amber,
         pulsing: false,
@@ -134,36 +116,11 @@ pub(crate) async fn run_daemon(
 
     let session = Arc::new(session);
 
-    // Set up mic capture on a dedicated std::thread (cpal's Stream is !Send)
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<f32>>();
-    let mic_shutdown = Arc::new(AtomicBool::new(false));
     let is_speaking = Arc::new(AtomicBool::new(false));
 
-    // Audio playback (optional — warn if unavailable).
-    // Created here so the mic bridge can share the player's playing flag and
-    // fully mute itself during hardware playback (prevents feedback loop).
-    let player = match AudioPlayer::new() {
-        Ok(p) => {
-            tracing::info!("Audio playback ready");
-            Some(p)
-        }
-        Err(e) => {
-            tracing::warn!("Audio playback unavailable: {e}");
-            None
-        }
-    };
     // Notify UI if Screen Recording was denied at startup.
     if !check_screen_recording_permission() {
         has_permission_error.store(true, Ordering::Release);
-        if let Some(ref tx) = menubar_tx {
-            let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
-            let _ = tx
-                .send(MenuBarMessage::SetStatus {
-                    text: "Screen Recording needed — grant in System Settings > Privacy & Security > Screen Recording"
-                        .into(),
-                })
-                .await;
-        }
         let _ = ipc_tx.send(DaemonEvent::DotColor {
             color: DotColorName::Red,
             pulsing: false,
@@ -173,113 +130,17 @@ pub(crate) async fn run_daemon(
         });
     }
 
-    // Attempt audio capture directly. The SwiftUI app grants mic permission
-    // during onboarding — the daemon inherits it via macOS's "responsible
-    // process" mechanism. If permission wasn't granted, cpal will fail
-    // gracefully and we report the error via IPC.
-    let _mic_available = {
-        match AudioCapture::new(None) {
-            Ok(capture) => {
-                let mic_shutdown_flag = Arc::clone(&mic_shutdown);
-                std::thread::Builder::new()
-                    .name("aura-mic-capture".into())
-                    .spawn(move || {
-                        let _stream = match capture.start(std_tx) {
-                            Ok(stream) => stream,
-                            Err(e) => {
-                                tracing::error!("Failed to start audio capture: {e}");
-                                return;
-                            }
-                        };
-                        tracing::info!("Mic capture started");
-                        while !mic_shutdown_flag.load(Ordering::Acquire) {
-                            std::thread::park_timeout(Duration::from_millis(500));
-                        }
-                        tracing::info!("Mic capture stopped");
-                    })?;
-                true
-            }
-            Err(e) => {
-                tracing::warn!("Mic unavailable: {e}");
-                has_permission_error.store(true, Ordering::Release);
-                if let Some(ref tx) = menubar_tx {
-                    let _ = tx.send(MenuBarMessage::SetColor(DotColor::Red)).await;
-                    let _ = tx
-                        .send(MenuBarMessage::SetStatus {
-                            text: "Mic access needed — check System Settings > Privacy".into(),
-                        })
-                        .await;
-                }
-                let _ = ipc_tx.send(DaemonEvent::DotColor {
-                    color: DotColorName::Red,
-                    pulsing: false,
-                });
-                let _ = ipc_tx.send(DaemonEvent::Status {
-                    message: "Mic access needed — check System Settings > Privacy".into(),
-                });
-                false
-            }
-        }
-    };
-
     // Check accessibility permission (needed for input control tools)
     if !aura_input::accessibility::check_accessibility(false) {
         tracing::warn!("Accessibility permission not granted — input tools will fail silently");
-        if let Some(ref tx) = menubar_tx {
-            let _ = tx
-                .send(MenuBarMessage::AddMessage {
-                    text: "Grant Accessibility permission in System Settings for input control."
-                        .into(),
-                    is_user: false,
-                })
-                .await;
-        }
     }
 
-    // Bridge std::sync::mpsc -> tokio -> session.send_audio()
-    // All mic audio streams directly to Gemini — the 3.1 Flash Live model
-    // handles barge-in, echo cancellation, and turn management natively
-    // in its audio-to-audio pipeline. No client-side energy gating needed.
-    let audio_session = Arc::clone(&session);
-    let audio_cancel = cancel.clone();
-    let bridge_shutdown = Arc::clone(&mic_shutdown);
-    tokio::spawn(async move {
-        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(MIC_BRIDGE_CAPACITY);
+    // v2: Audio capture and playback are handled by Swift AVAudioEngine via IPC.
+    // Audio frames arrive as UICommand::AudioFrame and are forwarded to Gemini
+    // via session.send_audio_base64(). Playback audio is sent back to Swift
+    // as DaemonEvent::PlaybackAudio.
 
-        // Spawn a blocking task to drain the std::sync::mpsc channel
-        let bridge_tx = tokio_tx.clone();
-        tokio::task::spawn_blocking(move || {
-            loop {
-                match std_rx.recv_timeout(Duration::from_millis(10)) {
-                    Ok(samples) => {
-                        if bridge_tx.blocking_send(samples).is_err() {
-                            break;
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        if bridge_shutdown.load(Ordering::Acquire) {
-                            break;
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-        });
-
-        loop {
-            tokio::select! {
-                _ = audio_cancel.cancelled() => break,
-                Some(samples) = tokio_rx.recv() => {
-                    if let Err(e) = audio_session.send_audio(&samples) {
-                        tracing::warn!("Gemini session closed, stopping audio bridge: {e}");
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    // Spawn event processor (Gemini events -> tool handling + audio playback)
+    // Spawn event processor (Gemini events -> tool handling + IPC forwarding)
     let is_interrupted = Arc::new(AtomicBool::new(false));
     let ctx = DaemonContext {
         session: Arc::clone(&session),
@@ -287,9 +148,7 @@ pub(crate) async fn run_daemon(
         cancel: cancel.clone(),
         memory,
         session_id,
-        menubar_tx,
         ipc_tx: ipc_tx.clone(),
-        player,
         cloud: CloudConfig {
             gemini_api_key,
             cloud_run_url: gemini_cloud_run_url,
@@ -380,7 +239,6 @@ pub(crate) async fn run_daemon(
     // loop has a cancel.cancelled() branch that would skip the Disconnected
     // handler if cancelled first.
     let _ = ipc_tx.send(DaemonEvent::Shutdown);
-    mic_shutdown.store(true, Ordering::Release);
     session.disconnect();
 
     if !processor_done {
@@ -416,178 +274,3 @@ fn check_screen_recording_permission() -> bool {
     has_permission
 }
 
-/// Session reconnection loop for menubar mode.
-///
-/// Runs inside a background tokio runtime spawned by `main`. Manages the
-/// session lifecycle: starts sessions, detects stale resumption handles,
-/// and waits for reconnect signals or auto-reconnects on drop.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_reconnect_loop(
-    gemini_config: GeminiConfig,
-    bus: EventBus,
-    cancel: CancellationToken,
-    memory: Arc<Mutex<aura_memory::SessionMemory>>,
-    menu_tx: mpsc::Sender<MenuBarMessage>,
-    mut reconnect_rx: mpsc::Receiver<()>,
-    mut shutdown_rx: mpsc::Receiver<()>,
-    ipc_tx: broadcast::Sender<DaemonEvent>,
-) {
-    // Persist permission error flag across reconnection attempts so the
-    // "Connecting..." status doesn't overwrite a mic permission error.
-    let has_permission_error = Arc::new(AtomicBool::new(false));
-
-    // Spawn a dedicated task that listens for the menu Quit signal.
-    // This fires even while run_daemon is active, triggering graceful
-    // shutdown via the cancellation token.
-    let shutdown_cancel = cancel.clone();
-    let shutdown_bus = bus.clone();
-    let shutdown_menu_tx = menu_tx.clone();
-    tokio::spawn(async move {
-        if shutdown_rx.recv().await.is_some() {
-            tracing::info!("Shutdown requested via menu");
-            shutdown_cancel.cancel();
-            shutdown_bus.send(AuraEvent::Shutdown);
-            let _ = shutdown_menu_tx.send(MenuBarMessage::Shutdown).await;
-        }
-    });
-
-    // Counters for smart reconnection logic.
-    // reconnect_counter: number of successful (>=30s) sessions since last Fresh start.
-    // poison_counter: number of consecutive Resume sessions that lasted <30s.
-    let mut reconnect_counter: u32 = 0;
-    let mut poison_counter: u32 = 0;
-
-    loop {
-        // session.rs connection_loop handles transient WebSocket drops with fast retries.
-        // When it exhausts retries (permanent failure), run_daemon returns and this
-        // outer loop creates a fresh session after user/auto-reconnect signal.
-
-        // Create a new session for each connection attempt
-        let session_id = {
-            let mem = Arc::clone(&memory);
-            match tokio::task::spawn_blocking(move || {
-                mem.lock().ok().and_then(|g| g.start_session().ok())
-            })
-            .await
-            {
-                Ok(Some(id)) => id,
-                Ok(None) => {
-                    tracing::error!("Failed to start memory session");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!("Memory session task panicked: {e}");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
-                }
-            }
-        };
-        tracing::info!(session_id = %session_id, "Session memory initialized");
-
-        // Determine session mode: Resume if handle exists AND not poisoned.
-        let session_mode = {
-            let handle: Option<String> =
-                cloud::memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
-                    .await
-                    .flatten()
-                    .filter(|h| !h.is_empty());
-            match handle {
-                Some(h) if reconnect_counter < 3 => {
-                    tracing::info!(reconnect_counter, "Resuming session with existing handle");
-                    SessionMode::Resume { handle: h }
-                }
-                _ => {
-                    tracing::info!("Starting fresh session (no handle or counter exceeded)");
-                    SessionMode::Fresh
-                }
-            }
-        };
-
-        let session_start = std::time::Instant::now();
-
-        if let Err(e) = run_daemon(
-            gemini_config.clone(),
-            bus.clone(),
-            cancel.clone(),
-            Arc::clone(&memory),
-            session_id,
-            Some(menu_tx.clone()),
-            Arc::clone(&has_permission_error),
-            ipc_tx.clone(),
-            session_mode.clone(),
-        )
-        .await
-        {
-            tracing::error!("Daemon error: {e}");
-        }
-
-        // Track session health to detect a poisoned resume handle.
-        let session_duration = session_start.elapsed().as_secs();
-        if session_duration < 30 {
-            if matches!(session_mode, SessionMode::Resume { .. }) {
-                poison_counter += 1;
-                tracing::warn!(
-                    poison_counter,
-                    session_duration,
-                    "Short-lived Resume session — possible stale handle"
-                );
-                if poison_counter >= 2 {
-                    tracing::warn!("Poison counter reached — clearing stale resumption handle");
-                    let _ =
-                        cloud::memory_op(&memory, |mem| mem.set_setting("resumption_handle", ""))
-                            .await;
-                    poison_counter = 0;
-                    reconnect_counter = 0;
-                }
-            }
-        } else {
-            poison_counter = 0;
-            reconnect_counter += 1;
-        }
-
-        // If shutdown was requested, stop reconnecting
-        if cancel.is_cancelled() {
-            break;
-        }
-
-        // Wait for reconnect signal or auto-reconnect after 3s.
-        let _ = menu_tx
-            .send(MenuBarMessage::SetColor(
-                aura_menubar::status_item::DotColor::Gray,
-            ))
-            .await;
-        let _ = menu_tx.send(MenuBarMessage::SetPulsing(false)).await;
-        let _ = menu_tx
-            .send(MenuBarMessage::SetStatus {
-                text: "Disconnected — right-click to reconnect".into(),
-            })
-            .await;
-
-        let mut user_triggered_reconnect = false;
-        tokio::select! {
-            Some(()) = reconnect_rx.recv() => {
-                user_triggered_reconnect = true;
-                tracing::info!("Reconnecting via menu...");
-                let _ = menu_tx.send(MenuBarMessage::SetStatus {
-                    text: "Reconnecting...".into(),
-                }).await;
-            }
-            _ = cancel.cancelled() => {
-                tracing::info!("Shutdown during reconnect wait");
-                break;
-            }
-            _ = tokio::time::sleep(Duration::from_secs(3)) => {
-                tracing::info!("Auto-reconnecting...");
-                let _ = menu_tx.send(MenuBarMessage::SetStatus {
-                    text: "Reconnecting...".into(),
-                }).await;
-            }
-        }
-
-        // Auto-reconnects always start fresh (reset counter so next iteration picks Fresh)
-        if !user_triggered_reconnect {
-            reconnect_counter = u32::MAX; // force Fresh on next loop iteration
-        }
-    }
-}
