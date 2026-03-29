@@ -63,6 +63,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Stop audio capture (v2)
+        appState.audioEngine?.stopCapture()
+        appState.isAudioCapturing = false
+
         dotColorTimer?.invalidate()
         dotColorTimer = nil
 
@@ -432,11 +436,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         connection = DaemonConnection()
         appState.configure(connection: connection!)
 
+        // Set up audio engine (v2) — mic frames flow to daemon
+        appState.setupAudioEngine(connection: connection!)
+
         Task {
             await connection?.connect()
             if connection?.isConnected == true {
                 appState.markConnected()
                 updateStatusItemIcon(color: .green)
+
+                // Start audio capture after connection is established
+                do {
+                    try appState.audioEngine?.startCapture()
+                    appState.isAudioCapturing = true
+                } catch {
+                    appState.statusMessage = "Mic unavailable: \(error.localizedDescription)"
+                }
             }
         }
 

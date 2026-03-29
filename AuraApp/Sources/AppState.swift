@@ -47,6 +47,12 @@ final class AppState {
 
     var statusMessage: String = "Disconnected"
 
+    // MARK: - Audio (v2)
+
+    var audioEngine: AudioEngine?
+    var currentMode: String = "copilot"  // ghost / copilot / autopilot
+    var isAudioCapturing = false
+
     // MARK: - Connection
 
     private var connection: DaemonConnection?
@@ -127,6 +133,14 @@ final class AppState {
         }
     }
 
+    func setupAudioEngine(connection: DaemonConnection) {
+        let engine = AudioEngine()
+        engine.onAudioFrame = { [weak connection] base64 in
+            connection?.sendAudioFrame(base64)
+        }
+        self.audioEngine = engine
+    }
+
     func markConnected() {
         connectionState = .connected
         statusMessage = "Connected"
@@ -173,21 +187,17 @@ final class AppState {
                 events.append(event)
             }
 
-        case .playbackAudio:
-            // v2: audio playback frames forwarded to AudioEngine — handled in Task 3
-            break
+        case .playbackAudio(let update):
+            audioEngine?.appendPlaybackAudio(update.audio)
 
         case .playbackStart:
-            // v2: signal to start audio playback — handled in Task 3
-            break
+            audioEngine?.startPlaybackStream()
 
         case .playbackStop:
-            // v2: signal to stop audio playback — handled in Task 3
-            break
+            audioEngine?.stopPlayback()
 
         case .interrupted:
-            // v2: barge-in occurred — stop playback — handled in Task 3
-            break
+            audioEngine?.stopPlayback()
         }
     }
 

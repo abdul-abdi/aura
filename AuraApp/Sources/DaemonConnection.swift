@@ -206,6 +206,21 @@ final class DaemonConnection {
         }
     }
 
+    /// Send a mic audio frame to the daemon (base64-encoded 16kHz PCM).
+    func sendAudioFrame(_ base64PCM: String) {
+        send(.audioFrame(base64PCM))
+    }
+
+    /// Send a mode change command.
+    func sendSetMode(_ mode: String) {
+        send(.setMode(mode))
+    }
+
+    /// Send an intervention dismissal.
+    func sendDismissIntervention(_ id: String) {
+        send(.dismissIntervention(id))
+    }
+
     private func handleDisconnect() {
         let wasConnected = isConnected
         disconnect()
