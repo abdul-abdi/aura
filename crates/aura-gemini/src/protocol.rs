@@ -36,6 +36,63 @@ pub struct Setup {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_compression: Option<ContextWindowCompression>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realtime_input_config: Option<RealtimeInputConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactivity: Option<Proactivity>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_affective_dialog: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_audio_transcription: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_audio_transcription: Option<bool>,
+}
+
+/// Configuration for real-time audio input handling (VAD, barge-in, turn coverage).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeInputConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automatic_activity_detection: Option<AutomaticActivityDetection>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_handling: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_coverage: Option<String>,
+}
+
+/// Server-side VAD tuning parameters.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomaticActivityDetection {
+    /// How easily speech start is detected. LOW = less sensitive, HIGH = more sensitive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_of_speech_sensitivity: Option<String>,
+
+    /// How quickly silence ends a turn. LOW = waits longer, HIGH = ends turn faster.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_of_speech_sensitivity: Option<String>,
+
+    /// Minimum ms of speech before it counts as a real turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_padding_ms: Option<u32>,
+
+    /// Ms of silence before turn is considered complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silence_duration_ms: Option<u32>,
+}
+
+/// Proactive audio configuration — allows Gemini to speak unprompted.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Proactivity {
+    pub proactive_audio: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,6 +400,11 @@ mod tests {
                 tools: None,
                 session_resumption: None,
                 context_window_compression: None,
+                realtime_input_config: None,
+                proactivity: None,
+                enable_affective_dialog: None,
+                output_audio_transcription: None,
+                input_audio_transcription: None,
             },
         };
 

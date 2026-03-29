@@ -100,7 +100,7 @@ impl GeminiLiveSession {
             mpsc::channel::<(String, String, serde_json::Value)>(16);
         let (text_tx, text_rx) = mpsc::channel::<String>(16);
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
-        let (event_tx, _) = broadcast::channel::<GeminiEvent>(128);
+        let (event_tx, _) = broadcast::channel::<GeminiEvent>(512);
         let cancel = tokio_util::sync::CancellationToken::new();
         let is_first_connect = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
@@ -834,7 +834,7 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
                         },
                     },
                 }),
-                media_resolution: Some("MEDIA_RESOLUTION_HIGH".to_string()),
+                media_resolution: Some("MEDIA_RESOLUTION_MEDIUM".to_string()),
             }),
             system_instruction: Some(Content {
                 role: None,
@@ -849,9 +849,25 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
             }),
             context_window_compression: Some(ContextWindowCompression {
                 sliding_window: SlidingWindow {
-                    target_tokens: Some(500_000),
+                    target_tokens: Some(250_000),
                 },
             }),
+            realtime_input_config: Some(RealtimeInputConfig {
+                automatic_activity_detection: Some(AutomaticActivityDetection {
+                    start_of_speech_sensitivity: Some("START_SENSITIVITY_HIGH".into()),
+                    end_of_speech_sensitivity: Some("END_SENSITIVITY_LOW".into()),
+                    prefix_padding_ms: Some(20),
+                    silence_duration_ms: Some(200),
+                }),
+                activity_handling: Some("START_OF_ACTIVITY_INTERRUPTS".into()),
+                turn_coverage: None,
+            }),
+            proactivity: Some(Proactivity {
+                proactive_audio: true,
+            }),
+            enable_affective_dialog: Some(true),
+            output_audio_transcription: Some(true),
+            input_audio_transcription: Some(true),
         },
     }
 }
