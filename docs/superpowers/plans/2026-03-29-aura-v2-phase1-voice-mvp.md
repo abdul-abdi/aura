@@ -839,6 +839,61 @@ git commit -m "fix(v2): address issues found in voice round-trip smoke test"
 
 ---
 
+## Task 6.5: Profile Base64 IPC Overhead
+
+**Files:**
+- Modify: `AuraApp/Sources/AudioEngine.swift` (temporary instrumentation)
+- Modify: `crates/aura-daemon/src/orchestrator.rs` (temporary instrumentation)
+
+Base64 encoding inflates audio payload by 33%. Measure whether this matters for the voice round-trip.
+
+- [ ] **Step 1: Add timing instrumentation**
+
+In AudioEngine.swift, measure time spent in `PCMConverter.encodeBase64()` per frame. In orchestrator.rs, measure time spent decoding base64 in the AudioFrame handler. Log both as tracing spans.
+
+```swift
+// In AudioEngine.swift, inside the tap callback:
+let encodeStart = CFAbsoluteTimeGetCurrent()
+let base64 = PCMConverter.encodeBase64(pcmData)
+let encodeMs = (CFAbsoluteTimeGetCurrent() - encodeStart) * 1000.0
+if encodeMs > 0.5 {
+    print("[AudioEngine] base64 encode: \(String(format: "%.2f", encodeMs))ms")
+}
+```
+
+```rust
+// In orchestrator.rs, AudioFrame handler:
+UICommand::AudioFrame { pcm } => {
+    let _span = tracing::debug_span!("base64_decode_audio").entered();
+    let decode_start = std::time::Instant::now();
+    // ... existing forward-to-Gemini logic ...
+    let decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
+    if decode_ms > 0.5 {
+        tracing::debug!("base64 audio decode: {decode_ms:.2}ms");
+    }
+}
+```
+
+- [ ] **Step 2: Run a 2-minute voice conversation and check logs**
+
+Run: `RUST_LOG=debug cargo run -p aura-daemon 2>&1 | grep "base64"`
+
+If encode+decode overhead per frame exceeds 1ms (roughly 5% of a 20ms frame budget), plan the switch to length-prefixed binary IPC. If under 1ms, base64 is fine — remove the instrumentation and move on.
+
+- [ ] **Step 3: Decide and document**
+
+If overhead is acceptable: remove instrumentation, add a comment "Base64 profiled at Xms/frame — acceptable" in AudioEngine.swift.
+
+If overhead is too high: create a follow-up task for binary IPC (length-prefixed frames interleaved with JSONL text frames). Do NOT implement it now — just document the decision and create the task.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git commit -m "perf: profile base64 IPC overhead for audio frames"
+```
+
+---
+
 ## Task 7: Remove Dead v1 Code
 
 **Files:**

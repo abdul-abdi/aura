@@ -103,6 +103,10 @@ final class ScreenCapture {
     /// Called with (jpeg_base64, screen_basis_id) for each captured frame.
     var onVideoFrame: ((String, String) -> Void)?
 
+    /// Called when Screen Recording permission appears to have been revoked.
+    /// The daemon should surface this to the user via IPC (e.g., a status message).
+    var onPermissionLost: (() -> Void)?
+
     /// Current screen basis ID (updated on every captured frame).
     private(set) var currentBasisId: String = UUID().uuidString
 
@@ -112,6 +116,12 @@ final class ScreenCapture {
 
     /// Previous frame hash for image diffing (skip unchanged frames).
     private var lastFrameHash: UInt64 = 0
+
+    /// Consecutive capture failures (nil result or all-black frame).
+    /// When this reaches `maxConsecutiveFailures`, we assume Screen Recording
+    /// permission was revoked and notify via `onPermissionLost`.
+    private var consecutiveCaptureFailures = 0
+    private let maxConsecutiveFailures = 5
 
     /// Pixel hash threshold — frames with delta below this are skipped.
     /// Value of 0 means any change triggers a send.
@@ -193,7 +203,22 @@ final class ScreenCapture {
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
 
             // Convert CGImage to JPEG data
-            guard let jpegData = cgImageToJPEG(image, quality: jpegQuality) else { return }
+            guard let jpegData = cgImageToJPEG(image, quality: jpegQuality) else {
+                // nil JPEG conversion — treat as a capture failure
+                recordCaptureFailure()
+                return
+            }
+
+            // Detect all-black frames (< 1% non-zero pixels).
+            // When Screen Recording permission is revoked mid-session,
+            // ScreenCaptureKit silently returns black frames instead of erroring.
+            if isFrameBlack(image) {
+                recordCaptureFailure()
+                return
+            }
+
+            // Successful capture — reset failure counter
+            consecutiveCaptureFailures = 0
 
             // Compute frame hash for diffing
             let hash = computeFrameHash(image)
@@ -213,9 +238,51 @@ final class ScreenCapture {
             onVideoFrame?(base64, basisId)
 
         } catch {
-            // ScreenCaptureKit errors (permission denied, etc.) are logged but not fatal
+            // ScreenCaptureKit errors (permission denied, etc.)
             print("[ScreenCapture] Fast path error: \(error.localizedDescription)")
+            recordCaptureFailure()
         }
+    }
+
+    // MARK: - Permission Revocation Detection
+
+    /// Record a capture failure and check if we've hit the consecutive failure threshold.
+    private func recordCaptureFailure() {
+        consecutiveCaptureFailures += 1
+        if consecutiveCaptureFailures >= maxConsecutiveFailures {
+            print("[ScreenCapture] \(maxConsecutiveFailures) consecutive failures — Screen Recording may have been revoked")
+            onPermissionLost?()
+            consecutiveCaptureFailures = 0  // Reset to avoid spamming the callback
+        }
+    }
+
+    /// Check if a captured frame is effectively all black (< 1% non-zero pixels).
+    /// When Screen Recording permission is revoked, ScreenCaptureKit returns black frames
+    /// rather than throwing an error.
+    private func isFrameBlack(_ image: CGImage) -> Bool {
+        guard let data = image.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data) else { return false }
+
+        let totalBytes = CFDataGetLength(data)
+        guard totalBytes > 0 else { return true }
+
+        // Sample every 100th byte for performance (full scan is unnecessary)
+        let stride = 100
+        var nonZeroCount = 0
+        var sampledCount = 0
+
+        var i = 0
+        while i < totalBytes {
+            sampledCount += 1
+            if bytes[i] != 0 {
+                nonZeroCount += 1
+            }
+            i += stride
+        }
+
+        guard sampledCount > 0 else { return true }
+        let nonZeroRatio = Double(nonZeroCount) / Double(sampledCount)
+        return nonZeroRatio < 0.01  // Less than 1% non-zero pixels → effectively black
     }
 
     // MARK: - Smart Path (15s deep analysis for proactive engine)
@@ -346,6 +413,10 @@ func setupScreenCapture(connection: DaemonConnection) {
     let capture = ScreenCapture()
     capture.onVideoFrame = { [weak connection] jpeg, basisId in
         connection?.sendVideoFrame(jpegBase64: jpeg, screenBasisId: basisId)
+    }
+    capture.onPermissionLost = { [weak connection] in
+        // Notify the daemon, which surfaces "Screen Recording disabled" to the user.
+        connection?.send(.status("Screen Recording permission was revoked. Re-enable in System Settings > Privacy & Security > Screen Recording."))
     }
     self.screenCapture = capture
 }

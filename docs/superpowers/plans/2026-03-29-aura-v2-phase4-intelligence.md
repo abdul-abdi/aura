@@ -1522,41 +1522,74 @@ const BACKOFF_RESET_DURATION: Duration = Duration::from_secs(1800); // 30 min
 /// Maximum backoff multiplier to prevent infinite suppression.
 const MAX_BACKOFF_MULTIPLIER: f64 = 16.0;
 
+/// Clock trait for testable time. Production uses SystemClock, tests use MockClock.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+/// Production clock — delegates to `Instant::now()`.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// Tracks dismissal history for exponential backoff.
-#[derive(Debug, Clone)]
-pub struct BackoffState {
+///
+/// Generic over a `Clock` implementation so tests can control time
+/// without sleeps or fragile timing windows.
+#[derive(Debug)]
+pub struct BackoffState<C: Clock = SystemClock> {
     /// Number of consecutive dismissals.
     dismiss_count: u32,
     /// Timestamp of the last dismissal.
     last_dismissal: Option<Instant>,
     /// Timestamp of the last allowed intervention.
     last_intervention: Option<Instant>,
+    /// Clock source — `SystemClock` in production, `MockClock` in tests.
+    clock: C,
 }
 
-impl BackoffState {
+impl BackoffState<SystemClock> {
     pub fn new() -> Self {
         Self {
             dismiss_count: 0,
             last_dismissal: None,
             last_intervention: None,
+            clock: SystemClock,
+        }
+    }
+}
+
+impl<C: Clock> BackoffState<C> {
+    /// Create a BackoffState with a custom clock (for testing).
+    pub fn with_clock(clock: C) -> Self {
+        Self {
+            dismiss_count: 0,
+            last_dismissal: None,
+            last_intervention: None,
+            clock,
         }
     }
 
     /// Record a dismissal — doubles the effective threshold.
     pub fn record_dismissal(&mut self) {
         self.dismiss_count = self.dismiss_count.saturating_add(1);
-        self.last_dismissal = Some(Instant::now());
+        self.last_dismissal = Some(self.clock.now());
     }
 
     /// Record that an intervention was shown to the user.
     pub fn record_intervention(&mut self) {
-        self.last_intervention = Some(Instant::now());
+        self.last_intervention = Some(self.clock.now());
     }
 
     /// Reset backoff if enough time has passed since the last dismissal.
     fn maybe_reset(&mut self) {
         if let Some(last) = self.last_dismissal {
-            if last.elapsed() >= BACKOFF_RESET_DURATION {
+            let now = self.clock.now();
+            if now.duration_since(last) >= BACKOFF_RESET_DURATION {
                 self.dismiss_count = 0;
                 self.last_dismissal = None;
             }
@@ -1580,13 +1613,13 @@ impl BackoffState {
         };
 
         match self.last_intervention {
-            Some(last) => last.elapsed() >= limit,
+            Some(last) => self.clock.now().duration_since(last) >= limit,
             None => true, // no previous intervention
         }
     }
 }
 
-impl Default for BackoffState {
+impl Default for BackoffState<SystemClock> {
     fn default() -> Self {
         Self::new()
     }
@@ -1638,13 +1671,13 @@ pub enum ScoringDecision {
 /// - `mode`: Current autonomy mode (Ghost/Copilot/Autopilot).
 /// - `standing_instructions`: Active standing rules (only relevant in Autopilot).
 /// - `backoff`: Mutable backoff state — updated on allow/dismiss.
-pub fn score_intervention(
+pub fn score_intervention<C: Clock>(
     screen_delta: &ScreenDelta,
     _app_context: &AppContext,
     idle_duration: Duration,
     mode: AutonomyMode,
     _standing_instructions: &[aura_memory::StandingInstruction],
-    backoff: &mut BackoffState,
+    backoff: &mut BackoffState<C>,
 ) -> ScoringDecision {
     // Ghost mode: never intervene
     let base_threshold = match mode.proactive_threshold() {
@@ -1703,6 +1736,32 @@ pub fn score_intervention(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mock clock for time-controlled tests. Advance time with `advance()`.
+    struct MockClock {
+        now: Mutex<Instant>,
+    }
+
+    impl MockClock {
+        fn new() -> Self {
+            Self {
+                now: Mutex::new(Instant::now()),
+            }
+        }
+
+        /// Advance the mock clock by the given duration.
+        fn advance(&self, duration: Duration) {
+            let mut now = self.now.lock().unwrap();
+            *now += duration;
+        }
+    }
+
+    impl Clock for MockClock {
+        fn now(&self) -> Instant {
+            *self.now.lock().unwrap()
+        }
+    }
 
     fn default_screen_delta() -> ScreenDelta {
         ScreenDelta {
@@ -1832,16 +1891,41 @@ mod tests {
     }
 
     #[test]
-    fn backoff_resets_after_timeout() {
-        let mut backoff = BackoffState::new();
+    fn backoff_resets_after_timeout_with_mock_clock() {
+        let clock = MockClock::new();
+        let mut backoff = BackoffState::with_clock(&clock);
         backoff.record_dismissal();
         backoff.record_dismissal();
         assert_eq!(backoff.dismiss_count, 2);
 
-        // Simulate time passing (we can't easily fast-forward Instant in tests,
-        // so just verify the reset logic exists)
-        // In production, 30 min of no dismissals resets the counter.
-        assert!(backoff.apply_backoff(0.5) > 0.5); // backoff active
+        // Backoff should be active — threshold elevated
+        assert!(backoff.apply_backoff(0.5) > 0.5);
+
+        // Advance clock past the 30-min reset window
+        clock.advance(BACKOFF_RESET_DURATION + Duration::from_secs(1));
+
+        // Backoff should have reset — threshold returns to base
+        let threshold = backoff.apply_backoff(0.5);
+        assert_eq!(threshold, 0.5); // no multiplier
+        assert_eq!(backoff.dismiss_count, 0);
+    }
+
+    #[test]
+    fn rate_limit_clears_after_cooldown_with_mock_clock() {
+        let clock = MockClock::new();
+        let mut backoff = BackoffState::with_clock(&clock);
+
+        // Record an intervention
+        backoff.record_intervention();
+
+        // Immediately after — rate limited in Copilot (120s limit)
+        assert!(!backoff.rate_limit_allows(AutonomyMode::Copilot));
+
+        // Advance past the Copilot rate limit
+        clock.advance(COPILOT_RATE_LIMIT + Duration::from_secs(1));
+
+        // Now it should be allowed
+        assert!(backoff.rate_limit_allows(AutonomyMode::Copilot));
     }
 
     #[test]
@@ -2213,6 +2297,8 @@ let initial_instructions = {
 };
 let standing_instructions = Arc::new(std::sync::RwLock::new(initial_instructions));
 
+// SystemClock is the default — BackoffState::new() uses it automatically.
+// Tests use BackoffState::with_clock(mock_clock) for time-controlled assertions.
 let backoff_state = Arc::new(std::sync::Mutex::new(crate::proactive::BackoffState::new()));
 ```
 
