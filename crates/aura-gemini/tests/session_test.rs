@@ -165,62 +165,6 @@ async fn test_session_connect_and_receive_audio() {
 }
 
 #[tokio::test]
-async fn test_session_send_audio() {
-    let (verify_tx, mut verify_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(1);
-
-    let url = start_mock_server(move |mut ws| async move {
-        complete_setup(&mut ws).await;
-
-        // Wait for client to send audio
-        let msg = ws.next().await.unwrap().unwrap();
-        if let Message::Text(text) = msg {
-            let val: serde_json::Value = serde_json::from_str(&text).unwrap();
-            verify_tx.send(val).await.unwrap();
-        }
-    })
-    .await;
-
-    let session = GeminiLiveSession::connect(test_config(url), None)
-        .await
-        .unwrap();
-    let mut rx = session.subscribe();
-
-    // Wait for connection
-    expect_event(
-        &mut rx,
-        |e| matches!(e, GeminiEvent::Connected { .. }),
-        "Connected",
-    )
-    .await;
-
-    // Send audio
-    let pcm = vec![0.0_f32, 0.5, -0.5, 1.0];
-    session.send_audio(&pcm).unwrap();
-
-    // Verify server received a realtimeInput message
-    let received = timeout(TEST_TIMEOUT, verify_rx.recv())
-        .await
-        .expect("Timed out waiting for server to receive audio")
-        .expect("Channel closed");
-
-    assert!(
-        received.get("realtimeInput").is_some(),
-        "Expected realtimeInput message, got: {received}"
-    );
-
-    let audio = &received["realtimeInput"]["audio"];
-    assert!(audio.is_object(), "Expected audio object, got: {audio}");
-    assert_eq!(audio["mimeType"], "audio/pcm;rate=16000");
-
-    let data = audio["data"].as_str().unwrap();
-    let decoded_bytes = BASE64.decode(data).unwrap();
-    // 4 f32 samples -> 4 i16 samples -> 8 bytes
-    assert_eq!(decoded_bytes.len(), 8);
-
-    session.disconnect();
-}
-
-#[tokio::test]
 async fn test_session_tool_call_and_response() {
     let (verify_tx, mut verify_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(1);
 

@@ -76,7 +76,6 @@ pub enum GeminiEvent {
 
 /// Handle for interacting with a live Gemini session.
 pub struct GeminiLiveSession {
-    audio_tx: mpsc::Sender<Vec<f32>>,
     base64_audio_tx: mpsc::Sender<String>,
     video_tx: mpsc::Sender<String>,
     tool_response_tx: mpsc::Sender<(String, String, serde_json::Value)>,
@@ -95,14 +94,13 @@ impl GeminiLiveSession {
         config: GeminiConfig,
         initial_resumption_handle: Option<String>,
     ) -> Result<Self> {
-        let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
         let (base64_audio_tx, base64_audio_rx) = mpsc::channel::<String>(64);
         let (video_tx, video_rx) = mpsc::channel::<String>(32);
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
         let (text_tx, text_rx) = mpsc::channel::<String>(16);
         let (reconnect_tx, reconnect_rx) = mpsc::channel::<()>(4);
-        let (event_tx, _) = broadcast::channel::<GeminiEvent>(512);
+        let (event_tx, _) = broadcast::channel::<GeminiEvent>(2048);
         let cancel = tokio_util::sync::CancellationToken::new();
         let is_first_connect = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
@@ -119,7 +117,6 @@ impl GeminiLiveSession {
         tokio::spawn(async move {
             connection_loop(
                 state,
-                audio_rx,
                 base64_audio_rx,
                 video_rx,
                 tool_response_rx,
@@ -132,7 +129,6 @@ impl GeminiLiveSession {
         });
 
         Ok(Self {
-            audio_tx,
             base64_audio_tx,
             video_tx,
             tool_response_tx,
@@ -142,25 +138,6 @@ impl GeminiLiveSession {
             reconnect_tx,
             is_first_connect,
         })
-    }
-
-    /// Send PCM f32 audio at 16kHz to Gemini.
-    ///
-    /// Uses `try_send` so this never blocks. During reconnection the channel
-    /// may be full (streaming loop isn't draining it) — frames are silently
-    /// dropped rather than blocking the audio bridge, which would kill the mic.
-    /// Returns `Err` only when the session is closed (receiver dropped).
-    pub fn send_audio(&self, pcm_16khz: &[f32]) -> Result<()> {
-        match self.audio_tx.try_send(pcm_16khz.to_vec()) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Channel full — drop frame silently (reconnecting or backpressure)
-                Ok(())
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err(anyhow::anyhow!("Session closed"))
-            }
-        }
     }
 
     /// Send pre-encoded base64 PCM audio directly to Gemini.
@@ -272,7 +249,6 @@ struct StreamOutcome {
 
 /// Channel receivers for inbound user data (audio, video, text, tool responses).
 struct StreamChannels {
-    audio_rx: mpsc::Receiver<Vec<f32>>,
     base64_audio_rx: mpsc::Receiver<String>,
     video_rx: mpsc::Receiver<String>,
     text_rx: mpsc::Receiver<String>,
@@ -283,7 +259,6 @@ struct StreamChannels {
 #[allow(clippy::too_many_arguments)]
 async fn connection_loop(
     state: SessionState,
-    audio_rx: mpsc::Receiver<Vec<f32>>,
     base64_audio_rx: mpsc::Receiver<String>,
     video_rx: mpsc::Receiver<String>,
     tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
@@ -293,7 +268,6 @@ async fn connection_loop(
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let mut channels = StreamChannels {
-        audio_rx,
         base64_audio_rx,
         video_rx,
         text_rx,
@@ -446,10 +420,6 @@ async fn connection_loop(
 /// Called before each reconnection attempt so stale data from the previous
 /// connection doesn't flood the new one.
 fn drain_channels(channels: &mut StreamChannels) {
-    let mut audio_drained = 0u32;
-    while channels.audio_rx.try_recv().is_ok() {
-        audio_drained += 1;
-    }
     let mut base64_audio_drained = 0u32;
     while channels.base64_audio_rx.try_recv().is_ok() {
         base64_audio_drained += 1;
@@ -464,9 +434,8 @@ fn drain_channels(channels: &mut StreamChannels) {
     }
     // Don't drain tool_response_rx — in-flight tool responses should still
     // be delivered to maintain consistency.
-    if audio_drained + base64_audio_drained + video_drained + text_drained > 0 {
+    if base64_audio_drained + video_drained + text_drained > 0 {
         tracing::info!(
-            audio = audio_drained,
             base64_audio = base64_audio_drained,
             video = video_drained,
             text = text_drained,
@@ -718,12 +687,6 @@ async fn connect_and_stream_inner(
                 ws_sink.send(Message::Ping(vec![])).await?;
             }
 
-            Some(pcm) = channels.audio_rx.recv() => {
-                let msg = encode_audio_message(&pcm);
-                let json = serde_json::to_string(&msg)?;
-                ws_sink.send(Message::Text(json)).await?;
-            }
-
             Some(base64_pcm) = channels.base64_audio_rx.recv() => {
                 let msg = RealtimeAudioMessage {
                     realtime_input: RealtimeAudioInput {
@@ -742,11 +705,6 @@ async fn connect_and_stream_inner(
                 // frame.  A 300 KB screenshot can stall the TCP socket
                 // for 50-300 ms; flushing audio first guarantees mic
                 // data reaches Gemini without gaps.
-                while let Ok(pcm) = channels.audio_rx.try_recv() {
-                    let msg = encode_audio_message(&pcm);
-                    let json = serde_json::to_string(&msg)?;
-                    ws_sink.send(Message::Text(json)).await?;
-                }
                 while let Ok(base64_pcm) = channels.base64_audio_rx.try_recv() {
                     let msg = RealtimeAudioMessage {
                         realtime_input: RealtimeAudioInput {
@@ -924,25 +882,6 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
     }
 }
 
-/// Convert f32 PCM [-1.0, 1.0] to base64-encoded 16-bit LE PCM bytes.
-fn encode_audio_message(pcm: &[f32]) -> RealtimeAudioMessage {
-    let mut bytes = Vec::with_capacity(pcm.len() * 2);
-    for &sample in pcm {
-        let clamped = sample.clamp(-1.0, 1.0);
-        let i16_val = (clamped * 32767.0) as i16;
-        bytes.extend_from_slice(&i16_val.to_le_bytes());
-    }
-
-    RealtimeAudioMessage {
-        realtime_input: RealtimeAudioInput {
-            audio: Blob {
-                mime_type: "audio/pcm;rate=16000".into(),
-                data: BASE64.encode(&bytes),
-            },
-        },
-    }
-}
-
 /// Convert 16-bit LE PCM bytes to f32 PCM [-1.0, 1.0].
 fn pcm_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
     if !bytes.len().is_multiple_of(2) {
@@ -963,36 +902,6 @@ fn pcm_bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn encode_f32_to_pcm_base64() {
-        let pcm = vec![0.0, 1.0, -1.0, 0.5];
-        let msg = encode_audio_message(&pcm);
-        let data = &msg.realtime_input.audio.data;
-
-        // Decode and verify
-        let bytes = BASE64.decode(data).unwrap();
-        assert_eq!(bytes.len(), 8); // 4 samples * 2 bytes
-        let samples = pcm_bytes_to_f32(&bytes);
-        assert_eq!(samples.len(), 4);
-        assert!((samples[0] - 0.0).abs() < 0.001);
-        assert!((samples[1] - 1.0).abs() < 0.001);
-        assert!((samples[2] - (-1.0)).abs() < 0.001);
-        assert!((samples[3] - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn pcm_bytes_roundtrip() {
-        let original = vec![0.0_f32, 0.5, -0.5, 0.25, -0.25];
-        let msg = encode_audio_message(&original);
-        let bytes = BASE64.decode(&msg.realtime_input.audio.data).unwrap();
-        let decoded = pcm_bytes_to_f32(&bytes);
-
-        assert_eq!(decoded.len(), original.len());
-        for (a, b) in original.iter().zip(decoded.iter()) {
-            assert!((a - b).abs() < 0.001, "{a} != {b}");
-        }
-    }
 
     #[test]
     fn build_setup_message_includes_tools() {
@@ -1037,13 +946,4 @@ mod tests {
         assert!(json.contains("tok_resume_123"));
     }
 
-    #[test]
-    fn clamp_audio_values() {
-        let pcm = vec![2.0, -2.0]; // out of range
-        let msg = encode_audio_message(&pcm);
-        let bytes = BASE64.decode(&msg.realtime_input.audio.data).unwrap();
-        let samples = pcm_bytes_to_f32(&bytes);
-        assert!((samples[0] - 1.0).abs() < 0.001); // clamped to 1.0
-        assert!((samples[1] - (-1.0)).abs() < 0.001); // clamped to -1.0
-    }
 }

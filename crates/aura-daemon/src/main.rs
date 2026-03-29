@@ -25,7 +25,7 @@ mod tools;
 use orchestrator::SessionMode;
 
 const EVENT_BUS_CAPACITY: usize = 256;
-const IPC_BROADCAST_CAPACITY: usize = 256;
+const IPC_BROADCAST_CAPACITY: usize = 2048;
 
 /// Save device token to the macOS Keychain via the `security` CLI.
 /// Uses `security add-generic-password` with `-U` (update if exists)
