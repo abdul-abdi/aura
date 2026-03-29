@@ -77,6 +77,7 @@ pub enum GeminiEvent {
 /// Handle for interacting with a live Gemini session.
 pub struct GeminiLiveSession {
     audio_tx: mpsc::Sender<Vec<f32>>,
+    base64_audio_tx: mpsc::Sender<String>,
     video_tx: mpsc::Sender<String>,
     tool_response_tx: mpsc::Sender<(String, String, serde_json::Value)>,
     text_tx: mpsc::Sender<String>,
@@ -95,6 +96,7 @@ impl GeminiLiveSession {
         initial_resumption_handle: Option<String>,
     ) -> Result<Self> {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(64);
+        let (base64_audio_tx, base64_audio_rx) = mpsc::channel::<String>(64);
         let (video_tx, video_rx) = mpsc::channel::<String>(32);
         let (tool_response_tx, tool_response_rx) =
             mpsc::channel::<(String, String, serde_json::Value)>(16);
@@ -118,6 +120,7 @@ impl GeminiLiveSession {
             connection_loop(
                 state,
                 audio_rx,
+                base64_audio_rx,
                 video_rx,
                 tool_response_rx,
                 text_rx,
@@ -130,6 +133,7 @@ impl GeminiLiveSession {
 
         Ok(Self {
             audio_tx,
+            base64_audio_tx,
             video_tx,
             tool_response_tx,
             text_tx,
@@ -151,6 +155,21 @@ impl GeminiLiveSession {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 // Channel full — drop frame silently (reconnecting or backpressure)
+                Ok(())
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("Session closed"))
+            }
+        }
+    }
+
+    /// Send pre-encoded base64 PCM audio directly to Gemini.
+    /// Used when audio arrives already encoded from the Swift audio engine.
+    pub fn send_audio_base64(&self, base64_pcm: &str) -> Result<()> {
+        match self.base64_audio_tx.try_send(base64_pcm.to_string()) {
+            Ok(()) => Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Channel full — drop frame silently
                 Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -254,6 +273,7 @@ struct StreamOutcome {
 /// Channel receivers for inbound user data (audio, video, text, tool responses).
 struct StreamChannels {
     audio_rx: mpsc::Receiver<Vec<f32>>,
+    base64_audio_rx: mpsc::Receiver<String>,
     video_rx: mpsc::Receiver<String>,
     text_rx: mpsc::Receiver<String>,
     tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
@@ -264,6 +284,7 @@ struct StreamChannels {
 async fn connection_loop(
     state: SessionState,
     audio_rx: mpsc::Receiver<Vec<f32>>,
+    base64_audio_rx: mpsc::Receiver<String>,
     video_rx: mpsc::Receiver<String>,
     tool_response_rx: mpsc::Receiver<(String, String, serde_json::Value)>,
     text_rx: mpsc::Receiver<String>,
@@ -273,6 +294,7 @@ async fn connection_loop(
 ) {
     let mut channels = StreamChannels {
         audio_rx,
+        base64_audio_rx,
         video_rx,
         text_rx,
         tool_response_rx,
@@ -428,6 +450,10 @@ fn drain_channels(channels: &mut StreamChannels) {
     while channels.audio_rx.try_recv().is_ok() {
         audio_drained += 1;
     }
+    let mut base64_audio_drained = 0u32;
+    while channels.base64_audio_rx.try_recv().is_ok() {
+        base64_audio_drained += 1;
+    }
     let mut video_drained = 0u32;
     while channels.video_rx.try_recv().is_ok() {
         video_drained += 1;
@@ -438,9 +464,10 @@ fn drain_channels(channels: &mut StreamChannels) {
     }
     // Don't drain tool_response_rx — in-flight tool responses should still
     // be delivered to maintain consistency.
-    if audio_drained + video_drained + text_drained > 0 {
+    if audio_drained + base64_audio_drained + video_drained + text_drained > 0 {
         tracing::info!(
             audio = audio_drained,
+            base64_audio = base64_audio_drained,
             video = video_drained,
             text = text_drained,
             "Drained stale channel data before reconnect"
@@ -697,6 +724,19 @@ async fn connect_and_stream_inner(
                 ws_sink.send(Message::Text(json)).await?;
             }
 
+            Some(base64_pcm) = channels.base64_audio_rx.recv() => {
+                let msg = RealtimeAudioMessage {
+                    realtime_input: RealtimeAudioInput {
+                        audio: Blob {
+                            mime_type: "audio/pcm;rate=16000".into(),
+                            data: base64_pcm,
+                        },
+                    },
+                };
+                let json = serde_json::to_string(&msg)?;
+                ws_sink.send(Message::Text(json)).await?;
+            }
+
             Some(mut jpeg_b64) = channels.video_rx.recv() => {
                 // Drain ALL pending audio before sending a large video
                 // frame.  A 300 KB screenshot can stall the TCP socket
@@ -704,6 +744,18 @@ async fn connect_and_stream_inner(
                 // data reaches Gemini without gaps.
                 while let Ok(pcm) = channels.audio_rx.try_recv() {
                     let msg = encode_audio_message(&pcm);
+                    let json = serde_json::to_string(&msg)?;
+                    ws_sink.send(Message::Text(json)).await?;
+                }
+                while let Ok(base64_pcm) = channels.base64_audio_rx.try_recv() {
+                    let msg = RealtimeAudioMessage {
+                        realtime_input: RealtimeAudioInput {
+                            audio: Blob {
+                                mime_type: "audio/pcm;rate=16000".into(),
+                                data: base64_pcm,
+                            },
+                        },
+                    };
                     let json = serde_json::to_string(&msg)?;
                     ws_sink.send(Message::Text(json)).await?;
                 }

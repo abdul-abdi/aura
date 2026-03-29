@@ -356,9 +356,10 @@ pub(crate) async fn run_daemon(
                     UICommand::ToggleMic => {
                         tracing::info!("Toggle mic requested via IPC");
                     }
-                    UICommand::AudioFrame { .. } => {
-                        // v2: audio frames from Swift are handled by the audio pipeline (not yet wired)
-                        tracing::trace!("AudioFrame received (v2 audio pipeline not yet wired)");
+                    UICommand::AudioFrame { text } => {
+                        if let Err(e) = ipc_session.send_audio_base64(&text) {
+                            tracing::warn!("Failed to send audio to Gemini: {e}");
+                        }
                     }
                     UICommand::SetMode { text } => {
                         tracing::info!(mode = %text, "Set autonomy mode via IPC");

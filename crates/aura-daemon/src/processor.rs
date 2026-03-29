@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::Local;
 use tokio_util::sync::CancellationToken;
 
@@ -130,16 +132,6 @@ async fn ingest_to_memory_agent(
     Some(aura_memory::consolidate::ConsolidationResponse { summary, facts })
 }
 
-/// Minimum allowed calibrated threshold — prevents the gate from being set
-/// so low that speaker bleed-through triggers a false barge-in.
-/// Set above the typical speaker-to-mic bleed range (0.005-0.03 RMS at
-/// moderate volume) so that only direct speech passes through.
-pub(crate) const CALIBRATION_THRESHOLD_MIN: f32 = 0.05;
-
-/// Maximum allowed calibrated threshold — prevents the gate from being set
-/// so high that real speech is suppressed.
-pub(crate) const CALIBRATION_THRESHOLD_MAX: f32 = 0.15;
-
 const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
 pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
@@ -254,14 +246,38 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
     tracing::info!("Gemini event processor running");
 
+    // Watchdog: if is_speaking is true for longer than this, force it false.
+    // This catches dropped TurnComplete events (broadcast lag, parse failure, etc.)
+    // that would otherwise permanently mute the mic.
+    const SPEAKING_WATCHDOG_SECS: u64 = 15;
+    let mut speaking_watchdog: tokio::time::Interval =
+        tokio::time::interval(Duration::from_secs(SPEAKING_WATCHDOG_SECS));
+    speaking_watchdog.tick().await; // skip first immediate tick
+    let mut last_audio_response = std::time::Instant::now();
+    let mut sent_playback_start = false;
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
+            _ = speaking_watchdog.tick() => {
+                // If is_speaking has been true for over SPEAKING_WATCHDOG_SECS
+                // without receiving new audio, TurnComplete was likely dropped.
+                if is_speaking.load(Ordering::Acquire)
+                    && last_audio_response.elapsed() > Duration::from_secs(SPEAKING_WATCHDOG_SECS)
+                {
+                    tracing::warn!(
+                        elapsed_secs = last_audio_response.elapsed().as_secs(),
+                        "Speaking watchdog: is_speaking stuck true — forcing false (TurnComplete likely dropped)"
+                    );
+                    is_speaking.store(false, Ordering::Release);
+                }
+            }
             event = events.recv() => {
                 match event {
                     Ok(GeminiEvent::Connected { is_first }) => {
                         tracing::info!(is_first, "Gemini session connected");
                         is_interrupted.store(false, Ordering::Release);
+                        is_speaking.store(false, Ordering::Release);
                         bus.send(AuraEvent::GeminiConnected);
 
                         // Enable pulsing dot + status (U2: don't clobber permission error)
@@ -427,6 +443,24 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         // clear any stale interruption flag so the audio actually plays.
                         is_interrupted.store(false, Ordering::Release);
                         is_speaking.store(true, Ordering::Release);
+                        last_audio_response = std::time::Instant::now();
+
+                        // v2: Signal playback start on first audio chunk of a turn
+                        if !sent_playback_start {
+                            let _ = ipc_tx.send(DaemonEvent::PlaybackStart);
+                            sent_playback_start = true;
+                        }
+
+                        // v2: Forward audio to Swift for playback via IPC
+                        let base64_audio = BASE64.encode(
+                            samples.iter().flat_map(|&s| {
+                                let clamped = s.clamp(-1.0, 1.0);
+                                let i16_val = (clamped * 32767.0) as i16;
+                                i16_val.to_le_bytes()
+                            }).collect::<Vec<u8>>()
+                        );
+                        let _ = ipc_tx.send(DaemonEvent::PlaybackAudio { audio: base64_audio });
+
                         if let Some(ref p) = player
                             && let Err(e) = p.append(samples)
                         {
@@ -484,114 +518,121 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                             break;
                         }
 
-                        // recall_memory stays inline — just a fast SQLite query
+                        // recall_memory — spawned to avoid blocking event loop
+                        // (inline handling caused broadcast lag → dropped TurnComplete → stuck mic)
                         if name == "recall_memory" {
-                            let query = args["query"].as_str().unwrap_or("").to_string();
-                            let response = if query.is_empty() {
-                                serde_json::json!({"error": "query parameter is required", "facts": [], "sessions": []})
-                            } else {
-                                match memory_op(&memory, move |mem| mem.search_memory_with_sessions(&query)).await {
-                                    Some(results) => results,
-                                    None => serde_json::json!({"error": "Memory search failed", "facts": [], "sessions": []}),
+                            let mem = Arc::clone(&memory);
+                            let sess = Arc::clone(&session);
+                            let b = bus.clone();
+                            let ipc = ipc_tx.clone();
+                            let sid = session_id.clone();
+                            tokio::spawn(async move {
+                                let query = args["query"].as_str().unwrap_or("").to_string();
+                                let response = if query.is_empty() {
+                                    serde_json::json!({"error": "query parameter is required", "facts": [], "sessions": []})
+                                } else {
+                                    match memory_op(&mem, move |m| m.search_memory_with_sessions(&query)).await {
+                                        Some(results) => results,
+                                        None => serde_json::json!({"error": "Memory search failed", "facts": [], "sessions": []}),
+                                    }
+                                };
+
+                                let tool_success = response.get("error").is_none();
+                                b.send(AuraEvent::ToolExecuted {
+                                    name: name.clone(),
+                                    success: tool_success,
+                                    output: response.to_string(),
+                                });
+                                let _ = ipc.send(DaemonEvent::ToolStatus {
+                                    name: name.clone(),
+                                    status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
+                                    output: Some(response.to_string()),
+                                    summary: None,
+                                });
+
+                                {
+                                    let tr_sid = sid.clone();
+                                    let tr_content = response.to_string();
+                                    memory_op(&mem, move |m| {
+                                        m.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
+                                    }).await;
                                 }
-                            };
 
-                            let tool_success = response.get("error").is_none();
-                            bus.send(AuraEvent::ToolExecuted {
-                                name: name.clone(),
-                                success: tool_success,
-                                output: response.to_string(),
+                                if let Err(e) = sess.send_tool_response(id, name, response).await {
+                                    tracing::error!("Failed to send recall_memory tool response: {e}");
+                                }
                             });
-                            let _ = ipc_tx.send(DaemonEvent::ToolStatus {
-                                name: name.clone(),
-                                status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
-                                output: Some(response.to_string()),
-                                summary: None,
-                            });
-
-                            {
-                                let tr_sid = session_id.clone();
-                                let tr_content = response.to_string();
-                                memory_op(&memory, move |mem| {
-                                    mem.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
-                                }).await;
-                            }
-
-                            if let Err(e) = session.send_tool_response(id, name, response).await {
-                                tracing::error!("Failed to send recall_memory tool response: {e}");
-                            }
-                            continue;  // Skip the background tool spawn
+                            continue;  // Skip the background tool spawn below
                         }
 
-                        // save_memory stays inline — persists facts immediately
+                        // save_memory — spawned to avoid blocking event loop
                         if name == "save_memory" {
-                            let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("context");
-                            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                            let mem = Arc::clone(&memory);
+                            let sess = Arc::clone(&session);
+                            let b = bus.clone();
+                            let ipc = ipc_tx.clone();
+                            let sid = session_id.clone();
+                            let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("context").to_string();
+                            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            tokio::spawn(async move {
+                                const VALID_CATEGORIES: &[&str] = &["preference", "habit", "entity", "task", "context"];
 
-                            const VALID_CATEGORIES: &[&str] = &["preference", "habit", "entity", "task", "context"];
-
-                            if content.is_empty() {
-                                let response = serde_json::json!({"success": false, "error": "content is required"});
-                                if let Err(e) = session.send_tool_response(id, name, response).await {
-                                    tracing::error!("Failed to send save_memory response: {e}");
+                                if content.is_empty() {
+                                    let response = serde_json::json!({"success": false, "error": "content is required"});
+                                    let _ = sess.send_tool_response(id, name, response).await;
+                                    return;
                                 }
-                                continue;
-                            }
 
-                            if !VALID_CATEGORIES.contains(&category) {
-                                let response = serde_json::json!({
-                                    "success": false,
-                                    "error": format!("Invalid category '{}'. Must be one of: {}", category, VALID_CATEGORIES.join(", "))
-                                });
-                                if let Err(e) = session.send_tool_response(id, name, response).await {
-                                    tracing::error!("Failed to send save_memory response: {e}");
+                                if !VALID_CATEGORIES.contains(&category.as_str()) {
+                                    let response = serde_json::json!({
+                                        "success": false,
+                                        "error": format!("Invalid category '{}'. Must be one of: {}", category, VALID_CATEGORIES.join(", "))
+                                    });
+                                    let _ = sess.send_tool_response(id, name, response).await;
+                                    return;
                                 }
-                                continue;
-                            }
 
-                            let response = {
-                                let cat = category.to_string();
-                                let cont = content.to_string();
-                                let sid = session_id.clone();
-
-                                match memory_op(&memory, move |mem| {
-                                    mem.add_fact(&sid, &cat, &cont, None, 0.7)
-                                }).await {
-                                    Some(()) => {
-                                        serde_json::json!({
+                                let response = {
+                                    let cat = category.clone();
+                                    let cont = content.clone();
+                                    let s = sid.clone();
+                                    match memory_op(&mem, move |m| {
+                                        m.add_fact(&s, &cat, &cont, None, 0.7)
+                                    }).await {
+                                        Some(()) => serde_json::json!({
                                             "success": true,
                                             "saved": { "category": category, "content_length": content.len() }
-                                        })
+                                        }),
+                                        None => serde_json::json!({"success": false, "error": "Failed to save fact"}),
                                     }
-                                    None => serde_json::json!({"success": false, "error": "Failed to save fact"}),
+                                };
+
+                                let tool_success = response.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                                b.send(AuraEvent::ToolExecuted {
+                                    name: name.clone(),
+                                    success: tool_success,
+                                    output: response.to_string(),
+                                });
+                                let _ = ipc.send(DaemonEvent::ToolStatus {
+                                    name: name.clone(),
+                                    status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
+                                    output: Some(response.to_string()),
+                                    summary: None,
+                                });
+
+                                {
+                                    let tr_sid = sid.clone();
+                                    let tr_content = response.to_string();
+                                    memory_op(&mem, move |m| {
+                                        m.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
+                                    }).await;
                                 }
-                            };
 
-                            let tool_success = response.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-                            bus.send(AuraEvent::ToolExecuted {
-                                name: name.clone(),
-                                success: tool_success,
-                                output: response.to_string(),
+                                if let Err(e) = sess.send_tool_response(id, name, response).await {
+                                    tracing::error!("Failed to send save_memory tool response: {e}");
+                                }
                             });
-                            let _ = ipc_tx.send(DaemonEvent::ToolStatus {
-                                name: name.clone(),
-                                status: if tool_success { ToolRunStatus::Completed } else { ToolRunStatus::Failed },
-                                output: Some(response.to_string()),
-                                summary: None,
-                            });
-
-                            {
-                                let tr_sid = session_id.clone();
-                                let tr_content = response.to_string();
-                                memory_op(&memory, move |mem| {
-                                    mem.add_message(&tr_sid, aura_memory::MessageRole::ToolResult, &tr_content, None)
-                                }).await;
-                            }
-
-                            if let Err(e) = session.send_tool_response(id, name, response).await {
-                                tracing::error!("Failed to send save_memory tool response: {e}");
-                            }
-                            continue;  // Skip the background tool spawn
+                            continue;  // Skip the background tool spawn below
                         }
 
                         // All other tools: spawn in background so audio keeps flowing
@@ -1039,11 +1080,13 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         tracing::info!("Gemini interrupted — stopping playback");
                         is_speaking.store(false, Ordering::Release);
                         is_interrupted.store(true, Ordering::Release);
+                        sent_playback_start = false;
                         if let Some(ref p) = player {
                             p.stop();
                         }
                         bus.send(AuraEvent::BargeIn);
-                        // Notify UI that we're back to listening
+                        // Notify Swift to stop playback and notify UI
+                        let _ = ipc_tx.send(DaemonEvent::Interrupted);
                         let _ = ipc_tx.send(DaemonEvent::Status {
                             message: "Listening...".into(),
                         });
@@ -1078,7 +1121,11 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                     Ok(GeminiEvent::TurnComplete) => {
                         is_speaking.store(false, Ordering::Release);
                         is_interrupted.store(false, Ordering::Release);
+                        sent_playback_start = false;
                         tracing::debug!("Turn complete");
+
+                        // Notify Swift to finalize playback
+                        let _ = ipc_tx.send(DaemonEvent::PlaybackStop);
 
                         // Notify UI that assistant turn is done
                         let _ = ipc_tx.send(DaemonEvent::Transcript {
@@ -1338,78 +1385,3 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     Ok(())
 }
 
-/// Compute root-mean-square energy of an audio buffer.
-pub(crate) fn rms_energy(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-    (sum_sq / samples.len() as f32).sqrt()
-}
-
-/// Calibrate the barge-in energy threshold from ambient noise RMS samples.
-///
-/// Computes mean + 3*stddev of the collected RMS values, clamped to
-/// `[CALIBRATION_THRESHOLD_MIN, CALIBRATION_THRESHOLD_MAX]`.
-pub(crate) fn calibrate_barge_in_threshold(rms_samples: &[f32]) -> f32 {
-    let n = rms_samples.len() as f32;
-    let mean = rms_samples.iter().sum::<f32>() / n;
-    let variance = rms_samples.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / n;
-    let stddev = variance.sqrt();
-    let threshold = mean + 3.0 * stddev;
-    threshold.clamp(CALIBRATION_THRESHOLD_MIN, CALIBRATION_THRESHOLD_MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_rms_energy_empty() {
-        assert_eq!(rms_energy(&[]), 0.0);
-    }
-
-    #[test]
-    fn test_rms_energy_known_signal() {
-        // Constant signal of 0.5 should give RMS of 0.5
-        let samples = vec![0.5_f32; 100];
-        let rms = rms_energy(&samples);
-        assert!((rms - 0.5).abs() < 1e-5);
-    }
-
-    #[test]
-    fn test_calibrate_uniform_quiet_noise() {
-        // Uniform low noise — stddev is ~0, threshold ≈ mean, clamped to min
-        let samples = vec![0.005_f32; 100];
-        let threshold = calibrate_barge_in_threshold(&samples);
-        assert_eq!(threshold, CALIBRATION_THRESHOLD_MIN);
-    }
-
-    #[test]
-    fn test_calibrate_moderate_ambient_noise() {
-        // Mean=0.03, stddev=0.01 → threshold = 0.03 + 0.03 = 0.06
-        let mut samples = vec![0.02; 50];
-        samples.extend(std::iter::repeat_n(0.04, 50));
-        let threshold = calibrate_barge_in_threshold(&samples);
-        // mean = 0.03, stddev = 0.01, expected = 0.06
-        assert!(threshold > CALIBRATION_THRESHOLD_MIN);
-        assert!(threshold < CALIBRATION_THRESHOLD_MAX);
-        assert!((threshold - 0.06).abs() < 1e-4);
-    }
-
-    #[test]
-    fn test_calibrate_clamps_to_max() {
-        // Very high noise should clamp to max
-        let samples = vec![0.2_f32; 100];
-        let threshold = calibrate_barge_in_threshold(&samples);
-        assert_eq!(threshold, CALIBRATION_THRESHOLD_MAX);
-    }
-
-    #[test]
-    fn test_calibrate_clamps_to_min() {
-        // Near-silence should clamp to min
-        let samples = vec![0.001_f32; 100];
-        let threshold = calibrate_barge_in_threshold(&samples);
-        assert_eq!(threshold, CALIBRATION_THRESHOLD_MIN);
-    }
-}
