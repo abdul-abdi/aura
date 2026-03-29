@@ -483,8 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: daemonPath)
-        process.arguments = ["--headless", "--verbose"]
-        // Temporarily log daemon output for debugging audio playback
+        process.arguments = ["--headless"]
         let logPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/aura/daemon.log")
         FileManager.default.createFile(atPath: logPath.path, contents: nil)

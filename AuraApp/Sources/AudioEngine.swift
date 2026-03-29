@@ -82,27 +82,52 @@ final class AudioEngine {
     func startCapture() throws {
         let inputNode = captureEngine.inputNode
 
-        // Voice processing disabled — it causes CoreAudio format mismatch errors
-        // (-10875) when capture and playback run on separate engines. Gemini's
-        // server-side VAD handles barge-in detection. Echo cancellation would need
-        // both engines combined, which breaks playback (the original bug).
-        // TODO: Re-evaluate when Apple fixes AUVoiceProcessor with separate engines.
+        // Enable voice processing for echo cancellation (non-fatal if unavailable).
+        // VibeCat proves this works with separate capture/playback engines.
+        do {
+            try inputNode.setVoiceProcessingEnabled(true)
+            NSLog("[AudioEngine] Voice processing enabled")
+        } catch {
+            NSLog("[AudioEngine] Voice processing unavailable: %@", error.localizedDescription)
+        }
 
-        let captureFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )!
+        // Read hardware format AFTER enabling VP — VP changes the output format.
+        // With VP: typically 48kHz, 3 channels (ch0=processed, ch1=ambient, ch2=reserved).
+        // Without VP: hardware native (e.g. 48kHz mono/stereo).
+        let hwFormat = inputNode.outputFormat(forBus: 0)
+        NSLog("[AudioEngine] Hardware format: %.0fHz, %d channels", hwFormat.sampleRate, hwFormat.channelCount)
 
-        inputNode.installTap(onBus: 0, bufferSize: 2048, format: captureFormat) { [weak self] buffer, _ in
+        guard hwFormat.sampleRate > 0, hwFormat.channelCount > 0 else {
+            NSLog("[AudioEngine] Invalid hardware format — cannot capture")
+            throw NSError(domain: "AudioEngine", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Audio input format unavailable"
+            ])
+        }
+
+        let sourceSampleRate = hwFormat.sampleRate
+
+        // Install tap with hardware format (NOT 16kHz).
+        // Requesting a non-native format silently fails without voice processing.
+        inputNode.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) { [weak self] buffer, _ in
             guard let self else { return }
             self.tapFireCount.withLock { $0 += 1 }
 
             let captureTime = CFAbsoluteTimeGetCurrent()
 
-            // Compute RMS energy for silence gate
-            let rms = PCMConverter.rmsEnergy(buffer: buffer)
+            // Extract channel 0 into a mono view for RMS + conversion
+            guard let floatData = buffer.floatChannelData else { return }
+            let frameCount = Int(buffer.frameLength)
+            guard frameCount > 0 else { return }
+
+            // Compute RMS energy on channel 0 for silence gate
+            let samples = floatData[0]
+            var sumSquares: Float = 0
+            for i in 0..<frameCount {
+                let s = samples[i]
+                sumSquares += s * s
+            }
+            let rms = sqrtf(sumSquares / Float(frameCount))
+
             if rms < self.silenceThreshold {
                 let count = self.silentFrameCount.withLock { val -> Int in
                     val += 1
@@ -115,8 +140,24 @@ final class AudioEngine {
                 self.silentFrameCount.withLock { $0 = 0 }
             }
 
+            // Create a mono buffer from channel 0 for PCMConverter
+            let monoFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sourceSampleRate,
+                channels: 1,
+                interleaved: false
+            )!
+            guard let monoBuffer = AVAudioPCMBuffer(
+                pcmFormat: monoFormat,
+                frameCapacity: buffer.frameLength
+            ) else { return }
+            monoBuffer.frameLength = buffer.frameLength
+            monoBuffer.floatChannelData![0].update(from: samples, count: frameCount)
+
+            // Resample to 16kHz + PCM16 encode
             guard let pcmData = PCMConverter.convertToGeminiFormat(
-                buffer: buffer
+                buffer: monoBuffer,
+                sourceSampleRate: sourceSampleRate
             ) else { return }
 
             let base64 = PCMConverter.encodeBase64(pcmData)
@@ -128,9 +169,10 @@ final class AudioEngine {
         }
         isTapInstalled = true
 
+        captureEngine.prepare()
         try captureEngine.start()
         isCapturing = true
-        NSLog("[AudioEngine] Capture engine started with voice processing")
+        NSLog("[AudioEngine] Capture started: %.0fHz/%dch → 16kHz mono", hwFormat.sampleRate, hwFormat.channelCount)
 
         // Start tap health check
         startHealthCheck()

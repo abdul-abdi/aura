@@ -160,9 +160,6 @@ async fn handle_client(
             event = event_rx.recv() => {
                 match event {
                     Ok(evt) => {
-                        if matches!(&evt, DaemonEvent::PlaybackAudio { .. } | DaemonEvent::PlaybackStart | DaemonEvent::PlaybackStop) {
-                            tracing::debug!("IPC forwarding audio event to Swift client");
-                        }
                         let mut json = match serde_json::to_string(&evt) {
                             Ok(j) => j,
                             Err(e) => {
