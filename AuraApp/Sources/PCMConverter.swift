@@ -4,11 +4,10 @@ import Foundation
 
 /// Converts audio buffers from hardware sample rate to 16kHz mono PCM for Gemini.
 enum PCMConverter {
-    /// Extract channel 0 (processed voice) from a multi-channel buffer and resample to 16kHz.
-    /// Voice processing may output 3 channels; only channel 0 contains the processed voice.
+    /// Extract channel 0 from a 16kHz mono buffer and convert to PCM16.
+    /// AVAudioEngine delivers at 16kHz via installTap format parameter — no resampling needed.
     static func convertToGeminiFormat(
-        buffer: AVAudioPCMBuffer,
-        sourceRate: Double
+        buffer: AVAudioPCMBuffer
     ) -> Data? {
         guard let floatData = buffer.floatChannelData else { return nil }
 
@@ -18,40 +17,8 @@ enum PCMConverter {
         // Extract channel 0 (processed voice)
         let channel0 = Array(UnsafeBufferPointer(start: floatData[0], count: frameCount))
 
-        // Resample to 16kHz if needed
-        let targetRate: Double = 16000
-        let resampled: [Float]
-
-        if abs(sourceRate - targetRate) < 1.0 {
-            resampled = channel0
-        } else {
-            let ratio = targetRate / sourceRate
-            let outputCount = Int(Double(frameCount) * ratio)
-            resampled = linearResample(channel0, outputCount: outputCount)
-        }
-
         // Convert Float32 [-1.0, 1.0] to 16-bit LE PCM bytes
-        return floatToPCM16(resampled)
-    }
-
-    /// Unused — AVAudioEngine handles resampling natively via installTap format parameter.
-    /// Linear interpolation resample (good enough for voice at 16kHz target).
-    static func linearResample(_ input: [Float], outputCount: Int) -> [Float] {
-        guard outputCount > 0, !input.isEmpty else { return [] }
-        if outputCount == 1 { return [input[0]] }
-
-        var output = [Float](repeating: 0, count: outputCount)
-        let ratio = Double(input.count - 1) / Double(outputCount - 1)
-
-        for i in 0..<outputCount {
-            let srcIndex = Double(i) * ratio
-            let lower = Int(srcIndex)
-            let upper = min(lower + 1, input.count - 1)
-            let frac = Float(srcIndex - Double(lower))
-            output[i] = input[lower] * (1.0 - frac) + input[upper] * frac
-        }
-
-        return output
+        return floatToPCM16(channel0)
     }
 
     /// Convert f32 samples to 16-bit little-endian PCM Data.

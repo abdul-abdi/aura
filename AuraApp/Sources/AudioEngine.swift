@@ -20,7 +20,7 @@ final class AudioEngine {
     var onPlaybackPause: ((Bool) -> Void)?
 
     // Silence gate
-    private var silentFrameCount: Int = 0
+    private let silentFrameCount = OSAllocatedUnfairLock(initialState: 0)
     private let silenceThreshold: Float = 0.001
     private let silentFramesBeforeGate: Int = 3
 
@@ -78,18 +78,20 @@ final class AudioEngine {
             // Compute RMS energy for silence gate
             let rms = PCMConverter.rmsEnergy(buffer: buffer)
             if rms < self.silenceThreshold {
-                self.silentFrameCount += 1
-                if self.silentFrameCount >= self.silentFramesBeforeGate {
+                let count = self.silentFrameCount.withLock { val -> Int in
+                    val += 1
+                    return val
+                }
+                if count >= self.silentFramesBeforeGate {
                     return  // Skip sending silence
                 }
             } else {
-                self.silentFrameCount = 0
+                self.silentFrameCount.withLock { $0 = 0 }
             }
 
             // AVAudioEngine delivers at 16kHz mono — just convert to PCM16
             guard let pcmData = PCMConverter.convertToGeminiFormat(
-                buffer: buffer,
-                sourceRate: 16000
+                buffer: buffer
             ) else { return }
 
             let base64 = PCMConverter.encodeBase64(pcmData)
@@ -219,7 +221,7 @@ final class AudioEngine {
         pcm16Data.withUnsafeBytes { rawBuffer in
             let int16Ptr = rawBuffer.bindMemory(to: Int16.self)
             for i in 0..<sampleCount {
-                floatPtr[i] = Float(int16Ptr[i]) / 32767.0
+                floatPtr[i] = Float(int16Ptr[i]) / 32768.0
             }
         }
 
