@@ -204,6 +204,9 @@ enum UICommand: Encodable {
     private enum CodingKeys: String, CodingKey {
         case type
         case text
+        case pcm
+        case mode
+        case interventionId = "intervention_id"
     }
 
     func encode(to encoder: Encoder) throws {
@@ -220,13 +223,13 @@ enum UICommand: Encodable {
             try container.encode("shutdown", forKey: .type)
         case .audioFrame(let pcm):
             try container.encode("audio_frame", forKey: .type)
-            try container.encode(pcm, forKey: .text)  // reuse text field for base64
+            try container.encode(pcm, forKey: .pcm)
         case .setMode(let mode):
             try container.encode("set_mode", forKey: .type)
-            try container.encode(mode, forKey: .text)
+            try container.encode(mode, forKey: .mode)
         case .dismissIntervention(let id):
             try container.encode("dismiss_intervention", forKey: .type)
-            try container.encode(id, forKey: .text)
+            try container.encode(id, forKey: .interventionId)
         }
     }
 }

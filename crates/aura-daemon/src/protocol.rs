@@ -108,13 +108,13 @@ pub enum UICommand {
     Shutdown,
 
     /// Audio frame from the Swift mic capture (base64-encoded 16kHz PCM).
-    AudioFrame { text: String },
+    AudioFrame { pcm: String },
 
     /// Set the autonomy mode.
-    SetMode { text: String },
+    SetMode { mode: String },
 
     /// Dismiss a proactive intervention.
-    DismissIntervention { text: String },
+    DismissIntervention { intervention_id: String },
 }
 
 /// A recent session summary for display in the UI.
@@ -307,30 +307,30 @@ mod tests {
 
     #[test]
     fn audio_frame_deserialization() {
-        let json = r#"{"type":"audio_frame","text":"AQID"}"#;
+        let json = r#"{"type":"audio_frame","pcm":"AQID"}"#;
         let cmd: UICommand = serde_json::from_str(json).unwrap();
         match cmd {
-            UICommand::AudioFrame { text } => assert_eq!(text, "AQID"),
+            UICommand::AudioFrame { pcm } => assert_eq!(pcm, "AQID"),
             _ => panic!("unexpected variant"),
         }
     }
 
     #[test]
     fn set_mode_deserialization() {
-        let json = r#"{"type":"set_mode","text":"ghost"}"#;
+        let json = r#"{"type":"set_mode","mode":"ghost"}"#;
         let cmd: UICommand = serde_json::from_str(json).unwrap();
         match cmd {
-            UICommand::SetMode { text } => assert_eq!(text, "ghost"),
+            UICommand::SetMode { mode } => assert_eq!(mode, "ghost"),
             _ => panic!("unexpected variant"),
         }
     }
 
     #[test]
     fn dismiss_intervention_deserialization() {
-        let json = r#"{"type":"dismiss_intervention","text":"int_456"}"#;
+        let json = r#"{"type":"dismiss_intervention","intervention_id":"int_456"}"#;
         let cmd: UICommand = serde_json::from_str(json).unwrap();
         match cmd {
-            UICommand::DismissIntervention { text } => assert_eq!(text, "int_456"),
+            UICommand::DismissIntervention { intervention_id } => assert_eq!(intervention_id, "int_456"),
             _ => panic!("unexpected variant"),
         }
     }

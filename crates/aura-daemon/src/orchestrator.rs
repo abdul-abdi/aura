@@ -215,16 +215,16 @@ pub(crate) async fn run_daemon(
                     UICommand::ToggleMic => {
                         tracing::info!("Toggle mic requested via IPC");
                     }
-                    UICommand::AudioFrame { text } => {
-                        if let Err(e) = ipc_session.send_audio_base64(&text) {
+                    UICommand::AudioFrame { pcm } => {
+                        if let Err(e) = ipc_session.send_audio_base64(&pcm) {
                             tracing::warn!("Failed to send audio to Gemini: {e}");
                         }
                     }
-                    UICommand::SetMode { text } => {
-                        tracing::info!(mode = %text, "Set autonomy mode via IPC");
+                    UICommand::SetMode { mode } => {
+                        tracing::info!(mode = %mode, "Set autonomy mode via IPC");
                     }
-                    UICommand::DismissIntervention { text } => {
-                        tracing::info!(intervention_id = %text, "Dismiss intervention via IPC");
+                    UICommand::DismissIntervention { intervention_id } => {
+                        tracing::info!(intervention_id = %intervention_id, "Dismiss intervention via IPC");
                     }
                 }
             }
