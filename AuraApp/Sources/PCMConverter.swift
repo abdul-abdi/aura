@@ -69,4 +69,19 @@ enum PCMConverter {
     static func encodeBase64(_ pcmData: Data) -> String {
         pcmData.base64EncodedString()
     }
+
+    /// Compute RMS energy of channel 0 for silence detection.
+    static func rmsEnergy(buffer: AVAudioPCMBuffer) -> Float {
+        guard let floatData = buffer.floatChannelData else { return 0 }
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return 0 }
+
+        let channel0 = floatData[0]
+        var sumSquares: Float = 0
+        for i in 0..<frameCount {
+            let sample = channel0[i]
+            sumSquares += sample * sample
+        }
+        return sqrtf(sumSquares / Float(frameCount))
+    }
 }

@@ -142,6 +142,7 @@ pub(crate) async fn run_daemon(
 
     // Spawn event processor (Gemini events -> tool handling + IPC forwarding)
     let is_interrupted = Arc::new(AtomicBool::new(false));
+    let playback_paused = Arc::new(AtomicBool::new(false));
     let ctx = DaemonContext {
         session: Arc::clone(&session),
         bus: bus.clone(),
@@ -161,6 +162,7 @@ pub(crate) async fn run_daemon(
             is_speaking: Arc::clone(&is_speaking),
             is_interrupted: Arc::clone(&is_interrupted),
             has_permission_error: Arc::clone(&has_permission_error),
+            playback_paused: Arc::clone(&playback_paused),
         },
     };
     let processor_handle = tokio::spawn(async move {
@@ -228,6 +230,14 @@ pub(crate) async fn run_daemon(
                     }
                     UICommand::DismissIntervention { intervention_id } => {
                         tracing::info!(intervention_id = %intervention_id, "Dismiss intervention via IPC");
+                    }
+                    UICommand::PausePlayback => {
+                        tracing::debug!("Playback paused (Swift buffer full)");
+                        playback_paused.store(true, Ordering::Release);
+                    }
+                    UICommand::ResumePlayback => {
+                        tracing::debug!("Playback resumed (Swift buffer drained)");
+                        playback_paused.store(false, Ordering::Release);
                     }
                 }
             }

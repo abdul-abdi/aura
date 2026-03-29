@@ -26,6 +26,8 @@ pub struct SharedFlags {
     pub is_speaking: Arc<AtomicBool>,
     pub is_interrupted: Arc<AtomicBool>,
     pub has_permission_error: Arc<AtomicBool>,
+    /// Swift playback buffer is full — skip sending PlaybackAudio until resumed.
+    pub playback_paused: Arc<AtomicBool>,
 }
 
 impl SharedFlags {
@@ -34,6 +36,7 @@ impl SharedFlags {
             is_speaking: Arc::new(AtomicBool::new(false)),
             is_interrupted: Arc::new(AtomicBool::new(false)),
             has_permission_error: Arc::new(AtomicBool::new(false)),
+            playback_paused: Arc::new(AtomicBool::new(false)),
         }
     }
 }

@@ -145,6 +145,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
         is_speaking,
         is_interrupted,
         has_permission_error: _,
+        playback_paused,
     } = flags;
     let CloudConfig {
         gemini_api_key,
@@ -433,14 +434,17 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         }
 
                         // v2: Forward audio to Swift for playback via IPC
-                        let base64_audio = BASE64.encode(
-                            samples.iter().flat_map(|&s| {
-                                let clamped = s.clamp(-1.0, 1.0);
-                                let i16_val = (clamped * 32767.0) as i16;
-                                i16_val.to_le_bytes()
-                            }).collect::<Vec<u8>>()
-                        );
-                        let _ = ipc_tx.send(DaemonEvent::PlaybackAudio { audio: base64_audio });
+                        // Skip if Swift signalled backpressure (buffer full).
+                        if !playback_paused.load(Ordering::Acquire) {
+                            let base64_audio = BASE64.encode(
+                                samples.iter().flat_map(|&s| {
+                                    let clamped = s.clamp(-1.0, 1.0);
+                                    let i16_val = (clamped * 32767.0) as i16;
+                                    i16_val.to_le_bytes()
+                                }).collect::<Vec<u8>>()
+                            );
+                            let _ = ipc_tx.send(DaemonEvent::PlaybackAudio { audio: base64_audio });
+                        }
                     }
                     Ok(GeminiEvent::ToolCall { id, name, args }) => {
                         tracing::info!(name = %name, "Tool call");

@@ -200,6 +200,8 @@ enum UICommand: Encodable {
     case audioFrame(String)          // base64 PCM
     case setMode(String)             // "ghost" / "copilot" / "autopilot"
     case dismissIntervention(String) // intervention_id
+    case pausePlayback
+    case resumePlayback
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -230,6 +232,10 @@ enum UICommand: Encodable {
         case .dismissIntervention(let id):
             try container.encode("dismiss_intervention", forKey: .type)
             try container.encode(id, forKey: .interventionId)
+        case .pausePlayback:
+            try container.encode("pause_playback", forKey: .type)
+        case .resumePlayback:
+            try container.encode("resume_playback", forKey: .type)
         }
     }
 }

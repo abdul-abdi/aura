@@ -138,6 +138,13 @@ final class AppState {
         engine.onAudioFrame = { [weak connection] base64 in
             connection?.sendAudioFrame(base64)
         }
+        engine.onPlaybackPause = { [weak connection] paused in
+            if paused {
+                connection?.send(.pausePlayback)
+            } else {
+                connection?.send(.resumePlayback)
+            }
+        }
         self.audioEngine = engine
     }
 

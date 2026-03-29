@@ -115,6 +115,12 @@ pub enum UICommand {
 
     /// Dismiss a proactive intervention.
     DismissIntervention { intervention_id: String },
+
+    /// Pause sending playback audio (Swift buffer is full).
+    PausePlayback,
+
+    /// Resume sending playback audio (Swift buffer drained).
+    ResumePlayback,
 }
 
 /// A recent session summary for display in the UI.
