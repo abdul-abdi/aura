@@ -47,11 +47,16 @@ pub struct Setup {
     pub enable_affective_dialog: Option<bool>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_audio_transcription: Option<bool>,
+    pub output_audio_transcription: Option<AudioTranscriptionConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_audio_transcription: Option<bool>,
+    pub input_audio_transcription: Option<AudioTranscriptionConfig>,
 }
+
+/// Audio transcription configuration — an empty object enables transcription.
+/// Language is auto-detected from the audio content.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioTranscriptionConfig {}
 
 /// Configuration for real-time audio input handling (VAD, barge-in, turn coverage).
 #[derive(Debug, Serialize)]

@@ -879,8 +879,8 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
             // on gemini-3.1-flash-live-preview. Enable when the API adds support.
             proactivity: None,
             enable_affective_dialog: None,
-            output_audio_transcription: Some(true),
-            input_audio_transcription: Some(true),
+            output_audio_transcription: Some(AudioTranscriptionConfig {}),
+            input_audio_transcription: Some(AudioTranscriptionConfig {}),
         },
     }
 }
