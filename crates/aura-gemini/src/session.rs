@@ -524,8 +524,12 @@ async fn connect_and_stream_inner(
         let handle = state.resumption_handle.lock().await;
         handle.clone()
     };
-    if current_handle.is_some() {
-        tracing::info!("Resuming session with existing handle");
+    let is_resuming = current_handle.is_some();
+    if let Some(ref handle) = current_handle {
+        tracing::info!(
+            handle_len = handle.len(),
+            "Attempting session resumption with handle"
+        );
     } else {
         tracing::info!("Starting fresh session (no resumption handle)");
     }
@@ -561,6 +565,9 @@ async fn connect_and_stream_inner(
                     || reason.contains("Session not found")
                     || reason.contains("SESSION_NOT_FOUND")
                 {
+                    if is_resuming {
+                        tracing::warn!("Session resumption failed, starting fresh session");
+                    }
                     tracing::warn!("Stale resumption handle rejected, clearing for fresh session");
                     *state.resumption_handle.lock().await = None;
                     // Emit event so daemon can clear it from SQLite too
@@ -577,6 +584,9 @@ async fn connect_and_stream_inner(
             tracing::debug!("Setup response: {text}");
             let server_msg: ServerMessage = serde_json::from_str(&text)?;
             if server_msg.setup_complete.is_some() {
+                if is_resuming {
+                    tracing::info!("Session resumption succeeded");
+                }
                 break;
             }
         }
@@ -660,16 +670,9 @@ async fn connect_and_stream_inner(
             }
 
             Some(text) = channels.text_rx.recv() => {
-                let msg = ClientContentMessage {
-                    client_content: ClientContent {
-                        turns: vec![Content {
-                            role: Some(ContentRole::User),
-                            parts: vec![Part {
-                                text: Some(text),
-                                inline_data: None,
-                            }],
-                        }],
-                        turn_complete: true,
+                let msg = RealtimeTextMessage {
+                    realtime_input: RealtimeTextInput {
+                        text,
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
@@ -876,8 +879,8 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
             // on gemini-3.1-flash-live-preview. Enable when the API adds support.
             proactivity: None,
             enable_affective_dialog: None,
-            output_audio_transcription: None,
-            input_audio_transcription: None,
+            output_audio_transcription: Some(true),
+            input_audio_transcription: Some(true),
         },
     }
 }

@@ -249,6 +249,21 @@ pub struct RealtimeAudioInput {
     pub audio: Blob,
 }
 
+/// Real-time text input using the new sendRealtimeInput format.
+/// Required for Gemini 3.1 Flash Live — sendClientContent is restricted
+/// to initial history seeding only.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeTextMessage {
+    pub realtime_input: RealtimeTextInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeTextInput {
+    pub text: String,
+}
+
 /// Text content sent to the server during a session.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -604,6 +619,17 @@ mod tests {
         let value = serde_json::to_value(&msg).unwrap();
         assert_eq!(value["realtimeInput"]["video"]["mimeType"], "image/jpeg");
         assert_eq!(value["realtimeInput"]["video"]["data"], "base64data");
+    }
+
+    #[test]
+    fn serialize_realtime_text() {
+        let msg = RealtimeTextMessage {
+            realtime_input: RealtimeTextInput {
+                text: "Hello, Aura".into(),
+            },
+        };
+        let value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["realtimeInput"]["text"], "Hello, Aura");
     }
 
     #[test]
