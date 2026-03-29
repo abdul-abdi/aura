@@ -92,7 +92,7 @@
 | `aura-input` | CGEvent mouse (PID-targeted + HID fallback) and keyboard injection |
 | `aura-bridge` | AppleScript/JXA execution, safety gates, obfuscation detection, blocked app list |
 | `aura-memory` | SQLite WAL, append-only facts table, FTS5 search, profile derivation, session tracking |
-| `aura-cloud` | Optional: Firestore sync, memory agent client, proxy relay client |
+| `aura-cloud` | **Deferred**: Cross-device sync via Firestore. Not needed for v2 — intelligence layer is fully local SQLite. |
 
 Proactive scoring and context assembly live in `aura-daemon` as modules — they're functions, not independent subsystems.
 
@@ -317,9 +317,15 @@ Uses Chrome, never Safari. Dark mode everywhere. Hates being asked "shall I?"
 
 Total injection: ~600 tokens. Cheap in Gemini's context window.
 
-### Cloud Sync (Optional)
+### Storage is Local-Only (v2)
 
-Facts sync to Firestore for cross-device persistence. Same architecture as v1: deterministic document IDs, anonymous Firebase auth, pending sync queue for offline resilience.
+All memory lives in local SQLite. No Firestore, no Cloud Run memory agent, no network dependency for the intelligence layer. This is intentional:
+- **Zero latency**: fact queries and profile derivation are local SQL, not network round-trips
+- **Works offline**: memory and proactive features function without internet
+- **Simpler stack**: eliminates Cloud Run, Firestore, Firebase auth from the critical path
+- **Privacy**: user data never leaves the machine unless explicitly synced
+
+Cross-device sync can be added later as an optional `aura-cloud` crate if needed. For v2, the intelligence layer is fully local.
 
 ---
 
