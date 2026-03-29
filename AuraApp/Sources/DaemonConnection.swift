@@ -7,7 +7,7 @@ import Foundation
 final class DaemonConnection {
     private let socketPath: String
     private var fileDescriptor: Int32 = -1
-    private var readTask: Task<Void, Never>?
+    private var readSource: DispatchSourceRead?
     private var reconnectTask: Task<Void, Never>?
     private var buffer = Data()
 
@@ -132,34 +132,46 @@ final class DaemonConnection {
     private func startReading() {
         let fd = self.fileDescriptor
 
-        // Use Task.detached to avoid MainActor isolation for the read loop.
-        // Data is dispatched back to MainActor via await self?.appendData().
-        readTask = Task.detached { [weak self] in
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .global(qos: .userInteractive))
+
+        source.setEventHandler { [weak self] in
             let bufferSize = 4096
             var readBuffer = [UInt8](repeating: 0, count: bufferSize)
 
-            while !Task.isCancelled {
+            while true {
                 let bytesRead = Darwin.read(fd, &readBuffer, bufferSize)
 
                 if bytesRead > 0 {
                     let data = Data(readBuffer[..<bytesRead])
-                    await self?.appendData(data)
+                    Task { @MainActor [weak self] in
+                        self?.appendData(data)
+                    }
                 } else if bytesRead == 0 {
                     // EOF
-                    await self?.handleDisconnect()
-                    break
+                    Task { @MainActor [weak self] in
+                        self?.handleDisconnect()
+                    }
+                    return
                 } else {
-                    // EAGAIN/EWOULDBLOCK means no data available yet (non-blocking)
                     if errno == EAGAIN || errno == EWOULDBLOCK {
-                        try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
-                        continue
+                        // No more data available right now — wait for next event
+                        return
                     }
                     // Actual error
-                    await self?.handleDisconnect()
-                    break
+                    Task { @MainActor [weak self] in
+                        self?.handleDisconnect()
+                    }
+                    return
                 }
             }
         }
+
+        source.setCancelHandler {
+            // Cleanup if needed
+        }
+
+        source.resume()
+        self.readSource = source
     }
 
     private func appendData(_ data: Data) {
@@ -235,8 +247,8 @@ final class DaemonConnection {
     func disconnect() {
         reconnectTask?.cancel()
         reconnectTask = nil
-        readTask?.cancel()
-        readTask = nil
+        readSource?.cancel()
+        readSource = nil
         if fileDescriptor >= 0 {
             Darwin.close(fileDescriptor)
             fileDescriptor = -1
