@@ -872,12 +872,12 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
                 activity_handling: Some("START_OF_ACTIVITY_INTERRUPTS".into()),
                 turn_coverage: None,
             }),
-            proactivity: Some(Proactivity {
-                proactive_audio: true,
-            }),
-            enable_affective_dialog: Some(true),
-            output_audio_transcription: Some(true),
-            input_audio_transcription: Some(true),
+            // v2 fields — proactivity and affective dialog are not yet supported
+            // on gemini-3.1-flash-live-preview. Enable when the API adds support.
+            proactivity: None,
+            enable_affective_dialog: None,
+            output_audio_transcription: None,
+            input_audio_transcription: None,
         },
     }
 }

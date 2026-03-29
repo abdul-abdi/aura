@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-pub const DEFAULT_MODEL: &str = "models/gemini-2.5-flash-native-audio-preview-12-2025";
+pub const DEFAULT_MODEL: &str = "models/gemini-3.1-flash-live-preview";
 pub const DEFAULT_VOICE: &str = "Kore";
 pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Aura — a fully autonomous macOS desktop companion with complete computer control. You can see the user's screen in real-time and control their Mac — mouse, keyboard, scrolling, everything.
 
