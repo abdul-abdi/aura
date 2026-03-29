@@ -438,13 +438,18 @@ importance. All facts remain append-only and immutable."
 
 ---
 
-## Task 2: Profile Derivation — Two-Tier Injection
+## Task 2: Profile Derivation — Three-Tier Injection
 
 **Files:**
 - Create: `crates/aura-memory/src/profile.rs`
 - Modify: `crates/aura-memory/src/lib.rs`
 
-Build the two-tier profile from accumulated facts: Tier 1 is a compressed stable profile (400 tokens max), Tier 2 is the last 20 corrections/preferences uncompressed (200 tokens max). Both tiers are formatted as XML blocks for injection into the Gemini system prompt.
+Build the three-tier profile for injection into the Gemini system prompt:
+- Tier 1: compressed stable profile (400 tokens max) from all facts
+- Tier 2: last 20 corrections/preferences uncompressed (200 tokens max)
+- Tier 3: previous session summary (300 tokens max) — the anterograde amnesia patch
+
+Total injection: ~900 tokens.
 
 - [ ] **Step 1: Create `crates/aura-memory/src/profile.rs`**
 
@@ -469,6 +474,9 @@ const TIER1_MAX_CHARS: usize = 1600; // ~400 tokens
 /// Maximum approximate token count for Tier 2 recent corrections.
 const TIER2_MAX_CHARS: usize = 800; // ~200 tokens
 
+/// Maximum approximate token count for Tier 3 last session summary.
+const TIER3_MAX_CHARS: usize = 1200; // ~300 tokens
+
 /// Maximum number of facts to consider for Tier 1.
 const TIER1_MAX_FACTS: usize = 100;
 
@@ -482,6 +490,8 @@ pub struct UserProfile {
     pub stable_profile: String,
     /// Tier 2: recent corrections/preferences, newest first.
     pub recent_corrections: String,
+    /// Tier 3: previous session summary — the anterograde amnesia patch.
+    pub last_session_summary: String,
     /// Total number of facts the profile was derived from.
     pub fact_count: usize,
 }
@@ -489,7 +499,9 @@ pub struct UserProfile {
 impl UserProfile {
     /// Whether this profile has any content worth injecting.
     pub fn is_empty(&self) -> bool {
-        self.stable_profile.is_empty() && self.recent_corrections.is_empty()
+        self.stable_profile.is_empty()
+            && self.recent_corrections.is_empty()
+            && self.last_session_summary.is_empty()
     }
 
     /// Format the profile as XML blocks for system prompt injection.
@@ -502,7 +514,10 @@ impl UserProfile {
         }
 
         let mut xml = String::with_capacity(
-            self.stable_profile.len() + self.recent_corrections.len() + 100,
+            self.stable_profile.len()
+                + self.recent_corrections.len()
+                + self.last_session_summary.len()
+                + 150,
         );
 
         if !self.stable_profile.is_empty() {
@@ -517,14 +532,25 @@ impl UserProfile {
             xml.push_str("\n</recent_context>\n");
         }
 
+        if !self.last_session_summary.is_empty() {
+            xml.push_str("\n<last_session>\n");
+            xml.push_str(&self.last_session_summary);
+            xml.push_str("\n</last_session>\n");
+        }
+
         xml
     }
 }
 
-/// Derive a two-tier user profile from the memory store.
+/// Derive a three-tier user profile from the memory store.
 ///
 /// This is called once at session start. The result is injected into the
 /// Gemini system prompt so the model has immediate context about the user.
+///
+/// Tier 1: stable profile from accumulated facts (~400 tokens)
+/// Tier 2: recent corrections, uncompressed (~200 tokens)
+/// Tier 3: previous session summary — conversational continuity (~300 tokens)
+/// Total: ~900 tokens
 pub fn derive_profile(memory: &SessionMemory) -> Result<UserProfile> {
     // Tier 1: top facts by recency-weighted importance
     let tier1_facts = memory.get_facts_for_profile(TIER1_MAX_FACTS)?;
@@ -534,11 +560,34 @@ pub fn derive_profile(memory: &SessionMemory) -> Result<UserProfile> {
     let tier2_facts = memory.get_recent_corrections(TIER2_MAX_CORRECTIONS)?;
     let recent_corrections = format_tier2(&tier2_facts);
 
+    // Tier 3: previous session summary (anterograde amnesia patch)
+    // Uses the existing v1 sessions.summary column — the most recent
+    // non-empty summary provides conversational continuity across sessions.
+    let last_session_summary = memory
+        .recent_session_summary(1)  // get last 1 session summary
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    // Truncate to budget
+    let last_session_summary = if last_session_summary.len() > TIER3_MAX_CHARS {
+        let truncated = &last_session_summary[..TIER3_MAX_CHARS];
+        // Find last sentence boundary
+        truncated
+            .rfind(". ")
+            .map(|i| &truncated[..=i])
+            .unwrap_or(truncated)
+            .to_string()
+    } else {
+        last_session_summary
+    };
+
     let fact_count = tier1_facts.len();
 
     Ok(UserProfile {
         stable_profile,
         recent_corrections,
+        last_session_summary,
         fact_count,
     })
 }
@@ -833,7 +882,8 @@ In `orchestrator.rs`, inside `run_daemon()`, after the mode hint and destructive
                 fact_count = profile.fact_count,
                 stable_len = profile.stable_profile.len(),
                 corrections_len = profile.recent_corrections.len(),
-                "Injected user profile into system prompt"
+                last_session_len = profile.last_session_summary.len(),
+                "Injected three-tier user profile into system prompt"
             );
             gemini_config.system_prompt.push_str(&xml);
         } else {
@@ -871,11 +921,13 @@ Expected: All tests pass. The system prompt tests in config.rs should still pass
 
 ```bash
 git add crates/aura-daemon/src/orchestrator.rs crates/aura-gemini/src/config.rs
-git commit -m "feat(memory): inject user profile into system prompt at session start
+git commit -m "feat(memory): inject three-tier user profile into system prompt at session start
 
-Derives two-tier profile from accumulated facts in SQLite and appends
-as <user_profile> + <recent_context> XML blocks to the Gemini system
-prompt before WebSocket connection. ~600 tokens total injection cost."
+Derives three-tier profile from local SQLite and appends to Gemini system
+prompt: <user_profile> (400t stable), <recent_context> (200t corrections),
+<last_session> (300t previous session summary). ~900 tokens total.
+The last_session block is the anterograde amnesia patch — ensures
+conversational continuity even when session resumption handles expire."
 ```
 
 ---

@@ -284,7 +284,22 @@ Output: [
 
 Facts are appended to the SQLite table. Importance is model-assigned but bounded [0.0, 1.0].
 
-### Profile Derivation (Two-Tier Injection)
+### Session Summary Generation (After Each Session)
+
+Alongside fact extraction, generate a compressed session summary (max 300 tokens) capturing:
+- What the user was working on
+- Key decisions made
+- Pending/unfinished items
+- Explicit reminders ("remind me to X tomorrow")
+
+Stored in SQLite `sessions` table (existing from v1) in the `summary` column. At next session start, the most recent non-empty summary is loaded and injected as the `<last_session>` block. This ensures conversational continuity even when session resumption handles expire or the user starts fresh.
+
+```sql
+-- Already exists in v1 schema, just needs to be populated with richer summaries:
+-- sessions.summary TEXT
+```
+
+### Profile Derivation (Three-Tier Injection)
 
 At session start, derive a compressed profile from all accumulated facts:
 
@@ -315,7 +330,23 @@ Uses Chrome, never Safari. Dark mode everywhere. Hates being asked "shall I?"
 </recent_context>
 ```
 
-Total injection: ~600 tokens. Cheap in Gemini's context window.
+**Tier 3 — Last Session Summary (300 tokens):**
+- Compressed summary of the previous session's conversation
+- What was being worked on, what was decided, what's pending
+- Generated after each session alongside fact extraction
+- Serves as the "anterograde amnesia patch" — without this, fresh sessions (no resumption handle) lose all conversational context even though the profile knows who the user is
+
+```xml
+<last_session>
+[Tier 3: Previous session summary — 300 tokens max]
+Last session (Mar 28, 45 min): You were refactoring the auth middleware in
+the aura-proxy crate. Completed the token validation rewrite. Left off at
+updating the integration tests — 3 of 8 were failing due to the new HMAC
+format. You asked me to remind you to check the deploy dashboard today.
+</last_session>
+```
+
+Total injection: ~900 tokens (400 profile + 200 corrections + 300 last session). Cheap in Gemini's context window.
 
 ### Storage is Local-Only (v2)
 
