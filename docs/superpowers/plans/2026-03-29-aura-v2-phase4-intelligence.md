@@ -13,6 +13,12 @@
 
 **Prerequisite:** Phase 1+2 voice MVP and Phase 3 screen+tools are working.
 
+**Branch:** Continue on `v2` branch (created in Phase 1).
+
+**Important:** v1 line numbers referenced in these plans may have drifted. Always verify line numbers by reading the file before editing.
+
+**Architecture change:** Intelligence layer is fully local SQLite. No Firestore, no Cloud Run memory agent. Fact extraction uses the existing Gemini Live session or a lightweight Gemini REST call — not a cloud service.
+
 ---
 
 ## File Structure

@@ -10,6 +10,10 @@
 
 **Prerequisite:** Phase 1+2 voice MVP is working -- audio round-trip, IPC AudioFrame routing, and Gemini session established.
 
+**Branch:** Continue on `v2` branch (created in Phase 1).
+
+**Important:** v1 line numbers referenced in these plans may have drifted. Always verify line numbers by reading the file before editing.
+
 ---
 
 ## Crate Map
@@ -217,13 +221,40 @@ final class ScreenCapture {
     // MARK: - Smart Path (15s deep analysis for proactive engine)
 
     private func captureSmartPath() async {
-        // Smart path captures are identical to fast path for now.
-        // Phase 4 (Proactive Engine) will extend this with:
-        // - Higher resolution capture
-        // - Combined ScreenContext with AX tree snapshot
-        // - Proactive scorer evaluation
-        await captureFastPath()
+        // Smart path: full screenshot + request AX tree from daemon.
+        // Produces a richer ScreenContext for the proactive scorer.
+        guard let display = try? await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true
+        ).displays.first else { return }
+
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = display.width * 2
+        config.height = display.height * 2
+        config.capturesAudio = false
+        config.showsCursor = false
+
+        guard let image = try? await SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: config
+        ) else { return }
+
+        let basisId = UUID().uuidString
+        guard let jpegData = cgImageToJPEG(image, quality: 0.85) else { return }
+        let base64 = jpegData.base64EncodedString()
+
+        // Send as SmartCapture (includes request for AX tree from daemon)
+        onSmartCapture?(base64, basisId)
+
+        // Also send as regular video frame to Gemini
+        let hash = computeFrameHash(image)
+        if hash != lastFrameHash {
+            lastFrameHash = hash
+            onVideoFrame?(base64, basisId)
+        }
     }
+
+    /// Called when smart path capture completes. Daemon will combine with AX tree.
+    var onSmartCapture: ((String, String) -> Void)?
 
     // MARK: - Image Helpers
 
@@ -1345,7 +1376,35 @@ async fn execute_step(
         }
     }
 
-    // 3. Animate cursor to target (for coordinate-based actions)
+    // 3. Vision escalation for low-confidence coordinate clicks
+    // If ClickCoordinates with confidence < 0.7, send a high-res screenshot
+    // + target description to the Gemini Live session for refined coordinates.
+    // This replaces the v1 Vision Oracle (REST) with an in-session approach.
+    if is_coordinate_action(&step.action) && step.confidence.unwrap_or(1.0) < 0.7 {
+        if let Some(ref target_desc) = step.target.description {
+            tracing::info!(
+                confidence = step.confidence,
+                target = target_desc,
+                "Low confidence coordinate action — requesting vision escalation from Gemini"
+            );
+            // Send the current screenshot + target description to Gemini
+            // via the live session's text input. Gemini responds with refined
+            // coordinates as a tool call or text response.
+            // The caller (execute_plan) should handle this by:
+            // 1. Sending a text message: "Look at the screen. Find the exact
+            //    coordinates of: {target_desc}. Return click(x, y, target='{target_desc}')"
+            // 2. Waiting for Gemini's response (a new tool call with refined coords)
+            // 3. Using the refined coordinates for this step
+            //
+            // For v2 MVP: if vision escalation is not wired yet, proceed with
+            // original coordinates and log a warning.
+            tracing::warn!(
+                "Vision escalation not yet wired — proceeding with original coordinates"
+            );
+        }
+    }
+
+    // 4. Animate cursor to target (for coordinate-based actions)
     if let Some((x, y)) = step.target.coordinates {
         if let Err(e) = crate::cursor::animate_cursor_to(x, y).await {
             tracing::warn!("Cursor animation failed: {e}");

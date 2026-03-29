@@ -10,6 +10,14 @@
 
 **Milestone:** A user speaks into their Mac, Gemini responds with voice, barge-in works naturally. End-to-end latency < 300ms. Works across built-in mic, AirPods, and external USB mic.
 
+**Branch:** Create `v2` branch from `main` before starting. All v2 work happens on this branch.
+
+```bash
+git checkout main && git checkout -b v2
+```
+
+**Important:** v1 line numbers referenced in these plans may have drifted. Always verify line numbers by reading the file before editing.
+
 ---
 
 ## File Structure
