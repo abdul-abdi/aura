@@ -216,6 +216,9 @@ pub(crate) async fn run_daemon(
                         tracing::info!("Toggle mic requested via IPC");
                     }
                     UICommand::AudioFrame { pcm } => {
+                        tracing::trace!(
+                            "AudioFrame received, forwarding to Gemini"
+                        );
                         if let Err(e) = ipc_session.send_audio_base64(&pcm) {
                             tracing::warn!("Failed to send audio to Gemini: {e}");
                         }

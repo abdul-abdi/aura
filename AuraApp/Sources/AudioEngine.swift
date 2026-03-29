@@ -16,8 +16,22 @@ final class AudioEngine {
     /// Called with base64-encoded 16kHz PCM audio frames from the mic.
     var onAudioFrame: ((String) -> Void)?
 
+    /// Called when playback needs to pause/resume (backpressure signal to daemon).
+    var onPlaybackPause: ((Bool) -> Void)?
+
+    // Silence gate
+    private var silentFrameCount: Int = 0
+    private let silenceThreshold: Float = 0.001
+    private let silentFramesBeforeGate: Int = 3
+
+    // Playback backpressure
+    private var playbackPaused = false
+
     /// Whether the engine is currently capturing.
     private(set) var isCapturing = false
+
+    /// Timestamp of the last audio frame for latency measurement
+    private(set) var lastCaptureTime: CFAbsoluteTime = 0
 
     /// Whether audio is currently playing (for UI state).
     private(set) var isPlaying = false
@@ -59,6 +73,19 @@ final class AudioEngine {
             guard let self else { return }
             self.tapFireCount.withLock { $0 += 1 }
 
+            let captureTime = CFAbsoluteTimeGetCurrent()
+
+            // Compute RMS energy for silence gate
+            let rms = PCMConverter.rmsEnergy(buffer: buffer)
+            if rms < self.silenceThreshold {
+                self.silentFrameCount += 1
+                if self.silentFrameCount >= self.silentFramesBeforeGate {
+                    return  // Skip sending silence
+                }
+            } else {
+                self.silentFrameCount = 0
+            }
+
             // AVAudioEngine delivers at 16kHz mono — just convert to PCM16
             guard let pcmData = PCMConverter.convertToGeminiFormat(
                 buffer: buffer,
@@ -68,6 +95,7 @@ final class AudioEngine {
             let base64 = PCMConverter.encodeBase64(pcmData)
 
             Task { @MainActor [weak self] in
+                self?.lastCaptureTime = captureTime
                 self?.onAudioFrame?(base64)
             }
         }
@@ -113,9 +141,15 @@ final class AudioEngine {
         guard let data = Data(base64Encoded: base64) else { return }
         playbackBuffer.append(data)
 
-        // Discard stale audio if buffer grows too large (backpressure)
+        // Discard stale audio if buffer grows too large (hard cap)
         if playbackBuffer.count > maxPlaybackBytes {
             playbackBuffer = Data()
+        }
+
+        // Backpressure: signal daemon to pause if buffer is too large
+        if playbackBuffer.count > 48_000 && !playbackPaused {
+            playbackPaused = true
+            onPlaybackPause?(true)
         }
 
         // Schedule first chunk immediately for lowest perceived latency;
@@ -124,6 +158,11 @@ final class AudioEngine {
             let chunk = playbackBuffer
             playbackBuffer = Data()
             isFirstPlaybackChunk = false
+            // Signal resume when buffer drains
+            if playbackPaused {
+                playbackPaused = false
+                onPlaybackPause?(false)
+            }
             schedulePlayback(pcm16Data: chunk)
             return
         }
@@ -132,6 +171,11 @@ final class AudioEngine {
 
         let chunk = playbackBuffer
         playbackBuffer = Data()
+        // Signal resume when buffer drains
+        if playbackPaused {
+            playbackPaused = false
+            onPlaybackPause?(false)
+        }
         schedulePlayback(pcm16Data: chunk)
     }
 
@@ -151,6 +195,11 @@ final class AudioEngine {
         playbackBuffer = Data()
         isFirstPlaybackChunk = true
         isPlaying = false
+        // Reset backpressure state — if paused, send resume so daemon unblocks
+        if playbackPaused {
+            playbackPaused = false
+            onPlaybackPause?(false)
+        }
     }
 
     private func schedulePlayback(pcm16Data: Data) {

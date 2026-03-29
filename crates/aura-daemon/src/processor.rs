@@ -249,6 +249,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
     speaking_watchdog.tick().await; // skip first immediate tick
     let mut last_audio_response = std::time::Instant::now();
     let mut sent_playback_start = false;
+    let mut turn_first_audio_at: Option<std::time::Instant> = None;
 
     loop {
         tokio::select! {
@@ -425,6 +426,8 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
 
                         // v2: Signal playback start on first audio chunk of a turn
                         if !sent_playback_start {
+                            turn_first_audio_at = Some(std::time::Instant::now());
+                            tracing::debug!("First audio response received from Gemini");
                             let _ = ipc_tx.send(DaemonEvent::PlaybackStart);
                             sent_playback_start = true;
                         }
@@ -988,6 +991,7 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                         tracing::info!("Gemini interrupted — stopping playback");
                         is_speaking.store(false, Ordering::Release);
                         is_interrupted.store(true, Ordering::Release);
+                        turn_first_audio_at = None;
                         sent_playback_start = false;
                         bus.send(AuraEvent::BargeIn);
                         // Notify Swift to stop playback and notify UI
@@ -1026,6 +1030,12 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                     Ok(GeminiEvent::TurnComplete) => {
                         is_speaking.store(false, Ordering::Release);
                         is_interrupted.store(false, Ordering::Release);
+                        if let Some(start) = turn_first_audio_at.take() {
+                            tracing::debug!(
+                                duration_ms = start.elapsed().as_millis(),
+                                "Turn audio complete"
+                            );
+                        }
                         sent_playback_start = false;
                         tracing::debug!("Turn complete");
 
