@@ -9,7 +9,7 @@ final class AudioEngine {
     private var engine = AVAudioEngine()
     private var playerNode = AVAudioPlayerNode()
     private var isTapInstalled = false
-    private var tapFireCount: UInt64 = 0
+    private nonisolated(unsafe) var tapFireCount: UInt64 = 0
     private var healthCheckTask: Task<Void, Never>?
 
     /// Called with base64-encoded 16kHz PCM audio frames from the mic.
@@ -73,7 +73,7 @@ final class AudioEngine {
         isCapturing = true
 
         // Start tap health check
-        startHealthCheck(sourceRate: sourceRate)
+        startHealthCheck()
 
         // Listen for audio device changes (AirPods connect, etc.)
         NotificationCenter.default.addObserver(
@@ -93,6 +93,7 @@ final class AudioEngine {
             engine.inputNode.removeTap(onBus: 0)
             isTapInstalled = false
         }
+        engine.detach(playerNode)
         engine.stop()
         isCapturing = false
     }
@@ -140,7 +141,8 @@ final class AudioEngine {
         ) else { return }
 
         buffer.frameLength = AVAudioFrameCount(sampleCount)
-        let floatPtr = buffer.floatChannelData![0]
+        guard let floatChannelData = buffer.floatChannelData else { return }
+        let floatPtr = floatChannelData[0]
 
         pcm16Data.withUnsafeBytes { rawBuffer in
             let int16Ptr = rawBuffer.bindMemory(to: Int16.self)
@@ -157,8 +159,8 @@ final class AudioEngine {
 
     // MARK: - Health Check
 
-    private func startHealthCheck(sourceRate: Double) {
-        healthCheckTask = Task { [weak self] in
+    private func startHealthCheck() {
+        healthCheckTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
                 guard let self, self.isCapturing else { continue }
@@ -175,7 +177,11 @@ final class AudioEngine {
 
     private func restartCapture() {
         stopCapture()
-        try? startCapture()
+        do {
+            try startCapture()
+        } catch {
+            print("[AudioEngine] restart failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Device Change
