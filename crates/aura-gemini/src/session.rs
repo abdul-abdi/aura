@@ -670,9 +670,18 @@ async fn connect_and_stream_inner(
             }
 
             Some(text) = channels.text_rx.recv() => {
-                let msg = RealtimeTextMessage {
-                    realtime_input: RealtimeTextInput {
-                        text,
+                // Gemini 2.5: use sendClientContent for text input.
+                // When migrating to 3.1: switch to RealtimeTextMessage (sendRealtimeInput).
+                let msg = ClientContentMessage {
+                    client_content: ClientContent {
+                        turns: vec![Content {
+                            role: Some(ContentRole::User),
+                            parts: vec![Part {
+                                text: Some(text),
+                                inline_data: None,
+                            }],
+                        }],
+                        turn_complete: true,
                     },
                 };
                 let json = serde_json::to_string(&msg)?;
@@ -875,8 +884,9 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
                 activity_handling: Some("START_OF_ACTIVITY_INTERRUPTS".into()),
                 turn_coverage: None,
             }),
-            // v2 fields — proactivity and affective dialog are not yet supported
-            // on gemini-3.1-flash-live-preview. Enable when the API adds support.
+            // TODO: Enable proactivity and affective dialog once we confirm
+            // the correct model variant and field format. Current 12-2025 preview
+            // rejects enableAffectiveDialog. May need -dialog model suffix.
             proactivity: None,
             enable_affective_dialog: None,
             output_audio_transcription: Some(AudioTranscriptionConfig {}),

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-pub const DEFAULT_MODEL: &str = "models/gemini-3.1-flash-live-preview";
+pub const DEFAULT_MODEL: &str = "models/gemini-2.5-flash-native-audio-preview-12-2025";
 pub const DEFAULT_VOICE: &str = "Kore";
 pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Aura — a fully autonomous macOS desktop companion with complete computer control. You can see the user's screen in real-time and control their Mac — mouse, keyboard, scrolling, everything.
 
@@ -232,7 +232,9 @@ Limitations:
 - If an action seems unintended or destructive, pause and verify with the user.
 </safety>"#;
 
-const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+// v1alpha required for proactivity and affective dialog on 2.5 Flash Native Audio.
+// Switch to v1beta when migrating to 3.1 Flash Live (which drops these features anyway).
+const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent";
 
 /// Production cloud service defaults injected at build time via environment
 /// variables (set in CI from GCP Secret Manager). Uses `option_env!()` so
