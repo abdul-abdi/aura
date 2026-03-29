@@ -11,6 +11,12 @@ enum DaemonEvent: Decodable {
     case status(StatusUpdate)
     case recentSessions(RecentSessionsUpdate)
     case shutdown
+    case modeChanged(ModeChangedUpdate)
+    case proactiveIntervention(ProactiveInterventionUpdate)
+    case playbackAudio(PlaybackAudioUpdate)
+    case playbackStart
+    case playbackStop
+    case interrupted
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -23,6 +29,12 @@ enum DaemonEvent: Decodable {
         case status
         case recentSessions = "recent_sessions"
         case shutdown
+        case modeChanged = "mode_changed"
+        case proactiveIntervention = "proactive_intervention"
+        case playbackAudio = "playback_audio"
+        case playbackStart = "playback_start"
+        case playbackStop = "playback_stop"
+        case interrupted
     }
 
     init(from decoder: Decoder) throws {
@@ -42,6 +54,18 @@ enum DaemonEvent: Decodable {
             self = .recentSessions(try RecentSessionsUpdate(from: decoder))
         case .shutdown:
             self = .shutdown
+        case .modeChanged:
+            self = .modeChanged(try ModeChangedUpdate(from: decoder))
+        case .proactiveIntervention:
+            self = .proactiveIntervention(try ProactiveInterventionUpdate(from: decoder))
+        case .playbackAudio:
+            self = .playbackAudio(try PlaybackAudioUpdate(from: decoder))
+        case .playbackStart:
+            self = .playbackStart
+        case .playbackStop:
+            self = .playbackStop
+        case .interrupted:
+            self = .interrupted
         }
     }
 }
@@ -146,6 +170,24 @@ struct RecentSession: Decodable, Identifiable {
     }
 }
 
+struct ModeChangedUpdate: Decodable {
+    let mode: String  // "ghost", "copilot", "autopilot"
+}
+
+struct ProactiveInterventionUpdate: Decodable {
+    let text: String
+    let interventionId: String
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case interventionId = "intervention_id"
+    }
+}
+
+struct PlaybackAudioUpdate: Decodable {
+    let audio: String  // base64-encoded 24kHz 16-bit PCM
+}
+
 // MARK: - UI -> Daemon Commands
 
 /// Commands sent from the SwiftUI frontend to the Rust daemon over the Unix socket.
@@ -155,6 +197,9 @@ enum UICommand: Encodable {
     case toggleMic
     case reconnect
     case shutdown
+    case audioFrame(String)          // base64 PCM
+    case setMode(String)             // "ghost" / "copilot" / "autopilot"
+    case dismissIntervention(String) // intervention_id
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -173,6 +218,15 @@ enum UICommand: Encodable {
             try container.encode("reconnect", forKey: .type)
         case .shutdown:
             try container.encode("shutdown", forKey: .type)
+        case .audioFrame(let pcm):
+            try container.encode("audio_frame", forKey: .type)
+            try container.encode(pcm, forKey: .text)  // reuse text field for base64
+        case .setMode(let mode):
+            try container.encode("set_mode", forKey: .type)
+            try container.encode(mode, forKey: .text)
+        case .dismissIntervention(let id):
+            try container.encode("dismiss_intervention", forKey: .type)
+            try container.encode(id, forKey: .text)
         }
     }
 }

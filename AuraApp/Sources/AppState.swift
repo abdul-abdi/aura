@@ -161,6 +161,33 @@ final class AppState {
             statusMessage = "Daemon shutting down"
             dotColor = .gray
             isPulsing = false
+
+        case .modeChanged(let update):
+            // v2: autonomy mode changes (ghost/copilot/autopilot) — handled in Task 4+
+            statusMessage = "Mode: \(update.mode)"
+
+        case .proactiveIntervention(let update):
+            // v2: proactive interventions from Gemini — handled in Task 4+
+            let event = ActivityEvent(kind: .assistantSpeech, text: update.text)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                events.append(event)
+            }
+
+        case .playbackAudio:
+            // v2: audio playback frames forwarded to AudioEngine — handled in Task 3
+            break
+
+        case .playbackStart:
+            // v2: signal to start audio playback — handled in Task 3
+            break
+
+        case .playbackStop:
+            // v2: signal to stop audio playback — handled in Task 3
+            break
+
+        case .interrupted:
+            // v2: barge-in occurred — stop playback — handled in Task 3
+            break
         }
     }
 

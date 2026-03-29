@@ -42,6 +42,24 @@ pub enum DaemonEvent {
 
     /// The daemon is shutting down.
     Shutdown,
+
+    /// Base64-encoded 24kHz 16-bit PCM audio for playback.
+    PlaybackAudio { audio: String },
+
+    /// Gemini started an audio response — prepare playback.
+    PlaybackStart,
+
+    /// Gemini finished the audio response — flush playback.
+    PlaybackStop,
+
+    /// Gemini was interrupted (barge-in) — stop playback immediately.
+    Interrupted,
+
+    /// Autonomy mode changed.
+    ModeChanged { mode: String },
+
+    /// A proactive intervention from Gemini.
+    ProactiveIntervention { text: String, intervention_id: String },
 }
 
 /// Dot color names sent over IPC — maps to the Swift `DotColorName` enum.
@@ -88,6 +106,15 @@ pub enum UICommand {
 
     /// Request a graceful shutdown.
     Shutdown,
+
+    /// Audio frame from the Swift mic capture (base64-encoded 16kHz PCM).
+    AudioFrame { text: String },
+
+    /// Set the autonomy mode.
+    SetMode { text: String },
+
+    /// Dismiss a proactive intervention.
+    DismissIntervention { text: String },
 }
 
 /// A recent session summary for display in the UI.
@@ -226,5 +253,78 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""source":"text""#));
+    }
+
+    #[test]
+    fn playback_audio_serialization() {
+        let event = DaemonEvent::PlaybackAudio {
+            audio: "AQID".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"playback_audio","audio":"AQID"}"#);
+    }
+
+    #[test]
+    fn playback_start_serialization() {
+        let event = DaemonEvent::PlaybackStart;
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"playback_start"}"#);
+    }
+
+    #[test]
+    fn interrupted_serialization() {
+        let event = DaemonEvent::Interrupted;
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"interrupted"}"#);
+    }
+
+    #[test]
+    fn mode_changed_serialization() {
+        let event = DaemonEvent::ModeChanged {
+            mode: "copilot".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"mode_changed","mode":"copilot"}"#);
+    }
+
+    #[test]
+    fn proactive_intervention_serialization() {
+        let event = DaemonEvent::ProactiveIntervention {
+            text: "You have a meeting in 5 minutes".into(),
+            intervention_id: "int_123".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"proactive_intervention""#));
+        assert!(json.contains(r#""intervention_id":"int_123""#));
+    }
+
+    #[test]
+    fn audio_frame_deserialization() {
+        let json = r#"{"type":"audio_frame","text":"AQID"}"#;
+        let cmd: UICommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            UICommand::AudioFrame { text } => assert_eq!(text, "AQID"),
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn set_mode_deserialization() {
+        let json = r#"{"type":"set_mode","text":"ghost"}"#;
+        let cmd: UICommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            UICommand::SetMode { text } => assert_eq!(text, "ghost"),
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn dismiss_intervention_deserialization() {
+        let json = r#"{"type":"dismiss_intervention","text":"int_456"}"#;
+        let cmd: UICommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            UICommand::DismissIntervention { text } => assert_eq!(text, "int_456"),
+            _ => panic!("unexpected variant"),
+        }
     }
 }

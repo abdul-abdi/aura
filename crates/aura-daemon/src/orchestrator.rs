@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,32 +22,9 @@ use aura_voice::playback::AudioPlayer;
 use crate::cloud;
 use crate::processor;
 
-/// Default RMS energy threshold for mic gating while Aura is speaking.
-/// Used as the initial value before adaptive calibration completes.
-/// Direct speech into the mic is typically 0.05-0.3 RMS; speaker bleed-through
-/// from laptop speakers is usually 0.005-0.03 (up to 0.05 at high volume).
-const BARGE_IN_ENERGY_THRESHOLD_DEFAULT: f32 = 0.05;
-
-/// Number of initial audio chunks to collect for ambient noise calibration.
-/// At ~5ms per chunk this is roughly 500ms of audio.
-const CALIBRATION_CHUNK_COUNT: usize = 100;
-
 /// Bounded mic bridge channel capacity — prevents unbounded memory growth
 /// during backpressure from the Gemini WebSocket.
 const MIC_BRIDGE_CAPACITY: usize = 256;
-
-/// Multiplier applied to the barge-in threshold while audio is actively
-/// playing.  Must be high enough to filter speaker bleed (0.005-0.03 RMS)
-/// but low enough that normal speech (0.05-0.3 RMS) passes through.
-/// 1.5x is a middle ground: 1.3x was too sensitive on MacBook speakers,
-/// 1.8x swallowed real user speech.
-const PLAYBACK_THRESHOLD_MULTIPLIER: f32 = 1.5;
-
-/// Number of consecutive audio chunks that must exceed the barge-in energy
-/// threshold before we forward audio during playback.  Prevents transient
-/// loud passages in the AI's speech from triggering a false barge-in.
-/// At ~10 ms per chunk (512-sample resampler), 3 chunks ≈ 30 ms.
-const BARGE_IN_CONSECUTIVE_FRAMES: u32 = 3;
 
 /// Destructive action guardrail injected into the system prompt.
 pub(crate) const DESTRUCTIVE_ACTION_GUARDRAIL: &str = "\n\nSafety — Destructive Actions:\
@@ -161,9 +138,6 @@ pub(crate) async fn run_daemon(
     let (std_tx, std_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let mic_shutdown = Arc::new(AtomicBool::new(false));
     let is_speaking = Arc::new(AtomicBool::new(false));
-    // Adaptive barge-in threshold stored as f32 bits in an AtomicU32.
-    // Starts at the default and is updated after ambient noise calibration.
-    let barge_in_threshold = Arc::new(AtomicU32::new(BARGE_IN_ENERGY_THRESHOLD_DEFAULT.to_bits()));
 
     // Audio playback (optional — warn if unavailable).
     // Created here so the mic bridge can share the player's playing flag and
@@ -178,12 +152,6 @@ pub(crate) async fn run_daemon(
             None
         }
     };
-    // Arc<AtomicBool> that mirrors player.playing — false when no player.
-    let audio_playing: Arc<AtomicBool> = player
-        .as_ref()
-        .map(|p| p.playing_arc())
-        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
-
     // Notify UI if Screen Recording was denied at startup.
     if !check_screen_recording_permission() {
         has_permission_error.store(true, Ordering::Release);
@@ -269,16 +237,12 @@ pub(crate) async fn run_daemon(
     }
 
     // Bridge std::sync::mpsc -> tokio -> session.send_audio()
-    // During playback, mic audio is energy-gated rather than fully muted:
-    // direct user speech (0.05-0.3 RMS) passes through while speaker
-    // bleed-through (0.005-0.03 RMS) is filtered out, enabling barge-in.
-    // A 300 ms post-playback reverb guard uses the same energy gating.
+    // All mic audio streams directly to Gemini — the 3.1 Flash Live model
+    // handles barge-in, echo cancellation, and turn management natively
+    // in its audio-to-audio pipeline. No client-side energy gating needed.
     let audio_session = Arc::clone(&session);
     let audio_cancel = cancel.clone();
     let bridge_shutdown = Arc::clone(&mic_shutdown);
-    let bridge_speaking = Arc::clone(&is_speaking);
-    let bridge_threshold = Arc::clone(&barge_in_threshold);
-    let bridge_audio_playing = Arc::clone(&audio_playing);
     tokio::spawn(async move {
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(MIC_BRIDGE_CAPACITY);
 
@@ -302,113 +266,10 @@ pub(crate) async fn run_daemon(
             }
         });
 
-        // Ambient noise calibration state
-        let mut calibration_samples: Vec<f32> = Vec::with_capacity(CALIBRATION_CHUNK_COUNT);
-        let mut calibration_done = false;
-
-        // Tracks when hardware playback last stopped, for post-playback mute guard.
-        let mut playback_stopped_at: Option<std::time::Instant> = None;
-        // Whether audio was playing on the previous iteration (to detect stop edge).
-        let mut prev_playing = false;
-        // How long to keep muting after playback ends (absorbs room reverb).
-        const POST_PLAYBACK_MUTE_MS: u128 = 300;
-        // Consecutive frames above threshold during playback (prevents transients).
-        let mut barge_in_streak: u32 = 0;
-
-        // Client-side VAD removed: all non-playback audio is streamed directly
-        // to Gemini, which runs its own server-side VAD for turn detection.
-        // This eliminates ~330ms of client-side latency (30ms frame accumulation
-        // + 300ms hangover) and simplifies the pipeline.
-        // Energy-based barge-in gating during playback is kept.
-
         loop {
             tokio::select! {
                 _ = audio_cancel.cancelled() => break,
                 Some(samples) = tokio_rx.recv() => {
-                    // Collect RMS samples for ambient noise calibration
-                    if !calibration_done {
-                        let rms = processor::rms_energy(&samples);
-                        calibration_samples.push(rms);
-                        if calibration_samples.len() >= CALIBRATION_CHUNK_COUNT {
-                            let calibrated = processor::calibrate_barge_in_threshold(&calibration_samples);
-                            bridge_threshold.store(calibrated.to_bits(), Ordering::Release);
-                            tracing::info!(
-                                threshold = calibrated,
-                                samples = calibration_samples.len(),
-                                "Adaptive barge-in threshold calibrated from ambient noise"
-                            );
-                            calibration_done = true;
-                            // Free calibration buffer
-                            calibration_samples = Vec::new();
-                        }
-                    }
-
-                    // --- Barge-in: energy-gated mic during playback ---
-                    // Forward audio to Gemini only when RMS energy exceeds the
-                    // calibrated threshold, filtering out speaker bleed-through
-                    // while allowing direct user speech to trigger interruption.
-                    let currently_playing = bridge_audio_playing.load(Ordering::Acquire);
-                    let gemini_speaking = bridge_speaking.load(Ordering::Acquire);
-
-                    // Detect transition: playing → stopped.  Arm the reverb guard.
-                    if prev_playing && !currently_playing {
-                        playback_stopped_at = Some(std::time::Instant::now());
-                        barge_in_streak = 0;
-                        tracing::debug!("Playback stopped — entering post-playback reverb guard");
-                    }
-                    prev_playing = currently_playing;
-
-                    if currently_playing {
-                        // During playback, use energy-based gating to filter
-                        // speaker bleed-through (0.005-0.03 RMS) while allowing
-                        // direct user speech (0.05-0.3 RMS) to trigger barge-in.
-                        let energy = processor::rms_energy(&samples);
-                        let base = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
-                        let threshold = base * PLAYBACK_THRESHOLD_MULTIPLIER;
-                        if energy < threshold {
-                            barge_in_streak = 0;
-                            continue; // Below threshold — likely speaker echo
-                        }
-                        // Require sustained speech across consecutive frames
-                        // to avoid transient spikes from loud AI passages.
-                        barge_in_streak = barge_in_streak.saturating_add(1);
-                        if barge_in_streak < BARGE_IN_CONSECUTIVE_FRAMES {
-                            continue; // Not enough consecutive frames yet
-                        }
-                        if barge_in_streak == BARGE_IN_CONSECUTIVE_FRAMES {
-                            tracing::info!(
-                                energy,
-                                threshold,
-                                "Barge-in: sustained user speech detected during playback"
-                            );
-                        }
-                        // Don't reset streak — keep forwarding all above-threshold
-                        // frames so Gemini receives continuous audio for VAD.
-                    } else if gemini_speaking {
-                        // Gemini is sending audio but the pre-buffer hasn't
-                        // flushed to hardware yet. This window lasts until the
-                        // network delivers ~40ms of audio chunks (can be 100-500ms
-                        // wall-clock with jitter). Mute to prevent unfiltered mic
-                        // audio from triggering a false barge-in before the user
-                        // even hears the response.
-                        continue;
-                    } else if let Some(stopped_at) = playback_stopped_at {
-                        // Post-playback reverb guard: energy-gate for 300 ms
-                        // after the speaker stops to absorb room echo.
-                        let in_reverb_window = stopped_at.elapsed().as_millis() < POST_PLAYBACK_MUTE_MS;
-                        if in_reverb_window {
-                            let energy = processor::rms_energy(&samples);
-                            let threshold = f32::from_bits(bridge_threshold.load(Ordering::Acquire));
-                            if energy < threshold {
-                                continue; // Reverb guard: below threshold
-                            }
-                            tracing::debug!(energy, threshold, "Speech during reverb guard — forwarding");
-                        }
-                        playback_stopped_at = None;
-                    }
-
-                    // Non-playback audio: stream directly to Gemini.
-                    // Gemini's server-side VAD handles turn detection.
                     if let Err(e) = audio_session.send_audio(&samples) {
                         tracing::warn!("Gemini session closed, stopping audio bridge: {e}");
                         break;
@@ -494,6 +355,16 @@ pub(crate) async fn run_daemon(
                     }
                     UICommand::ToggleMic => {
                         tracing::info!("Toggle mic requested via IPC");
+                    }
+                    UICommand::AudioFrame { .. } => {
+                        // v2: audio frames from Swift are handled by the audio pipeline (not yet wired)
+                        tracing::trace!("AudioFrame received (v2 audio pipeline not yet wired)");
+                    }
+                    UICommand::SetMode { text } => {
+                        tracing::info!(mode = %text, "Set autonomy mode via IPC");
+                    }
+                    UICommand::DismissIntervention { text } => {
+                        tracing::info!(intervention_id = %text, "Dismiss intervention via IPC");
                     }
                 }
             }
