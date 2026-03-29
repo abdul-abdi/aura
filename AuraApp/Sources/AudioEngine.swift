@@ -1,6 +1,7 @@
 // AuraApp/Sources/AudioEngine.swift
 import AVFoundation
 import Foundation
+import os
 
 /// Manages audio capture and playback using AVAudioEngine with voice processing.
 /// Voice processing provides native echo cancellation, noise suppression, and AGC.
@@ -9,7 +10,7 @@ final class AudioEngine {
     private var engine = AVAudioEngine()
     private var playerNode = AVAudioPlayerNode()
     private var isTapInstalled = false
-    private nonisolated(unsafe) var tapFireCount: UInt64 = 0
+    private let tapFireCount = OSAllocatedUnfairLock(initialState: UInt64(0))
     private var healthCheckTask: Task<Void, Never>?
 
     /// Called with base64-encoded 16kHz PCM audio frames from the mic.
@@ -32,6 +33,8 @@ final class AudioEngine {
     // Coalescing buffer for playback: accumulate >= 960 bytes (~20ms at 24kHz) before scheduling
     private var playbackBuffer = Data()
     private let minPlaybackBytes = 960
+    private let maxPlaybackBytes = 96_000  // ~2 seconds at 24kHz 16-bit mono
+    private var isFirstPlaybackChunk = true
 
     deinit {
         healthCheckTask?.cancel()
@@ -45,16 +48,21 @@ final class AudioEngine {
         // Enable voice processing — provides echo cancellation, noise suppression, AGC
         try inputNode.setVoiceProcessingEnabled(true)
 
-        let hwFormat = inputNode.outputFormat(forBus: 0)
-        let sourceRate = hwFormat.sampleRate
+        let captureFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        )!
 
-        inputNode.installTap(onBus: 0, bufferSize: 2048, format: hwFormat) { [weak self] buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 2048, format: captureFormat) { [weak self] buffer, _ in
             guard let self else { return }
-            self.tapFireCount += 1
+            self.tapFireCount.withLock { $0 += 1 }
 
+            // AVAudioEngine delivers at 16kHz mono — just convert to PCM16
             guard let pcmData = PCMConverter.convertToGeminiFormat(
                 buffer: buffer,
-                sourceRate: sourceRate
+                sourceRate: 16000
             ) else { return }
 
             let base64 = PCMConverter.encodeBase64(pcmData)
@@ -105,18 +113,32 @@ final class AudioEngine {
         guard let data = Data(base64Encoded: base64) else { return }
         playbackBuffer.append(data)
 
-        // Coalesce: don't schedule until we have enough for smooth playback
+        // Discard stale audio if buffer grows too large (backpressure)
+        if playbackBuffer.count > maxPlaybackBytes {
+            playbackBuffer = Data()
+        }
+
+        // Schedule first chunk immediately for lowest perceived latency;
+        // coalesce subsequent chunks for smooth playback.
+        if isFirstPlaybackChunk {
+            let chunk = playbackBuffer
+            playbackBuffer = Data()
+            isFirstPlaybackChunk = false
+            schedulePlayback(pcm16Data: chunk)
+            return
+        }
+
         guard playbackBuffer.count >= minPlaybackBytes else { return }
 
         let chunk = playbackBuffer
         playbackBuffer = Data()
-
         schedulePlayback(pcm16Data: chunk)
     }
 
     /// Start a new playback stream (resets buffer).
     func startPlaybackStream() {
         playbackBuffer = Data()
+        isFirstPlaybackChunk = true
         if !playerNode.isPlaying {
             playerNode.play()
         }
@@ -127,6 +149,7 @@ final class AudioEngine {
     func stopPlayback() {
         playerNode.stop()
         playbackBuffer = Data()
+        isFirstPlaybackChunk = true
         isPlaying = false
     }
 
@@ -165,9 +188,10 @@ final class AudioEngine {
                 try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
                 guard let self, self.isCapturing else { continue }
 
-                let previousCount = self.tapFireCount
+                let previousCount = self.tapFireCount.withLock { $0 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 more second
-                if self.tapFireCount == previousCount && self.isCapturing {
+                let currentCount = self.tapFireCount.withLock { $0 }
+                if currentCount == previousCount && self.isCapturing {
                     // Tap stalled — restart
                     self.restartCapture()
                 }

@@ -34,6 +34,7 @@ enum PCMConverter {
         return floatToPCM16(resampled)
     }
 
+    /// Unused — AVAudioEngine handles resampling natively via installTap format parameter.
     /// Linear interpolation resample (good enough for voice at 16kHz target).
     static func linearResample(_ input: [Float], outputCount: Int) -> [Float] {
         guard outputCount > 0, !input.isEmpty else { return [] }
