@@ -272,6 +272,13 @@ mod tests {
     }
 
     #[test]
+    fn playback_stop_serialization() {
+        let event = DaemonEvent::PlaybackStop;
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"type":"playback_stop"}"#);
+    }
+
+    #[test]
     fn interrupted_serialization() {
         let event = DaemonEvent::Interrupted;
         let json = serde_json::to_string(&event).unwrap();
