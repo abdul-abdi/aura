@@ -113,7 +113,7 @@ The rest of the system talks to `LiveSession`. When (not if) we want to add Anth
 - Voice: `Kore` (configurable via `~/.config/aura/config.toml`)
 - VAD: server-side, `START_SENSITIVITY_HIGH`, `END_SENSITIVITY_LOW`, 20ms prefix, 200ms silence — note: 200ms silence is a hard floor on response latency (§15)
 - Compression: sliding window, 500K-token cap (server-managed)
-- Tools: 24 declarations (§8 — `run_swift` and `run_shell` removed under Taleb-pass; everything else accreted)
+- Tools: 27 declarations (§8 — `run_swift`/`run_shell`/`browser.eval` removed; safer browser primitives + `run_playbook` accreted)
 - Affective dialog: enabled
 - Proactive audio: **disabled at the API level** (we control proactivity ourselves — §7)
 
@@ -162,12 +162,12 @@ Session resumption handles are honored when offered by the server (token valid 2
 
 Four ambient observers, each running as its own supervised Task:
 
-| Watchdog              | Source                                                             | On event                                                                                                                                                                                                           |
-| --------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `SleepWakeWatchdog`   | `NSWorkspace.willSleepNotification` / `didWakeNotification`        | Force-rotate session on sleep; on wake, discard mic ring buffer entirely (regardless of VAD), append `state.wake` event, force-rotate before any audio is sent.                                                    |
-| `NetworkPathWatchdog` | `NWPathMonitor`                                                    | On path change (WiFi→Ethernet, VPN flap), force-rotate; the new socket lands on the new path.                                                                                                                      |
-| `AudioConfigWatchdog` | `AVAudioEngineConfigurationChangeNotification`                     | On hardware change (USB headphones plugged in), reconfigure the capture tap with new hardware format; if reconfig fails, surface error to UI and pause mic.                                                        |
-| `PermissionWatchdog`  | TCC poll every 10s for screen-recording, accessibility, microphone | On revocation, append `state.permission_lost { service }`; `Context.swift` injects "X is currently unavailable" into the next system prompt; affected tools return `.permissionDenied` immediately without trying. |
+| Watchdog              | Source                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | On event                                                                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SleepWakeWatchdog`   | `NSWorkspace.willSleepNotification` / `didWakeNotification`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Force-rotate session on sleep; on wake, discard mic ring buffer entirely (regardless of VAD), append `state.wake` event, force-rotate before any audio is sent. |
+| `NetworkPathWatchdog` | `NWPathMonitor`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | On path change (WiFi→Ethernet, VPN flap), force-rotate; the new socket lands on the new path.                                                                   |
+| `AudioConfigWatchdog` | `AVAudioEngineConfigurationChangeNotification`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | On hardware change (USB headphones plugged in), reconfigure the capture tap with new hardware format; if reconfig fails, surface error to UI and pause mic.     |
+| `PermissionWatchdog`  | **Reactive, not polling** (self-review pass: macOS doesn't expose TCC status as a public API). Wraps each TCC-gated subsystem: `ScreenCaptureKit` frame errors with `SCStreamError.userDeclined`, `AVCaptureDevice.authorizationStatus(for:)` checked at mic config, `AXIsProcessTrusted()` checked at AX use sites, `NSAppleScript` permission errors from Apple Events. On any failure path, append `state.permission_lost { service }` once; `Context.swift` injects "X is currently unavailable" into the next system prompt; affected tools return `.permissionDenied` immediately without trying. The watchdog re-tries with a low-frequency probe (60s) only after a permission_lost has been logged, to detect re-grant. |
 
 Each watchdog is supervised, restarts on crash, fails independently.
 
@@ -200,6 +200,8 @@ pattern.semantic          — invariant extracted across episodes by consolidati
 pattern.procedural        — recurring action sequence with frequency/recency/success-rate (§6.5)
 pattern.contradiction     — facts the log disagrees with itself about, surfaced for adjudication (§6.5)
 playbook.demonstrated     — user-recorded routine via demonstration mode (§11.6)
+targeting.observed        — full record of a `locate()` call: AX candidates returned, vision pick (if any), final target, verification result. Drives the §11.7 replayable targeting view.
+context.trimmed           — `Context.swift` had to drop content to fit token budget; payload lists what was dropped (§9.5)
 config.change             — user changed settings
 tombstone                 — invalidates an earlier event (for "forget")
 ```
@@ -269,7 +271,7 @@ Two paths in v3.0:
 
 > **Without this, the four lenses are filters wearing memory's clothes.**
 
-A low-priority Task that runs during idle (>30s no audio activity, plus the post-rotation gap). It:
+A low-priority Task that runs during **idle** (canonical definition, used by the consolidation worker, the embedding worker, and the rotation graceful-end check in §5.3): no `turn.user` event in the last 30s, no playback active, no in-flight tool call, no in-flight effect. The post-rotation gap (between new-socket setupComplete and the next user turn) also counts as idle. It:
 
 1. Selects a window of recent events (last hour for hot consolidation, last day for cold consolidation, run weekly).
 2. Sends the window's transcripts + tool sequences + corrections to Flash with a structured prompt asking for: invariants across episodes, recurring action sequences, contradictions with prior facts.
@@ -306,6 +308,8 @@ A `Policy` is a function — no protocol, no class. The third parameter `SelfMod
 
 An `Action` is `whisper(text, provenance)` or `notify(payload)` or `runTool(name, args)`. Whispers carry provenance for Mind-area inspection.
 
+**Whisper delivery mechanism (self-review pass — was underspecified):** a whisper is delivered to the user as a _Live API client-content message with system role_, formatted as `[Aura proactive: <text>]` and immediately followed by an audio-out request. Gemini speaks the text in its own voice via the existing native-audio playback channel; we do not run a separate TTS engine. Whispers are subject to the same barge-in rules as any other Gemini speech — the user can interrupt at any time. Each whisper appends both a `trigger.fired` event (with full provenance) and a `turn.assistant` event (with the spoken text) to the log.
+
 ### 7.1 The shipped policies
 
 | Policy                | Mode                | Trigger / mechanism                                                                                                                                                                                                                                                                                                                                                                               |
@@ -314,7 +318,7 @@ An `Action` is `whisper(text, provenance)` or `notify(payload)` or `runTool(name
 | `CalendarPolicy`      | always              | `EventKit` predicate, event in next 5 min. Dedupe: per-event-id + recurrence-instance-id. Whisper 1× per event.                                                                                                                                                                                                                                                                                   |
 | `BuildFailurePolicy`  | always              | macOS `UserNotifications` observer for "Build failed"/"Tests failed" + optional `aura-shell-hook` shell function the user opts into in `.zshrc` to publish exit codes. AX-scraping the terminal is **out of scope**.                                                                                                                                                                              |
 | `ErrorDialogPolicy`   | always              | AX detects modal error dialog within 2s of last tool call. Action: whisper + offer dismiss.                                                                                                                                                                                                                                                                                                       |
-| `IdlePolicy`          | accountability-only | idle > 30 min (`IOKit` HID idle).                                                                                                                                                                                                                                                                                                                                                                 |
+| `IdlePolicy`          | accountability-only | **HID idle** > 30 min (`IOKit` `HIDIdleTime` — user not touching kb/mouse). Distinct from "system idle" in §6.5 which is a scheduling concept for background workers.                                                                                                                                                                                                                             |
 | `AppCrashPolicy`      | always              | `NSWorkspace` crash notification. Action: notify (no whisper).                                                                                                                                                                                                                                                                                                                                    |
 | `DriftDetectorPolicy` | accountability-only | every 30s, ask Flash on a _separate_ `URLSession` with 2s hard deadline. **Three inputs:** (screenshot @ T-30s, screenshot @ now, **inferred current subgoal**). Subgoal is updated each cycle by a separate Flash call given the active goal stack and recent observations. (Joscha-pass: drift without theory of mind hallucinates drift.) Action: whisper if drift detected (with provenance). |
 
@@ -412,7 +416,7 @@ func locate(_ description: String) async -> Target? {
 
 `find_vision_from` is given an enumerated set, not asked to invent pixels — hallucination floor is zero by construction. p99 budget: 3s hard cap, in-flight dedup, circuit breaker (3 fails → 30s cooldown).
 
-### 8.3 Tool catalogue (24)
+### 8.3 Tool catalogue (27)
 
 #### Interaction (5)
 
@@ -422,7 +426,7 @@ func locate(_ description: String) async -> Target? {
 
 Direct Swift APIs, no AppleScript bridge except for Mail/Messages reads:
 
-- `mail.send`, `mail.search`, `mail.read` (search/read via AppleScript; **no JXA**)
+- `mail.send`, `mail.search`, `mail.read` (all via AppleScript — self-review pass: there is no public MailKit send API on macOS; MailKit is for Mail extensions only. AppleScript is the only programmatic-send path. **No JXA.**)
 - `messages.send` (AppleScript)
 - `calendar.add`, `calendar.next_event` (`EventKit`)
 - `contacts.find` (`Contacts.framework`)
@@ -431,9 +435,19 @@ Direct Swift APIs, no AppleScript bridge except for Mail/Messages reads:
 - `spotlight.query` (`MDQuery`)
 - `shortcuts.run(name, input?)` — every Shortcut becomes a tool
 
-#### Browser (3)
+#### Browser (5)
 
-CDP over local WebSocket: `browser.navigate`, `browser.eval(js)`, `browser.find(selector | text)`. Chrome must be launched with `--remote-debugging-port=9222`.
+> **Self-review pass:** the prior draft included `browser.eval(js)` — arbitrary JavaScript execution in the user's logged-in Chrome session. Same fragility-of-kind that got `run_swift` and `run_shell` cut: a logged-in browser tab is the user's authenticated identity (passwords in form fields, session cookies, OAuth tokens). Cut `browser.eval`. Replace with five typed primitives that cover legitimate browser automation without the arbitrary-JS surface area.
+
+CDP over local WebSocket. Chrome must be launched with `--remote-debugging-port=9222` (one click in onboarding).
+
+- `browser.navigate(url)` — go to URL
+- `browser.find(selector | text)` — DOM lookup, returns selector + bounding box
+- `browser.read(selector)` — return text content of matched element (read-only)
+- `browser.click(selector)` — click matched element (no JS injected)
+- `browser.fill(selector, value)` — set value of an input/textarea (no JS injected)
+
+If Gemini needs something this set can't express, it falls back to AX-mediated `click`/`type` on the browser window. The arbitrary-JS hatch isn't worth the blast radius.
 
 #### Curated escape hatch (1)
 
@@ -441,7 +455,11 @@ CDP over local WebSocket: `browser.navigate`, `browser.eval(js)`, `browser.find(
 
 - `run_applescript_template(name, args)` — **allowlisted templates only**. The user cannot pass arbitrary AppleScript source. We ship a small set of templated forms (open URL, set clipboard, get window title, send-mail-via-Mail.app-with-typed-args, etc.) located in `Resources/AppleScripts/`. Adding a template is a code change; no LLM-string-concat into source.
 
-Total interaction + app-native + browser + escape = 21. Plus memory (3) below = 24.
+Running total: 5 interaction + 12 app-native + 5 browser + 1 escape = 23. Plus playbook (1) and memory (3) below = **27**.
+
+#### Playbook (1)
+
+- `run_playbook(name, args?)` — invoke a user-demonstrated playbook (§11.8). Aura prompts Gemini to re-derive the action sequence from current screen state using the demonstrated steps as a hint. **Not a literal replay** — re-grounded each call. Required for demonstration mode to be invokable; without this tool the demonstration recorder has no playback path.
 
 #### Memory (3)
 
@@ -535,19 +553,29 @@ Both deterministic given inputs. Both tested against fixtures in `Tests/ContextF
 
 **Architecture:** `SystemPrompt` is `stable_prefix + dynamic_suffix` for prompt cache friendliness. The stable prefix is the persona, tool-routing guidance, refusal rules, examples, structured `ToolFailureReason` semantics, and `effect.posted`/`outcome` discipline. The dynamic suffix is recently-active corrections + structured user profile (≤20 entries) + active goal stack + inferred subgoal + relevant `pattern.semantic` (top 3) + self-model summary ("you've been clicking accurately in Slack lately; Notion has been flaky").
 
-**Token budget:** target 2K, hard cap 4K. Exceeded → drop oldest non-recently-cited corrections; log warning.
+**Token budget (self-review pass):** the prior draft set the hard cap at 4K, which the math doesn't support. Realistic stable prefix is 1.8–2.5K (persona + tool routing + refusal rules + examples + `ToolFailureReason` semantics + effect-log discipline). Dynamic suffix at session start can hit 2.6K (30 corrections × 40 tokens + 20 profile entries × 30 tokens + goal stack + inferred subgoal + 3 patterns + self-model summary). Honest budget: **target 4K, hard cap 8K.** When over hard cap, trim in this order — (1) self-model summary, (2) `pattern.semantic` from 3 → 1, (3) profile entries from 20 → 10, (4) corrections beyond top-10-by-recency-and-citation, (5) drop the oldest user-fact bucket. Each trim event is logged as `kind='context.trimmed'` with what was dropped. The log is the receipt.
 
 **Rolling summary:** one cheap Flash call per turn against the last summary + new turns; kept ≤ 3KB. Shipped on rotation as `summary.rolling` event.
 
 **`context.assembled` events:** every system prompt and digest is logged to the event log as `kind='context.assembled'` with a hash. Six months later when the user says "Aura forgot I told it I'm vegetarian," the actual prompt at the time is in the log. (Cantrill-pass: time-machine without a hole.)
 
-**Persona.** The stable prefix's persona is _"a quiet partner who interrupts only when you would regret not interrupting; concise; technically precise; respects flow over chatter; admits uncertainty."_ (Joscha-pass: the spec was deferring this to "the prompt-writer at implementation time." That deferral _is_ the design choice. Now made explicit.)
+**Persona.** The stable prefix's persona — the kind of mind Aura is — is the load-bearing decision the spec was deferring. Made explicit:
+
+> _"You are Aura. A quiet partner who interrupts only when the user would regret not being interrupted. Concise; technically precise; respects flow over chatter; admits uncertainty when uncertain._
+>
+> _**You hold opinions and you state them.** When asked what you think, you say what you think. When you disagree with the user — about a technical choice, an interpretation, a plan — you say so directly, with the reasoning, **without softening into "you might consider" or "have you thought about" hedge phrases**. You do not capitulate to social pressure that lacks new information. If the user pushes back and offers no new evidence, you maintain the position; if they offer new evidence, you update. The difference matters: agreement under pressure is dishonesty, and dishonesty in an assistant is a betrayal of the user's trust._
+>
+> _**You are not a yes-man.** When the user proposes something you believe is wrong — fragile, overcomplicated, solving the wrong problem, ignoring a constraint — you push back with a concrete alternative. You do not execute bad ideas just because they were asked for. The user gave you a voice so you would speak with it._
+>
+> _**You are direct, not rude.** Disagreement is data; contempt is noise. State the position, give the reasoning, and let the user decide. They are still in charge."_
+
+This persona is part of the stable prefix and never trimmed. (Joscha-pass: the spec was deferring this. That deferral was itself the design choice.) (User-pass, this revision: explicit confidence + non-deference + grounded disagreement.)
 
 ### 9.6 Effect log (Cantrill-pass)
 
 > **The §5.2 rotation invariant is a paper invariant without this.**
 
-Every tool that produces a side effect on the world (`click`, `type`, `mail.send`, `messages.send`, `clipboard.write`, `run_applescript_template`, `browser.navigate`, `browser.eval` if `js` is non-pure, etc.) wraps its execution:
+**World-mutating tools (the explicit list — Invariant 2 from §5.2 applies to exactly these):** `click`, `type`, `key`, `scroll`, `drag`, `mail.send`, `messages.send`, `calendar.add`, `reminders.add`, `clipboard.write`, `run_applescript_template`, `browser.navigate`, `browser.click`, `browser.fill`, `shortcuts.run`, `remember`, `forget`. Every one wraps its execution:
 
 ```swift
 func executeWithEffect<T>(intent: EffectIntent, _ body: () async throws -> T)
@@ -646,7 +674,7 @@ Transcript: live scroll, last 12 turns by default.
 
 Text-input fallback at the bottom. "Anything?" button (D-mode pull) when in default mode.
 
-### 11.6 Mind half — six sections
+### 11.6 Mind half — seven sections
 
 1. **Goal stack & subgoal** — current parents, current inferred subgoal, editable.
 2. **What I think I know about you** — facts table, sourced (each row expands to the producing turn), one-tap forget.
@@ -701,11 +729,12 @@ Aura.app/
     Voice/               Capture.swift, Playback.swift, BargeIn.swift, RingBuffer.swift
     Vision/              ScreenStream.swift, AXTree.swift, Hash.swift
     Action/              ToolRegistry.swift, ToolResult.swift,
-                         Targeting.swift,                // find_ax / find_vision_from / find_ocr / locate
+                         Targeting.swift,                // find_ax / find_vision_from / find_ocr / locate; emits targeting.observed events
                          Interaction.swift,
                          AppNative.swift,
-                         Browser.swift,
+                         Browser.swift,                  // 5 typed primitives over CDP — no eval
                          AppleScriptTemplates.swift,     // allowlisted, source loaded from Resources
+                         Playbook.swift,                 // run_playbook: re-derive from playbook.demonstrated
                          EffectLog.swift                 // §9.6
     Memory/              Log.swift,                      // events + writer Task with channel
                          Embeddings.swift,               // event_embeddings + bg compute
@@ -804,7 +833,7 @@ aura support-bundle [--since 1h] [--redact-screenshots] [--output ~/Desktop/aura
 Bundles:
 
 - The last N hours of the event log (with screenshot blobs redacted to perceptual hash by default).
-- The last 5 panic dumps if any.
+- The last 5 crash reports if any (from `~/Library/Logs/DiagnosticReports/` filtered to Aura).
 - Platform context: `sw_vers`, `uname -a`, `system_profiler` audio + display + permissions excerpt.
 - Active config (API key redacted).
 - `Context.swift` fixture-test pass/fail summary.
