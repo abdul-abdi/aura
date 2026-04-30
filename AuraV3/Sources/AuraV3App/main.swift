@@ -6,7 +6,9 @@ let app = NSApplication.shared
 // before the Swift concurrency runtime's actor executor is involved, so the access is safe.
 // We use MainActor.assumeIsolated to satisfy the type system without a Task hop.
 MainActor.assumeIsolated {
-    _ = AppState.shared  // boots the log and writes session.start
+    let state = AppState.shared  // boots the log and writes session.start
     app.setActivationPolicy(.accessory)
+    _ = MenuBarController(state: state)
+    _ = FloatingPanelController.shared  // forces lazy init + hotkey registration
 }
 app.run()
