@@ -3,7 +3,11 @@ import Security
 
 public enum KeychainError: Error, CustomStringConvertible {
     case unhandled(OSStatus)
-    public var description: String { "keychain error: \(self)" }
+    public var description: String {
+        switch self {
+        case .unhandled(let status): return "keychain error: unhandled OSStatus \(status)"
+        }
+    }
 }
 
 public enum Keychain {
