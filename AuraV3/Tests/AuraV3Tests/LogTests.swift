@@ -14,7 +14,7 @@ final class LogTests: XCTestCase {
     }
 
     func test_appendAndQueryByKind() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         await log.append(kind: EventKind.turnUser, payload: .object(["text": .string("hi")]))
         await log.append(kind: EventKind.turnAssistant, payload: .object(["text": .string("hello")]))
         try await log.flush()
@@ -25,7 +25,7 @@ final class LogTests: XCTestCase {
     }
 
     func test_correlationLookup_pairsEffectPostedWithOutcome() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         let cid = UUID().uuidString
         await log.append(kind: EventKind.effectPosted, correlationID: cid,
                           payload: .object(["intent": .string("click")]))
@@ -40,7 +40,7 @@ final class LogTests: XCTestCase {
     }
 
     func test_tombstone_excludesEventFromQuery() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         let id = try await log.appendAndReturnID(kind: EventKind.fact,
                                                   payload: .object(["v": .string("kenya")]))
         try await log.flush()
@@ -54,7 +54,7 @@ final class LogTests: XCTestCase {
     }
 
     func test_orderingIsByMonotonicClock_notWallClock() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         await log.appendRaw(kind: EventKind.turnUser, tsWall: 1000, tsMono: 100, payload: .null)
         await log.appendRaw(kind: EventKind.turnUser, tsWall: 999, tsMono: 200, payload: .null)
         await log.appendRaw(kind: EventKind.turnUser, tsWall: 1001, tsMono: 300, payload: .null)
@@ -66,7 +66,7 @@ final class LogTests: XCTestCase {
 
     /// Amendment D: gemini_call_id roundtrip + indexed lookup.
     func test_geminiCallID_roundtrips() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         await log.append(kind: EventKind.turnToolCall,
                           geminiCallID: "call-abc-123",
                           payload: .object(["name": .string("click")]))
@@ -79,7 +79,7 @@ final class LogTests: XCTestCase {
 
     /// Amendment Q: flush returns AFTER the barrier is processed, not via sleep loop.
     func test_flush_barrierWaitsForPriorWrites() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         for i in 0..<200 {
             await log.append(kind: EventKind.turnUser, payload: .object(["i": .number(Double(i))]))
         }

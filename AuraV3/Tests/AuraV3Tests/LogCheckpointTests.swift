@@ -14,7 +14,7 @@ final class LogCheckpointTests: XCTestCase {
     }
 
     func test_passiveCheckpointSucceeds() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         for i in 0..<100 {
             await log.append(kind: EventKind.stateObservation,
                               payload: .object(["i": .number(Double(i))]))
@@ -26,7 +26,7 @@ final class LogCheckpointTests: XCTestCase {
 
     /// Amendment F: TRUNCATE is gated. Without idle conditions met, returns false.
     func test_checkpointIfIdle_skipsWhenRecentTurnUser() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         // Stamp a recent turn.user — should disqualify TRUNCATE.
         await log.append(kind: EventKind.turnUser, payload: .object(["text": .string("hi")]))
         try await log.flush()
@@ -37,7 +37,7 @@ final class LogCheckpointTests: XCTestCase {
 
     /// Idle conditions met → TRUNCATE should run when WAL exceeds threshold.
     func test_checkpointIfIdle_truncatesWhenIdle() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         // Append non-critical events only (no turn.user, no unmatched effect.posted)
         for i in 0..<50 {
             await log.append(kind: EventKind.stateObservation,
@@ -52,7 +52,7 @@ final class LogCheckpointTests: XCTestCase {
 
     /// In-flight effect (effect.posted without outcome) blocks TRUNCATE.
     func test_checkpointIfIdle_skipsWhenInFlightEffect() async throws {
-        let log = try await Log.open(path: dbPath)
+        let log = try Log.open(path: dbPath)
         await log.append(kind: EventKind.effectPosted,
                           correlationID: "cid-1",
                           payload: .object(["intent": .string("click")]))

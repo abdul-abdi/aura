@@ -65,7 +65,9 @@ public actor Log {
 
     // MARK: - Open
 
-    public static func open(path: String) async throws -> Log {
+    /// Amendment J: synchronous open — DB creation and schema setup are blocking C calls.
+    /// The drop-policy install and writer Task are fire-and-forget via `bootstrap()`.
+    public static func open(path: String) throws -> Log {
         let db = try SQLite.open(path: path)
         // Amendment D: schema includes gemini_call_id column.
         try db.exec("""
@@ -104,9 +106,16 @@ public actor Log {
         """)
 
         let log = Log(db: db, path: path)
-        await log.installDropPolicy()
-        await log.startWriter()
+        // Fire-and-forget: installDropPolicy runs before startWriter (FIFO within the actor).
+        // The AsyncChannel buffers up to 4096 events; nothing fills that in the bootstrap gap.
+        Task { await log.bootstrap() }
         return log
+    }
+
+    /// Runs drop-policy install then starts the writer, both on the actor, in order.
+    private func bootstrap() async {
+        await installDropPolicy()
+        startWriter()
     }
 
     private init(db: SQLite, path: String) {
