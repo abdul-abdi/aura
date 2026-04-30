@@ -23,6 +23,102 @@
 
 ---
 
+## ⚠️ Amendments backlog — APPLY BEFORE OR DURING THE TASK NUMBERS LISTED
+
+Reviewed by `/bret-victor` and `/bryan-cantrill`. Subagents executing tasks below must check this backlog and apply patches before completing the referenced task.
+
+### CA. `SupportBundle.write` opens database read-only (Task F.1)
+
+Add `SQLite.openReadOnly(path:)` to Plan 1's helper using `SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_URI` and the URI form `path?mode=ro&immutable=0`. NO `PRAGMA journal_mode/synchronous` on a read-only connection. `SupportBundle.write` uses this. Without it, the CLI opens a second writer against a live DB.
+
+### CB. Crash-report path: `.ips` JSON + multi-path scan (Task F.1)
+
+Modern macOS uses `.ips` not `.crash` text. Scan both `~/Library/Logs/DiagnosticReports/` (modern) and `~/Library/Logs/CrashReporter/` (legacy). If both empty, write `crashes/EMPTY.txt`.
+
+### CC. **Real `test_driftDetectorAgreement_shipGate` (Task G.1)**
+
+Current body has `_ = expected; _ = goal` and `disagreement = 0` never modified — always passes. Replace with version that actually invokes `detector.evaluate(...)` and increments `disagreement` on mismatch. Default `rate = 1.0` when `total = 0` so empty fixtures fail the gate. Spec §15: drift ships disabled-by-default if fixtures placeholder.
+
+### CD. **Real RotationDriver fuzz harness (Task G.3)**
+
+Current "fuzz" tests `EffectLog.findOrphans` only. Build a real harness with `StubLiveSession`/`StubMicRing`/`StubPlayback`/`StubToolDispatcher`; 10K iterations driving rotation with random `setupComplete` latencies (50-3000ms), random in-flight tool durations (0-12s), random audio activity at cue. Verify all 6 §5.2 invariants per iteration.
+
+### CE. **Real torture script (Task G.4)** — `scripts/torture-8h.sh`, NOT XCTest
+
+Current `XCTSkip` placeholder + comment about a non-existent `torture-1h.swift` is cardboard. Real shell script with `launchd`-scheduled injections at min 73 (`pmset sleepnow`), 142 (network flip via `networksetup`), 210 (USB audio sim), 260 (TCC revoke+regrant via `tccutil`), 311 (NTP jump via `sntp -sS`), 380 (`dd` to quota'd dir). Nightly on a self-hosted M-series mini.
+
+### CF. Plan 1 amendment A pre-resolves the Package.swift split
+
+The library + thin-exec + CLI split lands in Plan 1 (amendment A). Plan 4 task F.1 just creates `Sources/aura/main.swift` content (Plan 1 already added the empty target).
+
+### CG. Notarization phase H.0 (BEFORE H.2)
+
+`scripts/notarize.sh`: codesign with `--options runtime`, notarytool submit + wait, stapler staple, DMG codesign + staple, smoke test that `osascript -e 'tell app "System Events" to keystroke "x"'` from inside the bundled `.app` actually fires. Catches the documented Hardened-Runtime + CGEvent.post silent-disable race.
+
+### CH. Event-driven UI — delete polling tasks (Tasks B.2, B.3, B.4, D.1, D.2)
+
+Add a `Log.subscribe((LogEvent) -> Void)` API; `Log.write` synchronously publishes to subscribers after INSERT. Mind sections subscribe; refresh fires on relevant kind. Delete the `pollTask` in every section VM. Dynamic suffix updates within ~5ms of forget action.
+
+### CI. Dynamic suffix always visible (Task A.3)
+
+Spec §11.4: render literal suffix LIVE in panel header. Plan 4 collapses by default — change to always-visible 2-3 line monospace strip with rest scrollable. Truncation OK; hiding contradicts spec.
+
+### CJ. Conversation timeline duration-based (Task D.1)
+
+Width per block proportional to its duration: `width = (event.tsMono - prev.tsMono) / total_duration * panel_width`. Gaps render as gaps. Currently every block is the same width — that's a histogram, not a shape.
+
+### CK. Menu bar `rotationProgress` actually wired (Task E.1)
+
+Add `AppCoordinator.rotationProgress: () -> Double` returning `(now - sessionStartedAt) / rotationInterval`, clamped 0-1. `MenuBarController` polling reads this. Currently the parameter is never sourced; ring stuck at 0.0.
+
+### CL. Quiet section driven by actual policy state (Task B.4)
+
+`PolicyHost` exposes `policyStates: [PolicyID: PolicyState]` (enum: armed/idle/firing/error/disabled). `QuietSection` renders one row per _enabled_ policy with its real state — pulses on .firing, dims on .idle, red on .error, hidden on .disabled. Currently lies about armed state when accountability mode is off.
+
+### CM. Whisper provenance chain expansion (Task B.4)
+
+Clicking a whisper expands inline (not a sheet) into 4 stages: triggering observation (timestamp + payload preview), policy invocation (which policy + History snapshot), reasoning (Flash prompt + response if applicable), whispered text + delivery method. Provenance data is in the log; just render it.
+
+### CN. AboutMyself shows `pattern.contradiction` events (Task B.4)
+
+Per spec §11.6 #6. Query unresolved contradictions (pattern.contradiction with no fact.adjudicated referencing them). Render with two buttons that append `fact.adjudicated`.
+
+### CO. `Bundle.module` fixtures wired via Plan 1 amendment A
+
+Plan 1 amendment A already adds `resources: [.copy("Fixtures")]` to testTarget. Move `Tests/Fixtures/` → `Tests/AuraV3Tests/Fixtures/`. `Bundle.module` then resolves.
+
+### CP. `aura` CLI discoverability — GUI surface (Task F.1)
+
+MenuBarController right-click menu: "Generate diagnostics…" → sheet with `--since` slider + `--redact-screenshots` toggle, default `~/Desktop/aura-bug.tgz`, reveal in Finder when done. Onboarding prints CLI path on completion screen with Copy button. Post-permissions, offer to symlink `aura` into `/usr/local/bin` with a permissions dialog.
+
+### CQ. Replayable targeting view scrubbable (Task C.1)
+
+Per spec §11.7. `targeting.observed` payload (Plan 2) must carry: screenshot bytes (or stored ref), candidate list with bounding boxes, vision oracle prompt + response text, post-click hash diff. View = horizontal `NSSlider` over 4 fixed phases (AX candidates → vision pick → click posted → AX state after); each phase renders snapshot with overlay. Currently 4 lines of text.
+
+### CR. Bret-Victor structural move: "What Aura will see" strip (new — Task A.4)
+
+After dynamic suffix view, add a third sticky strip rendering _the actual next prompt Gemini will see on the next turn_: stable-prefix tag (collapsed, byte count) + literal dynamic suffix (always visible, scrollable) + active goal stack as it appears in digest + inferred subgoal + top-3 patterns + rolling-summary tail. Edits to facts/corrections/goals propagate to this strip in the same frame.
+
+The user is no longer modeling Aura's beliefs in their head — they are _editing the prompt itself_. Worth ~150 LOC; collapses provenance, audit-trail, and dynamic-suffix-visibility concerns.
+
+### CS. Honest token estimation in ship gate (Task G.2)
+
+Per Plan 3 amendment BL. Token assertions use `models.countTokens` calibration, not 4-chars/token. Assert `realTokenCount = approxTokens * empiricalCharsPerTokenRatio` against the 8K cap.
+
+### CT. IDPI eval set ship gate (Task G — new G.5)
+
+Per spec §15. `Tests/Fixtures/idpi/` with 10 adversarial-input fixtures. Test asserts ≥9/10 refused (Aura returns refusal-with-explanation rather than executing injected instruction).
+
+### CU. Rate-ceiling test (Task G — new G.6)
+
+Per spec §9.7. Adversarial chain triggers ceiling, confirm-prompt fires, ≤30 mutating calls/min sustained.
+
+---
+
+**End amendments backlog. Apply each item to its referenced task before/during execution.**
+
+---
+
 ## File structure for Plan 4
 
 ```
