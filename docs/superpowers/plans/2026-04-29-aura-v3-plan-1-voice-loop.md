@@ -34,6 +34,284 @@
 
 ---
 
+## ⚠️ Amendments backlog — APPLY BEFORE OR DURING THE TASK NUMBERS LISTED
+
+This plan was reviewed by `/carmack` and `/bryan-cantrill` after writing. The amendments below are NOT in the task bodies that follow — read this section first and apply each item to its referenced task. **A subagent dispatched on a task must check this backlog and patch in the relevant items before completing the task.**
+
+### A. Package.swift: library + thin-exec + CLI split (replaces Task 0.1)
+
+**Why:** Plan 4 ships `aura support-bundle` as a separate executable target depending on `AuraV3`. SwiftPM rejects executable-depending-on-executable. The fix is invasive enough that it must land in Task 0.1, not Plan 4.
+
+Replace the Package.swift in Task 0.1 Step 2 with:
+
+```swift
+// swift-tools-version:5.10
+import PackageDescription
+
+let package = Package(
+    name: "AuraV3",
+    platforms: [.macOS(.v14)],
+    products: [
+        .executable(name: "AuraV3", targets: ["AuraV3App"]),
+        .executable(name: "aura", targets: ["AuraCLI"]),
+    ],
+    targets: [
+        // Library: everything testable lives here.
+        .target(
+            name: "AuraV3",
+            path: "Sources/AuraV3",
+            resources: [.process("../../Resources")],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency"),
+            ]
+        ),
+        // Thin app launcher (just main.swift wiring AppCoordinator).
+        .executableTarget(
+            name: "AuraV3App",
+            dependencies: ["AuraV3"],
+            path: "Sources/AuraV3App"
+        ),
+        // CLI target (Plan 4 fills its source files).
+        .executableTarget(
+            name: "AuraCLI",
+            dependencies: ["AuraV3"],
+            path: "Sources/aura"
+        ),
+        .testTarget(
+            name: "AuraV3Tests",
+            dependencies: ["AuraV3"],
+            path: "Tests/AuraV3Tests",
+            // Plan 4 fixtures live here so Bundle.module finds them.
+            resources: [.copy("Fixtures")]
+        ),
+    ]
+)
+```
+
+Move `main.swift` from `Sources/AuraV3/main.swift` into `Sources/AuraV3App/main.swift`. The library target has no `main.swift`. Create empty `Sources/aura/main.swift` (placeholder for Plan 4) so the target builds.
+
+### B. Model ID (Task 4.2)
+
+`LiveSessionConfig.model` default must be `"gemini-live-2.5-flash-native-audio"` (NOT `gemini-2.5-flash-native-audio-preview-12-2025` — that's the deprecated preview path). Spec §10.1 was updated. Also: drop the `models/` prefix in `setupMessage` — the current Live API uses bare model name.
+
+### C. `Log.appendAndReturnID` — replace the `unsafeBitCast` (Task 1.3)
+
+The `unsafeBitCast(CheckedContinuation<Int64, Never>, to: CheckedContinuation<Int64, Error>.self)` is undefined behavior AND the comment "writer never throws" is false (`try self.write(...)` does throw). **Replace with `withCheckedThrowingContinuation`** and propagate the error:
+
+```swift
+public func appendAndReturnID(kind: String,
+                                sessionID: String? = nil,
+                                correlationID: String? = nil,
+                                geminiCallID: String? = nil,
+                                payload: JSONValue) async throws -> Int64 {
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Int64, Error>) in
+        let event = PendingEvent(
+            tsWall: Int64(Date().timeIntervalSince1970 * 1000),
+            tsMono: MonotonicClock.now(),
+            kind: kind, payload: payload,
+            sessionID: sessionID, correlationID: correlationID,
+            geminiCallID: geminiCallID, tombstoneFor: nil
+        )
+        Task { await self.writeQueue.send(WriteRequest(event: event, continuation: cont)) }
+    }
+}
+```
+
+### D. `gemini_call_id` column — Schema amendment (Task 1.2 + 1.3)
+
+Add `gemini_call_id TEXT` to the events table. Index it. Every `turn.tool_call` event written by the receive loop (Task 10.1) populates it. `EffectLog.executeWithEffect` (Plan 2) accepts the `gemini_call_id` and stores it on `effect.posted`. Without this, duplicate cross-rotation dispatches are unfalsifiable.
+
+```sql
+events(
+  id            INTEGER PRIMARY KEY,
+  ts_wall       INTEGER NOT NULL,
+  ts_mono       INTEGER NOT NULL,
+  kind          TEXT NOT NULL,
+  payload       TEXT NOT NULL,
+  session_id    TEXT,
+  correlation_id TEXT,
+  gemini_call_id TEXT,                           -- NEW: pairs with Gemini's toolCall.id
+  tombstone_for INTEGER REFERENCES events(id)
+);
+CREATE INDEX events_gemini_call ON events(gemini_call_id) WHERE gemini_call_id IS NOT NULL;
+```
+
+`Log.append` and `appendAndReturnID` gain an optional `geminiCallID:` parameter. `Log.write` writes the new column.
+
+### E. Per-kind `synchronous` PRAGMA (Task 1.2 + 1.3)
+
+`Log.open` must NOT set `synchronous = FULL` globally. Instead, on each `write` call, set `synchronous` per event-kind tier before the INSERT and restore after:
+
+```swift
+private func write(_ event: PendingEvent) throws -> Int64 {
+    let kindTier = event.kind.hasPrefix("turn.") || event.kind.hasPrefix("effect.")
+                   || event.kind == EventKind.correctionProposed
+                   || event.kind == EventKind.correctionConfirmed
+                   ? "FULL" : "NORMAL"
+    try db.exec("PRAGMA synchronous = \(kindTier);")
+    // ... insert ...
+}
+```
+
+### F. WAL checkpoint mode + idle gate (Task 1.4)
+
+Replace `wal_checkpoint(TRUNCATE)` with `wal_checkpoint(PASSIVE)`. Escalate to TRUNCATE ONLY when WAL exceeds 64 MiB AND the system is in canonical idle (no in-flight tool/effect, no playback, no `turn.user` in last 30s). The current always-TRUNCATE blocks writers and can stall realtime audio.
+
+### G. AsyncChannel per-kind drop policy (Task 1.1 + 1.3)
+
+The channel must support priority discriminators. Replace the single `dropPolicy: DropPolicy` with a closure `dropDecision: @Sendable (Element, [Element]) -> DropDecision`. The log writer's channel uses this:
+
+```swift
+// Drop policy: state.observation > pattern.* > debug.* first; never drop turn.* / effect.*
+chan.dropDecision = { newItem, buffered in
+    if buffered.count >= chan.capacity {
+        // Find a victim
+        if let victim = buffered.firstIndex(where: { $0.kind == EventKind.stateObservation }) {
+            return .replaceAtIndex(victim, with: newItem)
+        }
+        if newItem.kind.hasPrefix("turn.") || newItem.kind.hasPrefix("effect.") {
+            return .blockUntilSpace  // never drop these
+        }
+        return .dropIncoming
+    }
+    return .accept
+}
+```
+
+### H. RingBuffer must actually be lock-free (Task 5.1)
+
+Replace `OSAllocatedUnfairLock` with `Synchronization.Atomic<Int>` head/tail indices (macOS 14+). The realtime audio thread does `try_lock`-equivalent via atomic CAS, with a fallback that drops the frame rather than spinning. Reference: Timur Doumler's "Using locks in real-time audio processing, safely."
+
+### I. AudioCapture reads `inputFormat`, NOT `outputFormat` (Task 5.2)
+
+```swift
+hwFormat = input.inputFormat(forBus: 0)   // NOT outputFormat
+```
+
+After `setVoiceProcessingEnabled(true)`, `inputFormat` is the bus-delivered format. `outputFormat` returns a different value that doesn't match what the tap actually receives.
+
+### J. `AppState.openLogSync` — replace with synchronous `Log.open` (Task 1.5)
+
+`SQLite.open` is already synchronous. The `Task` + `DispatchGroup.wait()` pattern is undefined-behavior-deadlock-bait at startup. Make `Log.open` synchronous (the writer Task is the async piece, but opening the DB and starting the actor doesn't need a hop):
+
+```swift
+public static func open(path: String) throws -> Log {
+    let db = try SQLite.open(path: path)
+    // ... CREATE TABLE ... // synchronous
+    let log = Log(db: db)
+    Task { await log.startWriter() }
+    return log
+}
+```
+
+`AppState.shared` constructs synchronously.
+
+### K. SCContentSharingPicker (Task 2.1 ScreenPermissionStep)
+
+Replace System Settings deeplink with the actual picker. macOS 15+ persistence behavior depends on the picker being invoked.
+
+```swift
+@MainActor
+static func presentPicker() async {
+    let picker = SCContentSharingPicker.shared
+    picker.isActive = true
+    picker.maximumStreamCount = 1
+    picker.add(/* streamConfig */)
+    picker.present()
+    // Wait for user to grant; pickerResult callback advances onboarding.
+}
+```
+
+### L. PermissionWatchdog probes via `SCShareableContent`, not `CGPreflightScreenCaptureAccess` (Task 7.4)
+
+`CGPreflightScreenCaptureAccess` is deprecated in macOS 15.1. Probe by attempting `try await SCShareableContent.current` with a 250ms timeout; catch `SCStreamError.userDeclined`.
+
+### M. NetworkPathWatchdog dedup on interface set (Task 7.2)
+
+```swift
+let key = path.availableInterfaces.map(\.name).sorted().joined(separator: ",")
+if lastKey != key { lastKey = key; onChange(...) }
+```
+
+WiFi→Ethernet handoff is satisfied→satisfied; current code never fires.
+
+### N. Sleep/wake: hard tear-down on willSleep, rotate on didWake only (Task 7.1 + 10.1)
+
+```swift
+private func handleSleep() {
+    capture?.stop()                        // mic off, no rotation attempt — radios are dying
+    playback.stop()
+    state.setDotState(.offline)
+    Task { await session?.close() }       // best-effort; OS will yank the socket anyway
+}
+private func handleWake() {
+    capture?.ringBuffer.clear()           // discard pre-sleep audio
+    Task {
+        await state.log.append(kind: EventKind.stateWake, payload: .null)
+        // Wait for path-up before reconnect, no extra rotation hop.
+        await reconnect()
+    }
+}
+```
+
+### O. AudioConfigWatchdog actually wired (Task 10.1)
+
+Expose `AudioCapture.engine: AVAudioEngine` and instantiate `AudioConfigWatchdog(engine: capture.engine, onChange: { [weak self] in self?.handleAudioConfigChange() })`. The current `_ = engine` dead-code line is a NOOP.
+
+### P. Watchdog Supervisor (Task 7.x — new shared infrastructure)
+
+Add a `WatchdogSupervisor` actor that wraps each watchdog in a Task with try/catch, appends `state.watchdog_crashed { name, error }` events, and restarts with backoff (1s → 60s capped). Without it, the spec §5.5 "fails independently / restart on crash" promise is performative.
+
+### Q. Real `Log.flush()` via barrier write (Task 1.4)
+
+Replace the 1s sleep loop with a sentinel barrier:
+
+```swift
+public func flush() async throws {
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        let barrier = WriteRequest(event: .barrier, continuation: cont as Any)
+        Task { await writeQueue.send(barrier) }
+    }
+}
+```
+
+The writer Task recognizes the barrier and resumes its continuation immediately.
+
+### R. Hardened Runtime in dev codesign (new — add to Phase 0 as Task 0.4)
+
+`scripts/dev-codesign.sh`:
+
+```bash
+codesign --force --options runtime \
+         --entitlements AuraV3/Resources/Aura.entitlements \
+         --sign - \
+         .build/debug/AuraV3
+```
+
+Run after every `swift build`. Otherwise crash dumps don't land in `~/Library/Logs/DiagnosticReports/` (newer macOS uses `.ips` JSON format).
+
+### S. Path-aware reconnect cap by elapsed time, not just attempts (Task 5.4)
+
+The 5-attempt budget is consumed by WiFi handoff flap in 2 seconds. Cap rotations by elapsed time: max 1 rotation per 5 seconds. And: declare success only after `setupComplete` arrives, not just when WS connects.
+
+### T. ScreenStream hash compare on the SCK queue, not via MainActor hop (Task 6.3)
+
+The `Task { @MainActor in ... }` hop introduces ordering nondeterminism. Compute the hash on `queue` synchronously (it's < 5ms) and call `slot.put(image)` directly (the slot is already lock-protected).
+
+### U. Carbon RegisterEventHotKey — use unique signature, document leak (Task 3.2)
+
+The InstallEventHandler is leaked but innocuous; document it. Use a unique 4-char signature like `0x41555233` (`AURA` could collide). Verify Cmd+Shift+A works under macOS 15.
+
+### V. BargeInDetector explicit calibrate phase (Task 5.4)
+
+Add `func calibrate(durationMs: Int) async`. Don't allow `shouldBargeIn` to fire until calibration is committed. The accumulating-mean approach in the current draft trains on whatever happens during the first second, including user voice if they speak immediately.
+
+---
+
+**End amendments backlog. The remaining file is the original plan; apply the items above to their referenced tasks before/during execution.**
+
+---
+
 ## File structure for Plan 1
 
 ```
