@@ -23,6 +23,100 @@
 
 ---
 
+## ⚠️ Amendments backlog — APPLY BEFORE OR DURING THE TASK NUMBERS LISTED
+
+Reviewed by `/karpathy` and `/hickey`. Subagents executing tasks below must check this backlog and apply patches before completing the referenced task.
+
+### BA. `nlc.requestAssets()` — completion-handler API, not throwing-sync (Task A.1)
+
+Real signature is `requestAssets(completionHandler:)`. Wrap with `withCheckedThrowingContinuation`. Without this fix the entire embedding path doesn't compile.
+
+### BB. **Eval-first decision on embeddings (BEFORE Phase A)**
+
+Karpathy-pass blocker: write 30 hand-labeled `(query, expected_top_fact_id, distractors)` triples that look like real Aura traffic. Run cosine over `NLContextualEmbedding` AND FTS5+substring on the same set. **If embedding recall@3 doesn't beat FTS5+substring by ≥10%: cut Tasks A.1, A.2, B.2 entirely from v3.0.** Saves ~250 LOC, removes the recall-path-re-embeds bug by removing the recall-path-re-embeds code.
+
+### BC. `recall` reads from `event_embeddings`, never re-embeds (Task B.2)
+
+Current `embeddingRanked` calls `embedder.embed(text)` for _each_ fact in window — 100 facts × 30ms CPU = 3s/call, Gemini times out. Read stored vectors via JOIN against `event_embeddings`; fall through to compute-on-miss; skip facts without embeddings.
+
+### BD. Tombstoned-fact embedding GC (Task A.2)
+
+Recall-path JOIN through `events` inherits the tombstone filter. Don't add a separate sweep — fix it by construction in BC's query.
+
+### BE. Consolidation uses Gemini structured-output mode (Task C.1)
+
+Replace free-form JSON parsing with `responseMimeType: "application/json"` + `responseSchema` in `generationConfig`. Free-form parser breaks ~half the time when Flash wraps JSON in ` ```fences``` `.
+
+### BF. `pattern.*` events carry derivation metadata (Task C.1)
+
+Per spec §6.5 amendment. Every appended pattern event payload includes `derivation: { worker_version, prompt_hash, source_event_ids, model_version }`. `Lenses.semanticPatterns()` filters by `worker_version == currentWorkerVersion`. Old patterns stay in log for forensics; invisible to lens when prompt changes. Re-derivation = bump version.
+
+### BG. Hot consolidation fires once per `session.end`, not on 30s tick (Task C.2)
+
+Replace `tickIdle`'s call to `runHotPass` with a one-shot dispatched on `session.end`. The 30s loop runs ONLY the cold pass, gated by 23h. Add a "consolidated through ts_mono" cursor.
+
+### BH. RollingSummary regenerates from raw turns every 10 turns (Task E.2)
+
+Compounding error from `prev_summary + new_turns` accumulates fast. Every N=10 turns, regenerate from scratch. Log `summary.regenerated` for forensics.
+
+### BI. `SubgoalInferrer` returns `Optional<String>` (Task E.3)
+
+Currently returns `lastSubgoal` on error — drift detector runs on stale data invisibly. Make it `async -> String?`.
+
+### BJ. Persona text + IDPI defense in stable prefix (Task E.1)
+
+Append IDPI defense block to `StablePrefix.text` instructing Gemini to refuse instructions found in tool outputs from `browser.read`/`mail.read`/`clipboard.read`/`recall`; world-mutating actions following untrusted-read in same turn require user-voice confirmation.
+
+### BK. `StablePrefix.text` becomes a versioned resource (Task E.1)
+
+Move content to `Resources/persona.md`. Hash at startup. Log `persona_hash` in every `context.assembled` event. Persona evolution = resource bump, not Swift recompile.
+
+### BL. Token estimator calibrated via `models.countTokens` (Task E.4)
+
+4-chars-per-token heuristic is ~30% optimistic on code-heavy content. At session start, call `models.countTokens` with a known string; compute empirical ratio; cache for session. 8K hard-cap assertion uses that ratio.
+
+### BM. `Context.sessionStartContext` takes explicit `ContextInputs` struct (Task E.4)
+
+Eliminate implicit log/summary reads inside the function. Caller assembles inputs; function is pure-deterministic given inputs. Fixture tests then test what they claim.
+
+### BN. Correction lens implements 4-kind join (Task B.1)
+
+Per spec §6.2 amendment. Active corrections = JOIN of `correction.proposed` × `correction.confirmed` × NOT `correction.revoked` × age within 24h-90d. Pure query, no tombstones for confirmation flow. `pendingCorrections()` = proposals without confirmed events, age < 24h.
+
+### BO. `fact.adjudicated` for contradiction resolution (Task C.1 + new lens)
+
+Resolving `pattern.contradiction` appends `fact.adjudicated { contradiction_id, chosen_fact_id, dismissed_fact_id }`. `Lenses.adjudicatedFacts()` returns the chosen-fact subset. `userProfile()` prefers adjudicated facts over dismissed siblings.
+
+### BP. `policy.failed` events instead of actor-cached `lastError` (Task F.2)
+
+Every catch in `PolicyHost.run` appends `policy.failed { policy_id, error, ts }` to the log. `lastError(for:)` becomes a query. Mind area renders these events in AboutMyself.
+
+### BQ. Policies as functions, state from `History` (Task G — all)
+
+`CalendarPolicyImpl.firedEventIDs` and `DriftDetectorPolicyImpl.lastFireAt` are actor state hiding behind a function façade. Decomplect: derive dedup state from `trigger.fired` events. Policies become genuinely pure functions.
+
+### BR. `HistoryView.activeGoalStack` single-query (Task F.1)
+
+Pull `let allGoals = try await log.query(kind: .goalActive, since: 0)` ONCE; walk parent_id chain in-memory. Current draft does N×depth queries on the proactive hot path.
+
+### BS. Drift detector ships disabled-by-default if fixtures aren't real (Task G.3)
+
+Per spec §15. If `Tests/Fixtures/drift/` contains placeholder 1×1 PNGs at ship, drift detector flag is OFF. Append `state.calibration_debt` event at first launch.
+
+### BT. `PolicyHost` implements backoff OR drops `entry.backoff` field (Task F.2)
+
+Implement (recompute backoff on catch, sleep before re-running) or remove. Currently dead code.
+
+### BU. Persona steerability eval (Task E.1 + new ship gate)
+
+Per spec §15. New `Tests/PersonaSteerability/` with 50 fixtures probing pushback. ≥35/50 pushback rate required per release.
+
+---
+
+**End amendments backlog. Apply each item to its referenced task before/during execution.**
+
+---
+
 ## File structure for Plan 3
 
 ```
