@@ -58,8 +58,10 @@ public actor Log {
     // MARK: - State
 
     private let db: SQLite
+    private let path: String
     private let writeQueue: AsyncChannel<WriteRequest>
     private var writerTask: Task<Void, Never>?
+    private var checkpointTask: Task<Void, Never>?
 
     // MARK: - Open
 
@@ -101,14 +103,15 @@ public actor Log {
             );
         """)
 
-        let log = Log(db: db)
+        let log = Log(db: db, path: path)
         await log.installDropPolicy()
         await log.startWriter()
         return log
     }
 
-    private init(db: SQLite) {
+    private init(db: SQLite, path: String) {
         self.db = db
+        self.path = path
         // Capacity 4096 with custom drop decision installed after init.
         self.writeQueue = AsyncChannel(capacity: 4096, dropPolicy: .never)
     }
@@ -421,8 +424,109 @@ public actor Log {
 
     /// Stops accepting new writes, drains the queue, and closes the database.
     public func shutdown() async {
+        checkpointTask?.cancel()
+        checkpointTask = nil
         await writeQueue.finish()
         _ = await writerTask?.value
         db.close()
+    }
+}
+
+// MARK: - WAL checkpoint (Amendment F)
+
+extension Log {
+
+    /// PASSIVE checkpoint — non-blocking, safe to call frequently.
+    ///
+    /// Readers and writers are not interrupted. SQLite moves pages from the WAL
+    /// back into the database file opportunistically. This is the default
+    /// periodic path (every 5 minutes via `startPeriodicCheckpoint()`).
+    public func checkpoint() async throws {
+        try db.exec("PRAGMA wal_checkpoint(PASSIVE);")
+    }
+
+    /// Conditional TRUNCATE checkpoint. Returns true if TRUNCATE ran.
+    ///
+    /// Gated on three conditions (Amendment F):
+    ///  1. WAL file size > `walThresholdBytes` (default 64 MiB)
+    ///  2. No `turn.user` event in the last 30 seconds
+    ///  3. No `effect.posted` without a matching `effect.outcome` (in-flight effects)
+    ///
+    /// Playback state is NOT checked here — Task 10.1 wires it via AppCoordinator.
+    /// Falls back to PASSIVE if any gate is not met (keeps WAL bounded over time).
+    public func checkpointIfIdle(walThresholdBytes: Int64 = 64 * 1024 * 1024) async throws -> Bool {
+        // Gate 1: WAL file size
+        let walPath = walFilePath()
+        let walSize: Int64
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: walPath),
+           let size = attrs[.size] as? NSNumber {
+            walSize = size.int64Value
+        } else {
+            walSize = 0
+        }
+        guard walSize >= walThresholdBytes else {
+            try db.exec("PRAGMA wal_checkpoint(PASSIVE);")
+            return false
+        }
+
+        // Gate 2: No recent turn.user (within last 30 seconds)
+        let cutoff = MonotonicClock.now() &- UInt64(30 * 1_000_000_000)
+        let hasRecentTurnUser: Bool = try {
+            let stmt = try db.prepare("""
+                SELECT 1 FROM events
+                WHERE kind = 'turn.user' AND ts_mono >= ?
+                LIMIT 1;
+            """)
+            defer { stmt.finalize() }
+            stmt.bind(1, Int64(bitPattern: cutoff))
+            return try stmt.step()
+        }()
+        if hasRecentTurnUser {
+            try db.exec("PRAGMA wal_checkpoint(PASSIVE);")
+            return false
+        }
+
+        // Gate 3: No in-flight effect (effect.posted without a matching effect.outcome)
+        let hasInFlight: Bool = try {
+            let stmt = try db.prepare("""
+                SELECT 1 FROM events
+                WHERE kind = 'effect.posted'
+                  AND correlation_id IS NOT NULL
+                  AND correlation_id NOT IN (
+                    SELECT correlation_id FROM events
+                    WHERE kind = 'effect.outcome' AND correlation_id IS NOT NULL
+                  )
+                LIMIT 1;
+            """)
+            defer { stmt.finalize() }
+            return try stmt.step()
+        }()
+        if hasInFlight {
+            try db.exec("PRAGMA wal_checkpoint(PASSIVE);")
+            return false
+        }
+
+        // All gates passed — TRUNCATE
+        try db.exec("PRAGMA wal_checkpoint(TRUNCATE);")
+        return true
+    }
+
+    /// Start a 5-minute periodic PASSIVE checkpoint loop. Call once after `open`.
+    ///
+    /// The loop task is stored on the actor and cancelled by `shutdown()`.
+    public func startPeriodicCheckpoint() {
+        checkpointTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                do { try await self.checkpoint() }
+                catch { Loggers.memory.error("checkpoint failed: \(error.localizedDescription)") }
+            }
+        }
+    }
+
+    /// Path to the WAL sidecar file derived from the database path.
+    private func walFilePath() -> String {
+        "\(path)-wal"
     }
 }
