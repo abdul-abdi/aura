@@ -13,10 +13,9 @@ Plan 1 (Voice Loop Foundation) is complete. The app launches, hears you, sees yo
 Requires macOS 14+. Tested on Apple Silicon.
 
 ```bash
-cd AuraV3
 swift build
 bash scripts/dev-codesign.sh   # ad-hoc Hardened Runtime + entitlements
-swift run AuraV3
+swift run Aura
 ```
 
 First launch shows an onboarding window: enter a Gemini API key, grant mic / screen / accessibility permissions. The key is stored in your login Keychain — never written to disk.
@@ -24,7 +23,6 @@ First launch shows an onboarding window: enter a Gemini API key, grant mic / scr
 ## Tests
 
 ```bash
-cd AuraV3
 swift test                                          # 66 unit tests
 AURA_LIVE_TEST=1 swift test --filter Gemini         # opt-in live integration
 ```

@@ -16,24 +16,24 @@ The complete design rationale is in `docs/superpowers/specs/2026-04-29-aura-v3-d
 
 ## Layout
 
-- `AuraV3/Package.swift` — SwiftPM manifest. Library + thin app + CLI split.
-- `AuraV3/Sources/AuraV3/` — library (everything testable lives here)
-- `AuraV3/Sources/AuraV3App/main.swift` — thin app launcher
-- `AuraV3/Sources/aura/main.swift` — CLI placeholder (Plan 4: `aura support-bundle`)
-- `AuraV3/Tests/AuraV3Tests/` — unit + integration tests
-- `AuraV3/Resources/` — Info.plist, Aura.entitlements
-- `AuraV3/scripts/dev-codesign.sh` — ad-hoc HR + entitlements after every `swift build`
+- `Package.swift` — SwiftPM manifest. Library + thin app split.
+- `Sources/Aura/` — library target (everything testable lives here)
+- `Sources/AuraApp/main.swift` — thin app launcher (binary: `Aura`)
+- `Tests/AuraTests/` — unit + integration tests
+- `Resources/` — Info.plist, Aura.entitlements
+- `scripts/dev-codesign.sh` — ad-hoc HR + entitlements after every `swift build`
 - `docs/superpowers/specs/` — design specs
 - `docs/superpowers/plans/` — implementation plans (4 plans for v3)
+
+> Plan 4's `aura support-bundle` CLI binary isn't declared here yet. The product name `aura` would case-insensitively collide with the `Aura` app binary on default APFS volumes (one would overwrite the other in `.build/<cfg>/`). Plan 4 will resolve this — likely a separate `aura-cli` package or a non-clashing product name like `aura-support`.
 
 ## Build / test
 
 ```bash
-cd AuraV3
 swift build
 swift test                                    # unit suite
 bash scripts/dev-codesign.sh                  # ad-hoc HR + entitlements
-swift run AuraV3                              # launch
+swift run Aura                                # launch
 AURA_LIVE_TEST=1 swift test --filter Gemini   # opt-in live integration tests
 ```
 
@@ -54,17 +54,17 @@ The user does not have a Developer ID. Ad-hoc codesigning only (`codesign --sign
 
 ## What's where
 
-| Subsystem                                                               | Folder                        |
-| ----------------------------------------------------------------------- | ----------------------------- |
-| Event log + SQLite + writer Task                                        | `Sources/AuraV3/Memory/`      |
-| Gemini Live transport + rotation + reconnect                            | `Sources/AuraV3/Transport/`   |
-| Mic capture + playback + barge-in                                       | `Sources/AuraV3/Voice/`       |
-| ScreenCaptureKit + AX tree + perceptual hash                            | `Sources/AuraV3/Vision/`      |
-| Sleep/wake + network + audio-config + permission watchdogs + supervisor | `Sources/AuraV3/Observation/` |
-| EffectLog (correlation_id discipline + orphan detector)                 | `Sources/AuraV3/Action/`      |
-| AppCoordinator + AppState + Config + Keychain + Logging                 | `Sources/AuraV3/App/`         |
-| Menu bar + floating panel + onboarding                                  | `Sources/AuraV3/UI/`          |
-| AsyncChannel + MonotonicClock + JSONValue                               | `Sources/AuraV3/Util/`        |
+| Subsystem                                                               | Folder                      |
+| ----------------------------------------------------------------------- | --------------------------- |
+| Event log + SQLite + writer Task                                        | `Sources/Aura/Memory/`      |
+| Gemini Live transport + rotation + reconnect                            | `Sources/Aura/Transport/`   |
+| Mic capture + playback + barge-in                                       | `Sources/Aura/Voice/`       |
+| ScreenCaptureKit + AX tree + perceptual hash                            | `Sources/Aura/Vision/`      |
+| Sleep/wake + network + audio-config + permission watchdogs + supervisor | `Sources/Aura/Observation/` |
+| EffectLog (correlation_id discipline + orphan detector)                 | `Sources/Aura/Action/`      |
+| AppCoordinator + AppState + Config + Keychain + Logging                 | `Sources/Aura/App/`         |
+| Menu bar + floating panel + onboarding                                  | `Sources/Aura/UI/`          |
+| AsyncChannel + MonotonicClock + JSONValue                               | `Sources/Aura/Util/`        |
 
 ## Plan status
 
