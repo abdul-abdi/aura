@@ -23,7 +23,7 @@ public enum AXTree {
 
         let deadline = Date().addingTimeInterval(Double(deadlineMs) / 1000.0)
         var counter = 0
-        return walk(unsafeBitCast(focused, to: AXUIElement.self),
+        return walk(focused as! AXUIElement,
                      depth: 0, maxDepth: maxDepth,
                      deadline: deadline, counter: &counter, max: maxNodes)
     }

@@ -5,7 +5,13 @@ public actor GeminiLiveSession: LiveSession {
     private var task: URLSessionWebSocketTask?
     private let session: URLSession
     private var receiveLoop: Task<Void, Never>?
-    private var continuation: AsyncStream<LiveEvent>.Continuation?
+
+    // Built in init — never nil after construction. Guarantees that any event
+    // yielded from startReceiveLoop() is captured regardless of when the consumer
+    // calls receive(). bufferingNewest(256) drops the oldest events (not the newest)
+    // if the buffer fills before anyone drains it — more than sufficient for setupComplete.
+    private let continuation: AsyncStream<LiveEvent>.Continuation
+    private let stream: AsyncStream<LiveEvent>
 
     public init(config: LiveSessionConfig) {
         self.config = config
@@ -13,6 +19,9 @@ public actor GeminiLiveSession: LiveSession {
         scfg.waitsForConnectivity = false
         scfg.timeoutIntervalForRequest = 10
         self.session = URLSession(configuration: scfg)
+        let (s, c) = AsyncStream<LiveEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
+        self.stream = s
+        self.continuation = c
     }
 
     public func connect() async throws {
@@ -47,14 +56,12 @@ public actor GeminiLiveSession: LiveSession {
         try await task.send(.data(data))
     }
 
+    /// Returns the single pre-built event stream. Single-consumer by design —
+    /// multiple callers receive the same stream and race for events. The caller
+    /// contract (RotationOrchestrator.waitForSetupComplete then AppCoordinator
+    /// .runReceiveLoop, never both simultaneously) upholds this invariant.
     public nonisolated func receive() -> AsyncStream<LiveEvent> {
-        AsyncStream { cont in
-            Task { await self.installContinuation(cont) }
-        }
-    }
-
-    private func installContinuation(_ cont: AsyncStream<LiveEvent>.Continuation) {
-        self.continuation = cont
+        stream
     }
 
     public func close() async {
@@ -62,8 +69,8 @@ public actor GeminiLiveSession: LiveSession {
         // Best-effort: notify server we're done. Failures are fine here.
         try? await task?.send(.string("{\"clientContent\":{\"turnComplete\":true}}"))
         task?.cancel(with: .normalClosure, reason: nil)
-        continuation?.yield(.closed(reason: "client_close"))
-        continuation?.finish()
+        continuation.yield(.closed(reason: "client_close"))
+        continuation.finish()
         task = nil
     }
 
@@ -141,7 +148,7 @@ public actor GeminiLiveSession: LiveSession {
     }
 
     private func yieldEvent(_ ev: LiveEvent) {
-        continuation?.yield(ev)
+        continuation.yield(ev)
     }
 
     private func appendKey(to url: URL, key: String) -> URL {
