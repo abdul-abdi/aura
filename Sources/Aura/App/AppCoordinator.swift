@@ -40,6 +40,12 @@ public final class AppCoordinator {
     /// path-up transitions can both call reconnect; without this guard, two loops
     /// race and may produce two live sessions.
     private var reconnectInProgress = false
+    /// Spec §5.2 invariant 3: timestamp of the last `didWake`. Used to gate
+    /// rotation-ring replay — never replay if we just woke from sleep.
+    private var lastWakeAt: Date?
+    /// Replay suppression window after wake. Beyond this, rotations resume
+    /// normal replay behavior.
+    private let wakeReplaySuppressSeconds: Double = 5.0
 
     public init() {
         self.effects = EffectLog(log: state.log)
@@ -268,8 +274,16 @@ public final class AppCoordinator {
                 },
                 digest: "(Plan 1: minimal digest — full version in Plan 3 Context.swift)",
                 playback: self.playback,
-                captureMicPaused: { [weak self] in self?.capture?.stop() },
-                captureMicResumed: { [weak self] in try? self?.capture?.start() }
+                captureMicPaused: { [weak self] in self?.capture?.pauseSending() },
+                captureMicResumed: { [weak self] in
+                    // Spec §5.2 invariant 3: replay the rotation ring iff this
+                    // resume isn't within the post-wake suppression window.
+                    guard let self = self else { return }
+                    let recentWake = self.lastWakeAt.map {
+                        Date().timeIntervalSince($0) < self.wakeReplaySuppressSeconds
+                    } ?? false
+                    self.capture?.resumeSending(replay: !recentWake)
+                }
             )
             self.session = new
             receiveLoopTask?.cancel()
@@ -338,8 +352,12 @@ public final class AppCoordinator {
     }
 
     /// Amendment N: since handleSleep tore everything down, reconnect from scratch
-    /// (there is no current session to rotate FROM).
+    /// (there is no current session to rotate FROM). Stamps `lastWakeAt` so the
+    /// next `captureMicResumed` (after the new session establishes and the first
+    /// scheduled / triggered rotation completes) suppresses ring-replay per
+    /// spec §5.2 invariant 3.
     private func handleWake() {
+        lastWakeAt = Date()
         let log = state.log
         Task { @MainActor [weak self] in
             await log.append(kind: EventKind.stateWake, payload: .null)

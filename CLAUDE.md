@@ -16,16 +16,17 @@ The complete design rationale is in `docs/superpowers/specs/2026-04-29-aura-v3-d
 
 ## Layout
 
-- `Package.swift` — SwiftPM manifest. Library + thin app split.
+- `Package.swift` — SwiftPM manifest. Library + thin app + CLI placeholder.
 - `Sources/Aura/` — library target (everything testable lives here)
 - `Sources/AuraApp/main.swift` — thin app launcher (binary: `Aura`)
+- `Sources/AuraCLI/main.swift` — diagnostics CLI placeholder for Plan 4 (binary: `aura-support`)
 - `Tests/AuraTests/` — unit + integration tests
-- `Resources/` — Info.plist, Aura.entitlements
+- `Resources/` — Info.plist, Aura.entitlements, AppIcon.icns (placeholder)
 - `scripts/dev-codesign.sh` — ad-hoc HR + entitlements after every `swift build`
 - `docs/superpowers/specs/` — design specs
 - `docs/superpowers/plans/` — implementation plans (4 plans for v3)
 
-> Plan 4's `aura support-bundle` CLI binary isn't declared here yet. The product name `aura` would case-insensitively collide with the `Aura` app binary on default APFS volumes (one would overwrite the other in `.build/<cfg>/`). Plan 4 will resolve this — likely a separate `aura-cli` package or a non-clashing product name like `aura-support`.
+> The CLI product is named `aura-support` rather than `aura` to dodge a case-insensitive APFS collision with the `Aura` app binary in `.build/<cfg>/`. Spec §14.7 wants the user-facing command to be `aura support-bundle`; Plan 4 may rename, split into a sub-package, or symlink at install time to honor that exactly.
 
 ## Build / test
 
@@ -54,17 +55,18 @@ The user does not have a Developer ID. Ad-hoc codesigning only (`codesign --sign
 
 ## What's where
 
-| Subsystem                                                               | Folder                      |
-| ----------------------------------------------------------------------- | --------------------------- |
-| Event log + SQLite + writer Task                                        | `Sources/Aura/Memory/`      |
-| Gemini Live transport + rotation + reconnect                            | `Sources/Aura/Transport/`   |
-| Mic capture + playback + barge-in                                       | `Sources/Aura/Voice/`       |
-| ScreenCaptureKit + AX tree + perceptual hash                            | `Sources/Aura/Vision/`      |
-| Sleep/wake + network + audio-config + permission watchdogs + supervisor | `Sources/Aura/Observation/` |
-| EffectLog (correlation_id discipline + orphan detector)                 | `Sources/Aura/Action/`      |
-| AppCoordinator + AppState + Config + Keychain + Logging                 | `Sources/Aura/App/`         |
-| Menu bar + floating panel + onboarding                                  | `Sources/Aura/UI/`          |
-| AsyncChannel + MonotonicClock + JSONValue                               | `Sources/Aura/Util/`        |
+| Subsystem                                                               | Folder                       |
+| ----------------------------------------------------------------------- | ---------------------------- |
+| Event log + SQLite + writer Task                                        | `Sources/Aura/Memory/`       |
+| Gemini Live transport + rotation + reconnect                            | `Sources/Aura/Transport/`    |
+| Mic capture + playback + barge-in                                       | `Sources/Aura/Voice/`        |
+| ScreenCaptureKit + AX tree + perceptual hash                            | `Sources/Aura/Vision/`       |
+| Sleep/wake + network + audio-config + permission watchdogs + supervisor | `Sources/Aura/Observation/`  |
+| EffectLog (correlation_id discipline + orphan detector)                 | `Sources/Aura/Action/`       |
+| AppCoordinator + AppState + Config + Keychain + Logging                 | `Sources/Aura/App/`          |
+| Menu bar + floating panel + onboarding                                  | `Sources/Aura/UI/`           |
+| Conversation + Turn value types                                         | `Sources/Aura/Conversation/` |
+| AsyncChannel + MonotonicClock + JSONValue + Cosine                      | `Sources/Aura/Util/`         |
 
 ## Plan status
 

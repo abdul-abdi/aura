@@ -16,6 +16,17 @@ import OSLog
 ///
 /// The `engine` property is exposed publicly so AudioConfigWatchdog (Task 7.3 /
 /// amendment O) can observe it without needing a separate accessor.
+///
+/// Spec §5.2 invariant 3 — "Pause mic. Frames buffered in a 2s ring (64 KB).
+/// Replay at resume is gated on a VAD-active flag _and_ a wake-state flag —
+/// never replay if we just woke from sleep."
+///
+/// The 2s ring is `rotationRing` below. While `isPaused == true`, resampled
+/// f32 samples flow into the ring instead of the wire. On `resumeSending(replay:)`
+/// the caller decides whether to replay (false on wake-from-sleep). The audio
+/// engine is NOT stopped during pause — frames keep arriving so the ring fills
+/// continuously; stop/start during a 9-minute scheduled rotation would also
+/// reset Apple's voice-processing IO state and lose the calibration.
 public final class AudioCapture {
     public let engine = AVAudioEngine()
     private var resampler: LinearResampler
@@ -24,12 +35,23 @@ public final class AudioCapture {
     private var hwFormat: AVAudioFormat
     private var enabledVoiceProcessing = false
 
+    /// Spec §5.2 invariant 3: 2 seconds × 16,000 Hz mono = 32,000 Float samples.
+    /// (Spec footnotes "64 KB" — that's 32K Int16; we keep f32 here so the
+    /// resample step stays out of the audio thread's hot path.)
+    public let rotationRing: RingBuffer<Float>
+
+    /// When true, resampled samples are written to `rotationRing` instead of
+    /// being PCM16-encoded and pushed to `onChunk`. Toggled by
+    /// `pauseSending()` / `resumeSending(replay:)`.
+    private var isPaused: Bool = false
+
     public init(onChunk: @escaping @Sendable (Data) -> Void,
                 onSamples: (@Sendable ([Float]) -> Void)? = nil) {
         self.onChunk = onChunk
         self.onSamples = onSamples
         self.hwFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
         self.resampler = LinearResampler(sourceRate: 48000, targetRate: 16000)
+        self.rotationRing = RingBuffer<Float>(capacity: 32_000)
     }
 
     public func start() throws {
@@ -57,7 +79,37 @@ public final class AudioCapture {
     public func stop() {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        rotationRing.clear()
+        isPaused = false
         Loggers.voice.info("audio capture stopped")
+    }
+
+    /// Spec §5.2 step 2: redirect new resampled samples into `rotationRing`
+    /// instead of `onChunk`. The audio engine keeps running (so Apple's
+    /// voice-processing IO calibration is preserved). The ring is cleared on
+    /// each pause so a stale rotation doesn't taint the next one.
+    public func pauseSending() {
+        rotationRing.clear()
+        isPaused = true
+        Loggers.voice.info("audio capture paused (rotation buffer engaged)")
+    }
+
+    /// Spec §5.2 step 8: drain the ring (if `replay`) then resume normal flow.
+    /// Pass `replay: false` when resuming after a wake-from-sleep — replaying
+    /// would invent speech the user never made.
+    public func resumeSending(replay: Bool) {
+        if replay {
+            let buffered = rotationRing.readUpTo(rotationRing.currentCount)
+            if !buffered.isEmpty {
+                let pcm = pcm16Encode(buffered)
+                onChunk(pcm)
+                Loggers.voice.info("rotation ring replayed: \(buffered.count, privacy: .public) samples")
+            }
+        } else if rotationRing.currentCount > 0 {
+            Loggers.voice.info("rotation ring discarded (post-wake): \(self.rotationRing.currentCount, privacy: .public) samples")
+        }
+        rotationRing.clear()
+        isPaused = false
     }
 
     private func handleBuffer(_ buf: AVAudioPCMBuffer) {
@@ -65,12 +117,20 @@ public final class AudioCapture {
         let frames = Int(buf.frameLength)
         let mono = Array(UnsafeBufferPointer(start: channelData, count: frames))
 
-        // Surface raw mono samples for downstream RMS / barge-in.
+        // Surface raw mono samples for downstream RMS / barge-in (always —
+        // barge-in needs to fire even during rotation if the user starts
+        // speaking, though Plan 1 currently only acts on it when not paused).
         onSamples?(mono)
 
         let resampled = resampler.resample(mono)
         guard !resampled.isEmpty else { return }
-        let pcm = pcm16Encode(resampled)
-        onChunk(pcm)
+
+        if isPaused {
+            // Spec §5.2 invariant 3: divert to ring buffer; consumer drains on resume.
+            _ = rotationRing.write(resampled)
+        } else {
+            let pcm = pcm16Encode(resampled)
+            onChunk(pcm)
+        }
     }
 }
