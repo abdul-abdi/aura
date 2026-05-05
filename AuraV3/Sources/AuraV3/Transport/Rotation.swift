@@ -49,18 +49,23 @@ public final class RotationOrchestrator {
     }
 
     private let log: Log
+    private let effects: EffectLog
     private var rotationInProgress = false
     private let setupCompleteTimeoutSeconds: Double = 8.0
 
-    public init(log: Log) { self.log = log }
+    public init(log: Log, effects: EffectLog) {
+        self.log = log
+        self.effects = effects
+    }
 
     /// Returns the new session iff rotation completed (all invariants held).
     /// Amendment S: declare success only after setupComplete arrives.
+    /// Task 9.2: Invariant 2 — drain in-flight effects before closing transport.
     public func rotate(
         reason: Reason,
         currentSession: GeminiLiveSession,
         newSessionFactory: @escaping @Sendable () async throws -> GeminiLiveSession,
-        pendingEffectCorrelations: [String],
+        pendingEffectCorrelations: @Sendable () async -> [String],
         digest: String,
         playback: AudioPlayback,
         captureMicPaused: () -> Void,
@@ -70,7 +75,28 @@ public final class RotationOrchestrator {
         rotationInProgress = true
         defer { rotationInProgress = false }
 
-        Loggers.rotation.info("rotation start: reason=\(String(describing: reason), privacy: .public), pending_effects=\(pendingEffectCorrelations.count, privacy: .public)")
+        Loggers.rotation.info("rotation start: reason=\(String(describing: reason), privacy: .public)")
+
+        // Invariant 2: drain in-flight effects. Soft deadline 2s, hard 8s.
+        // Past the hard deadline, synthesize effect.outcome (status=failed,
+        // reason=rotationCutMidPost) for any remaining orphans.
+        let hardDeadline = Date().addingTimeInterval(8.0)
+        while Date() < hardDeadline {
+            let pending = await pendingEffectCorrelations()
+            if pending.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let stillOrphans = await pendingEffectCorrelations()
+        for cid in stillOrphans {
+            await log.append(
+                kind: EventKind.effectOutcome,
+                correlationID: cid,
+                payload: .object([
+                    "status": .string("failed"),
+                    "reason": .string("rotationCutMidPost"),
+                ])
+            )
+        }
 
         // Invariant 4: pause mic before we close.
         captureMicPaused()
@@ -94,7 +120,7 @@ public final class RotationOrchestrator {
 
         // Resume mic.
         captureMicResumed()
-        Loggers.rotation.info("rotation complete")
+        Loggers.rotation.info("rotation complete (orphans synthesized: \(stillOrphans.count, privacy: .public))")
         return newSession
     }
 
@@ -103,7 +129,7 @@ public final class RotationOrchestrator {
     /// hasn't accepted the setup until setupComplete arrives.
     private func waitForSetupComplete(on session: GeminiLiveSession) async throws {
         let stream = session.receive()
-        let timeoutSecs = setupCompleteTimeoutSeconds
+        let timeout = setupCompleteTimeoutSeconds
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 for await event in stream {
@@ -113,7 +139,7 @@ public final class RotationOrchestrator {
                 throw RotationError.setupCompleteTimeout
             }
             group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSecs * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 throw RotationError.setupCompleteTimeout
             }
             try await group.next()
