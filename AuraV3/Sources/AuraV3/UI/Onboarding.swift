@@ -34,7 +34,12 @@ public final class OnboardingState: ObservableObject {
 
 public struct OnboardingView: View {
     @StateObject private var state = OnboardingState()
-    public init() {}
+    public var onComplete: (() -> Void)?
+
+    public init(onComplete: (() -> Void)? = nil) {
+        self.onComplete = onComplete
+    }
+
     public var body: some View {
         VStack(spacing: 24) {
             switch state.step {
@@ -44,7 +49,14 @@ public struct OnboardingView: View {
             case .screen:        ScreenPermissionStep(state: state)
             case .accessibility: AccessibilityStep(state: state)
             case .sayHi:         SayHiStep(state: state)
-            case .done:          Text("All set.").font(.title)
+            case .done:
+                VStack(spacing: 16) {
+                    Text("All set.").font(.title)
+                    Button("Launch Aura") {
+                        onComplete?()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(40)

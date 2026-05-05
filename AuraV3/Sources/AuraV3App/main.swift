@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import AuraV3
 
 let app = NSApplication.shared
@@ -11,6 +12,34 @@ app.setActivationPolicy(.accessory)
 final class CoordinatorHolder {
     static let shared = CoordinatorHolder()
     var coordinator: AppCoordinator?
+    var onboardingWindow: NSWindow?
+}
+
+@MainActor
+func startCoordinator() {
+    let coordinator = AppCoordinator()
+    CoordinatorHolder.shared.coordinator = coordinator
+    coordinator.start()
+}
+
+@MainActor
+func showOnboarding() {
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+        styleMask: [.titled, .closable],
+        backing: .buffered, defer: false
+    )
+    window.title = "Welcome to Aura"
+    window.contentView = NSHostingView(rootView: OnboardingView {
+        // onComplete: dismiss window + start coordinator
+        CoordinatorHolder.shared.onboardingWindow?.close()
+        CoordinatorHolder.shared.onboardingWindow = nil
+        startCoordinator()
+    })
+    window.center()
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    CoordinatorHolder.shared.onboardingWindow = window
 }
 
 // AppState.shared is @MainActor-isolated. Top-level executable code runs on the main thread
@@ -20,8 +49,12 @@ MainActor.assumeIsolated {
     let state = AppState.shared  // boots the log and writes session.start
     _ = MenuBarController(state: state)
     _ = FloatingPanelController.shared  // forces lazy init + hotkey registration
-    let coordinator = AppCoordinator()
-    CoordinatorHolder.shared.coordinator = coordinator
-    coordinator.start()
+
+    if Config.apiKey() == nil {
+        showOnboarding()
+    } else {
+        startCoordinator()
+    }
 }
+
 app.run()

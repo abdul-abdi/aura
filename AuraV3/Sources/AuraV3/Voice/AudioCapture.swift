@@ -19,12 +19,15 @@ import OSLog
 public final class AudioCapture {
     public let engine = AVAudioEngine()
     private var resampler: LinearResampler
-    private let onChunk: (Data) -> Void
+    private let onChunk: @Sendable (Data) -> Void
+    private let onSamples: (@Sendable ([Float]) -> Void)?
     private var hwFormat: AVAudioFormat
     private var enabledVoiceProcessing = false
 
-    public init(onChunk: @escaping (Data) -> Void) {
+    public init(onChunk: @escaping @Sendable (Data) -> Void,
+                onSamples: (@Sendable ([Float]) -> Void)? = nil) {
         self.onChunk = onChunk
+        self.onSamples = onSamples
         self.hwFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
         self.resampler = LinearResampler(sourceRate: 48000, targetRate: 16000)
     }
@@ -61,6 +64,9 @@ public final class AudioCapture {
         guard let channelData = buf.floatChannelData?[0] else { return }
         let frames = Int(buf.frameLength)
         let mono = Array(UnsafeBufferPointer(start: channelData, count: frames))
+
+        // Surface raw mono samples for downstream RMS / barge-in.
+        onSamples?(mono)
 
         let resampled = resampler.resample(mono)
         guard !resampled.isEmpty else { return }

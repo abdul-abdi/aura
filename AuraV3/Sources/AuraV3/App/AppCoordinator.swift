@@ -25,7 +25,6 @@ public final class AppCoordinator {
     private var sleepWake: SleepWakeWatchdog!
     private var network: NetworkPathWatchdog!
     private var audioConfig: AudioConfigWatchdog?
-    // PermissionWatchdog is wired but reportFailure callers are deferred to Plan 2.
     private var permission: PermissionWatchdog!
     private var supervisor: WatchdogSupervisor!
 
@@ -34,6 +33,9 @@ public final class AppCoordinator {
 
     private var sessionTimer: Task<Void, Never>?
     private var receiveLoopTask: Task<Void, Never>?
+    private var screenPumpTask: Task<Void, Never>?
+    private var rotationRateLimit = RateLimit(minIntervalSeconds: 5.0)
+    private var bargeInCalibrationFrames = 0
 
     public init() {
         self.effects = EffectLog(log: state.log)
@@ -108,15 +110,25 @@ public final class AppCoordinator {
         }
 
         // Audio capture → send.
-        let cap = AudioCapture { [weak self] pcm in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard !self.state.isMicMuted else { return }
-                try? await self.session?.send(.audio(pcm))
+        let cap = AudioCapture(
+            onChunk: { [weak self] pcm in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard !self.state.isMicMuted else { return }
+                    try? await self.session?.send(.audio(pcm))
+                }
+            },
+            onSamples: { [weak self] samples in
+                // Hop to MainActor — bargeIn + playback are @MainActor-bound.
+                // ~50 Hz hop frequency is acceptable.
+                Task { @MainActor [weak self] in
+                    self?.handleBargeInSamples(samples)
+                }
             }
-        }
+        )
         do { try cap.start() } catch {
             Loggers.app.error("capture start failed: \(error.localizedDescription)")
+            Task { [weak self] in await self?.permission.reportFailure(.microphone) }
         }
         self.capture = cap
 
@@ -143,8 +155,21 @@ public final class AppCoordinator {
         let screen = ScreenStream()
         do { try await screen.start() } catch {
             Loggers.app.warning("screen stream start failed: \(error.localizedDescription)")
+            Task { [weak self] in await self?.permission.reportFailure(.screen) }
         }
         self.screenStream = screen
+
+        // Pump screen frames from the slot to Gemini at up to 10 Hz (frames arrive at
+        // 2 Hz; oversampling guarantees we don't miss new frames).
+        screenPumpTask?.cancel()
+        screenPumpTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                guard let self else { return }
+                guard let frame = self.screenStream?.slot.take() else { continue }
+                try? await self.session?.send(.video(frame))
+            }
+        }
 
         // Schedule rotation at T = 9 minutes (before the 10-minute server limit).
         scheduleRotation()
@@ -237,6 +262,16 @@ public final class AppCoordinator {
             receiveLoopTask = Task { @MainActor [weak self] in
                 await self?.runReceiveLoop(new)
             }
+            // Restart the screen pump so it sends to the fresh session.
+            screenPumpTask?.cancel()
+            screenPumpTask = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
+                    guard let self else { return }
+                    guard let frame = self.screenStream?.slot.take() else { continue }
+                    try? await self.session?.send(.video(frame))
+                }
+            }
             state.setDotState(.listening)
             scheduleRotation()
         } catch {
@@ -267,6 +302,10 @@ public final class AppCoordinator {
         state.setDotState(.offline)
         sessionTimer?.cancel()
         receiveLoopTask?.cancel()
+        screenPumpTask?.cancel()
+        // Re-calibrate barge-in on wake — acoustics may have changed.
+        bargeIn = BargeInDetector()
+        bargeInCalibrationFrames = 0
         let s = session
         session = nil
         // Stop the screen stream (SCK capture should not run while the screen is off).
@@ -294,8 +333,39 @@ public final class AppCoordinator {
     private func handleNetworkChange(_ status: NetworkPathWatchdog.Status) {
         Loggers.app.info("network: \(String(describing: status), privacy: .public)")
         // Only rotate when the network becomes available and we have a live session.
+        // Amendment S: rate-limit to prevent WiFi-handoff flap from burning the
+        // attempt budget (5+ triggers in 2s is common on network path changes).
         if status == .satisfied, session != nil {
-            Task { @MainActor [weak self] in await self?.rotateNow(reason: .pathChange) }
+            if rotationRateLimit.tryAcquire() {
+                Task { @MainActor [weak self] in await self?.rotateNow(reason: .pathChange) }
+            } else {
+                Loggers.app.info("network rotation rate-limited (5s window)")
+            }
+        }
+    }
+
+    // MARK: - Barge-in calibration
+
+    private func handleBargeInSamples(_ samples: [Float]) {
+        if !bargeIn.isCalibrated {
+            bargeIn.observeAmbient(frame: samples)
+            bargeInCalibrationFrames += 1
+            if bargeInCalibrationFrames >= 50 {
+                bargeIn.commitCalibration()
+                Loggers.voice.info("barge-in calibrated; threshold=\(self.bargeIn.threshold, privacy: .public)")
+            }
+            return
+        }
+        if state.dotState == .speaking, bargeIn.shouldBargeIn(frame: samples) {
+            playback.flush()
+            bargeIn.startReverbGuard()
+            state.setDotState(.listening)
+            Task { [weak self] in
+                await self?.state.log.append(
+                    kind: "state.barge_in",
+                    payload: .object(["client_side": .bool(true)])
+                )
+            }
         }
     }
 
