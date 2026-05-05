@@ -23,6 +23,18 @@ enum GeminiProtocol {
             ] as [String: Any],
             "outputAudioTranscription": [String: Any](),
             "inputAudioTranscription": [String: Any](),
+            // Spec §5.1 — sliding-window context compression at 500K tokens.
+            // Server-managed; we declare the strategy and target here.
+            "contextWindowCompression": [
+                "slidingWindow": ["targetTokens": "500000"]
+            ] as [String: Any],
+            // Spec §5.1 — affective dialog enabled (model adjusts tone with
+            // recognised emotional cues; user-facing setting in §11 toggles it).
+            "enableAffectiveDialog": true,
+            // Spec §5.1 — proactive audio disabled at the API level. We control
+            // proactivity ourselves via §7's local policy pipeline; we don't
+            // want the server unilaterally generating audio without our trigger.
+            "proactivity": ["proactiveAudio": false] as [String: Any],
         ]
         if let prompt = config.systemPrompt {
             setup["systemInstruction"] = ["parts": [["text": prompt]]]

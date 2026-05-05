@@ -107,6 +107,25 @@ public final class RotationOrchestrator {
         // Close old transport.
         await currentSession.close()
 
+        // Cantrill-pass cleanup discipline: from this point on we have no
+        // session; if newSessionFactory() or waitForSetupComplete throws, we
+        // must restore capture/playback to a usable state before propagating
+        // the error. Without this, a network blip at rotation time leaves the
+        // app stuck offline with the mic paused indefinitely (the ring keeps
+        // filling but nothing drains it).
+        //
+        // The defer runs on EVERY return path; we set `rotationSucceeded = true`
+        // just before normal exit so this only fires on the error path.
+        var rotationSucceeded = false
+        defer {
+            if !rotationSucceeded {
+                // Restore capture without ring replay — the ring's contents
+                // were addressed to a session that no longer exists.
+                captureMicResumed()
+                Loggers.rotation.error("rotation aborted; capture restored without replay")
+            }
+        }
+
         // Build new session, wait for setupComplete (amendment S).
         let newSession = try await newSessionFactory()
         try await waitForSetupComplete(on: newSession)
@@ -118,8 +137,9 @@ public final class RotationOrchestrator {
         try? playback.start()
         playback.enqueue(AudioCue.rotationCuePCM16())
 
-        // Resume mic.
+        // Resume mic on the success path.
         captureMicResumed()
+        rotationSucceeded = true
         Loggers.rotation.info("rotation complete (orphans synthesized: \(stillOrphans.count, privacy: .public))")
         return newSession
     }

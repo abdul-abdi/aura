@@ -119,6 +119,13 @@ public final class AppCoordinator {
             await self?.runReceiveLoop(session)
         }
 
+        // Stop any previous capture before reassigning. ARC alone won't
+        // deterministically tear down the old AVAudioEngine — the tap closure
+        // captures self weakly, so the engine could outlive the assignment
+        // until the next ARC pass. Explicit stop() removes the tap and stops
+        // the engine, freeing the audio HW immediately.
+        capture?.stop()
+
         // Audio capture → send.
         let cap = AudioCapture(
             onChunk: { [weak self] pcm in

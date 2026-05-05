@@ -48,6 +48,33 @@ final class GeminiProtocolTests: XCTestCase {
         XCTAssertEqual((r?["x"] as? NSNumber)?.intValue, 42)
     }
 
+    /// Spec §5.1: Compression — sliding window, 500K-token cap.
+    func test_setupMessage_includesSlidingWindowCompression() {
+        let cfg = LiveSessionConfig(apiKey: "test")
+        let setup = GeminiProtocol.setupMessage(config: cfg)
+        let inner = setup["setup"] as? [String: Any]
+        let cwc = inner?["contextWindowCompression"] as? [String: Any]
+        let sliding = cwc?["slidingWindow"] as? [String: Any]
+        XCTAssertEqual(sliding?["targetTokens"] as? String, "500000")
+    }
+
+    /// Spec §5.1: Affective dialog enabled.
+    func test_setupMessage_enablesAffectiveDialog() {
+        let cfg = LiveSessionConfig(apiKey: "test")
+        let setup = GeminiProtocol.setupMessage(config: cfg)
+        let inner = setup["setup"] as? [String: Any]
+        XCTAssertEqual(inner?["enableAffectiveDialog"] as? Bool, true)
+    }
+
+    /// Spec §5.1: Proactive audio disabled at API level — we control proactivity.
+    func test_setupMessage_disablesProactiveAudio() {
+        let cfg = LiveSessionConfig(apiKey: "test")
+        let setup = GeminiProtocol.setupMessage(config: cfg)
+        let inner = setup["setup"] as? [String: Any]
+        let proact = inner?["proactivity"] as? [String: Any]
+        XCTAssertEqual(proact?["proactiveAudio"] as? Bool, false)
+    }
+
     func test_jsonValueToAny_roundtrip() throws {
         let v: JSONValue = .object([
             "n": .null,

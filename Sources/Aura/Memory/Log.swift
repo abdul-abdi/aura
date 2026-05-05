@@ -53,6 +53,16 @@ public actor Log {
             case .barrier:         return "_barrier"
             }
         }
+
+        /// True if this request has a continuation that must eventually be
+        /// resumed. The drop policy MUST not return `.dropIncoming` for these
+        /// — the caller is awaiting and would deadlock indefinitely.
+        var awaitsCompletion: Bool {
+            switch self {
+            case .write(_, let cont):  return cont != nil
+            case .barrier:             return true
+            }
+        }
     }
 
     // MARK: - State
@@ -149,11 +159,24 @@ public actor Log {
                 return .replaceAtIndex(idx)
             }
 
-            // No victim — critical kinds block; everything else drops.
+            // No low-priority victim available. Decide: block or drop?
+            //
+            // (a) Anything that has a caller-waiting continuation MUST block.
+            //     `appendAndReturnID` and `flush` use continuations; dropping
+            //     would leak the continuation and the caller would await
+            //     forever. This is the bug the prior FIXME flagged — fixed.
+            // (b) Critical kinds block: turn.*, effect.*, correction*, fact,
+            //     tombstone — losing these is unacceptable per spec §6.1.
+            // (c) Everything else (state.observation already considered above,
+            //     unknown kinds) drops.
+            if req.awaitsCompletion {
+                return .blockUntilSpace
+            }
             if incoming.hasPrefix("turn.")
                 || incoming.hasPrefix("effect.")
                 || incoming.hasPrefix("correction")
-                || incoming == "_barrier" {
+                || incoming == EventKind.fact
+                || incoming == EventKind.tombstone {
                 return .blockUntilSpace
             }
             return .dropIncoming
@@ -225,9 +248,9 @@ public actor Log {
     ///
     /// Amendment C: uses `withCheckedThrowingContinuation` — no `unsafeBitCast` UB.
     ///
-    /// - FIXME: If the drop policy returns `.dropIncoming` for the kind passed here,
-    ///   the continuation is never resumed and the caller awaits forever.
-    ///   Only call this for critical kinds (turn.*, effect.*, correction*, fact, tombstone).
+    /// The drop policy detects continuation-bearing requests via
+    /// `WriteRequest.awaitsCompletion` and forces `.blockUntilSpace`, so this
+    /// can be called for any kind without the prior continuation-leak risk.
     public func appendAndReturnID(
         kind: String,
         sessionID: String? = nil,
