@@ -133,7 +133,13 @@ public final class AppCoordinator {
             Loggers.app.warning("playback start failed: \(error.localizedDescription)")
         }
 
-        // Screen stream — non-fatal if screen recording permission is missing.
+        // Screen stream — stop any prior instance before creating a new one.
+        // startSession() is called on every connect/reconnect/wake path; without this
+        // guard, each reconnect leaks an extra SCK stream.
+        if let existing = self.screenStream {
+            await existing.stop()
+            self.screenStream = nil
+        }
         let screen = ScreenStream()
         do { try await screen.start() } catch {
             Loggers.app.warning("screen stream start failed: \(error.localizedDescription)")
@@ -263,8 +269,14 @@ public final class AppCoordinator {
         receiveLoopTask?.cancel()
         let s = session
         session = nil
-        // Best-effort; the OS will yank the socket anyway.
-        Task { await s?.close() }
+        // Stop the screen stream (SCK capture should not run while the screen is off).
+        // startSession will create a fresh one on wake.
+        let screen = screenStream
+        screenStream = nil
+        Task {
+            await screen?.stop()
+            await s?.close()   // best-effort; OS will yank the socket anyway
+        }
     }
 
     /// Amendment N: since handleSleep tore everything down, reconnect from scratch
