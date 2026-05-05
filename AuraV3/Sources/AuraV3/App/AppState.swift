@@ -54,7 +54,13 @@ public final class AppState: ObservableObject {
 
     // MARK: - Mutators
 
-    public func setDotState(_ s: DotState) { dotState = s }
+    /// Set the dot state. No-op if already at this value — `@Published` fires
+    /// on every assignment (even same-value), and `runReceiveLoop` calls this
+    /// on every audio chunk (~50 Hz). Without the equality gate, the menu-bar
+    /// dot regenerates its NSImage 50 times per second during model speech.
+    public func setDotState(_ s: DotState) {
+        if dotState != s { dotState = s }
+    }
     public func toggleMic() { isMicMuted.toggle() }
     public func toggleProactive() { isProactiveMuted.toggle() }
 

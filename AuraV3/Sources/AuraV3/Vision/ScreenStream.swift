@@ -68,12 +68,16 @@ public final class ScreenStream: NSObject, SCStreamOutput, SCStreamDelegate, @un
 }
 
 enum SampleBufferEncoder {
+    /// Cache a single CIContext — creating one per frame allocates a Metal device
+    /// handle each time, which at 2 FPS is wasteful. CIContext is documented as
+    /// thread-safe for jpegRepresentation.
+    private static let sharedContext = CIContext(options: nil)
+    private static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
+
     static func jpeg(from sample: CMSampleBuffer, quality: CGFloat) -> Data? {
         guard let pixel = CMSampleBufferGetImageBuffer(sample) else { return nil }
         let ci = CIImage(cvPixelBuffer: pixel)
-        let context = CIContext(options: nil)
-        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-        return context.jpegRepresentation(of: ci, colorSpace: cs, options: [
+        return sharedContext.jpegRepresentation(of: ci, colorSpace: sRGB, options: [
             kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality
         ])
     }

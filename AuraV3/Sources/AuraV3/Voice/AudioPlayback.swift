@@ -12,15 +12,21 @@ public final class AudioPlayback {
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
     }
 
+    /// Idempotent — calling start() on an already-running engine is a no-op.
+    /// AVAudioEngine.start() throws if already running; we treat that as success.
     public func start() throws {
+        if engine.isRunning {
+            if !playerNode.isPlaying { playerNode.play() }
+            return
+        }
         engine.prepare()
         try engine.start()
         playerNode.play()
     }
 
     public func stop() {
-        playerNode.stop()
-        engine.stop()
+        if playerNode.isPlaying { playerNode.stop() }
+        if engine.isRunning { engine.stop() }
     }
 
     /// Schedule a chunk of 24kHz PCM16 (raw bytes, little-endian).

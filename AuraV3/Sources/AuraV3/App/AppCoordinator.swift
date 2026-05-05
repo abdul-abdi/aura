@@ -36,6 +36,10 @@ public final class AppCoordinator {
     private var screenPumpTask: Task<Void, Never>?
     private var rotationRateLimit = RateLimit(minIntervalSeconds: 5.0)
     private var bargeInCalibrationFrames = 0
+    /// Prevents concurrent reconnect attempts — both `.closed` events and network
+    /// path-up transitions can both call reconnect; without this guard, two loops
+    /// race and may produce two live sessions.
+    private var reconnectInProgress = false
 
     public init() {
         self.effects = EffectLog(log: state.log)
@@ -133,7 +137,10 @@ public final class AppCoordinator {
         self.capture = cap
 
         // Amendment O: AudioConfigWatchdog actually wired.
-        // `cap.engine` is already declared `public` on AudioCapture.
+        // Stop any previous watchdog first — its observer is registered for the OLD
+        // engine which we just stopped. Without this, NotificationCenter leaks an
+        // observer per session restart.
+        audioConfig?.stop()
         let configWatchdog = AudioConfigWatchdog(engine: cap.engine) { [weak self] in
             self?.handleAudioConfigChange()
         }
@@ -159,8 +166,18 @@ public final class AppCoordinator {
         }
         self.screenStream = screen
 
-        // Pump screen frames from the slot to Gemini at up to 10 Hz (frames arrive at
-        // 2 Hz; oversampling guarantees we don't miss new frames).
+        // Pump screen frames from the slot to Gemini at up to 10 Hz (frames arrive
+        // at 2 Hz; oversampling guarantees we don't miss new frames).
+        startScreenPump()
+
+        // Schedule rotation at T = 9 minutes (before the 10-minute server limit).
+        scheduleRotation()
+    }
+
+    /// Polls the ScreenStream's FrameSlot at 10 Hz and sends each new JPEG frame
+    /// over the current session as `LiveFrame.video`. Idempotent — cancels any
+    /// existing pump task before installing the new one.
+    private func startScreenPump() {
         screenPumpTask?.cancel()
         screenPumpTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -170,9 +187,6 @@ public final class AppCoordinator {
                 try? await self.session?.send(.video(frame))
             }
         }
-
-        // Schedule rotation at T = 9 minutes (before the 10-minute server limit).
-        scheduleRotation()
     }
 
     private func scheduleRotation() {
@@ -263,15 +277,7 @@ public final class AppCoordinator {
                 await self?.runReceiveLoop(new)
             }
             // Restart the screen pump so it sends to the fresh session.
-            screenPumpTask?.cancel()
-            screenPumpTask = Task { @MainActor [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
-                    guard let self else { return }
-                    guard let frame = self.screenStream?.slot.take() else { continue }
-                    try? await self.session?.send(.video(frame))
-                }
-            }
+            startScreenPump()
             state.setDotState(.listening)
             scheduleRotation()
         } catch {
@@ -283,6 +289,15 @@ public final class AppCoordinator {
     // MARK: - Reconnect
 
     private func reconnect() async {
+        // Concurrent-reconnect guard — both `.closed` and network path-up can both
+        // call reconnect; without this, two loops race.
+        guard !reconnectInProgress else {
+            Loggers.app.info("reconnect already in progress; ignoring duplicate trigger")
+            return
+        }
+        reconnectInProgress = true
+        defer { reconnectInProgress = false }
+
         var bo = Backoff()
         for _ in 0..<5 {
             try? await Task.sleep(for: bo.next())
@@ -299,6 +314,10 @@ public final class AppCoordinator {
         Loggers.app.info("sleep — hard tear-down")
         capture?.stop()
         playback.stop()
+        // Stop the audio-config observer too — its target engine just stopped.
+        // startSession recreates both the capture engine and a fresh watchdog.
+        audioConfig?.stop()
+        audioConfig = nil
         state.setDotState(.offline)
         sessionTimer?.cancel()
         receiveLoopTask?.cancel()
