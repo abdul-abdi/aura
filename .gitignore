@@ -1,47 +1,25 @@
-/target
-AuraApp/.build/
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Editor
 *.swp
 *.swo
-.DS_Store
-.claude/
-.code_index/
-docs/plans/
-docs/HANDOFF.md
-HANDOFF.md
-ACCESSIBILITY_IMPROVEMENTS.md
-.worktrees/
+.idea/
+.vscode/
 
-# Secrets & credentials
+# Local Claude Code state (not part of project source)
+.claude/
+
+# Secrets — Aura uses Keychain for the API key, but defend in depth.
 .env
 .env.*
-!.env.example
 *.pem
 *.key
 *.p12
 credentials.json
-serviceAccountKey.json
-
-# Logs
-*.log
-firebase-debug.log
-
-# Remotion promo video project (only the rendered output is committed)
-promo/
-
-# Python
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-*.pyc
-
-# Swift
-.swiftpm/
-
-# Virtual environments
-.venv/
-venv/
-
-# IDEs
-.idea/
-.vscode/
