@@ -253,7 +253,12 @@ public final class AppCoordinator {
             case .resumptionHandle:
                 break
 
-            case .closed:
+            case .closed(let reason):
+                // Surface why the session closed — this is the only signal we
+                // get back when the WS handshake fails (auth, model rejection,
+                // network) since `connect()` returns optimistically before the
+                // server ack.
+                Loggers.transport.error("session closed: \(reason ?? "no reason given", privacy: .public)")
                 state.setDotState(.offline)
                 Task { @MainActor [weak self] in await self?.reconnect() }
             }
@@ -416,8 +421,17 @@ public final class AppCoordinator {
     // MARK: - Audio config change  (Amendment O)
 
     private func handleAudioConfigChange() {
-        // Device change — restart capture cleanly. Don't attempt to rotate the
-        // Gemini session; the audio config notification is about the local engine.
+        // AVAudioEngine fires this notification BOTH on real hot-plug events
+        // AND synchronously while we ourselves call setVoiceProcessingEnabled
+        // / installTap inside AudioCapture.start(). If we react to the latter
+        // by stop()+start(), we trigger the same notification chain again —
+        // infinite loop, observed in the field as repeated "audio config
+        // change — restarting capture" log lines and the connection never
+        // settling. Skip notifications during the settle window.
+        if let cap = capture, cap.isInStartSettleWindow {
+            Loggers.app.debug("audio config change ignored — within capture start settle window")
+            return
+        }
         Loggers.app.info("audio config change — restarting capture")
         capture?.stop()
         do { try capture?.start() } catch {

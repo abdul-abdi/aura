@@ -78,12 +78,24 @@ private struct WelcomeStep: View {
 private struct APIKeyStep: View {
     @ObservedObject var state: OnboardingState
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Gemini API key").font(.headline)
             Text("Stored in your login Keychain. Never written to disk.")
                 .foregroundStyle(.secondary).font(.callout)
-            SecureField("AIza…", text: $state.apiKeyInput)
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 8) {
+                SecureField("AIza…", text: $state.apiKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                Button("Paste") {
+                    if let s = NSPasteboard.general.string(forType: .string) {
+                        state.apiKeyInput = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
+                .help("Paste from clipboard")
+            }
+            Text("Get a key at https://aistudio.google.com/apikey")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 0)
             HStack {
                 Spacer()
                 Button("Continue") {

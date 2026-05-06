@@ -45,6 +45,22 @@ public final class AudioCapture {
     /// `pauseSending()` / `resumeSending(replay:)`.
     private var isPaused: Bool = false
 
+    /// Wall-clock instant of the last `start()`. AVAudioEngine fires
+    /// `AVAudioEngineConfigurationChangeNotification` synchronously when
+    /// `setVoiceProcessingEnabled(true)` reshapes the input format — and the
+    /// AudioConfigWatchdog will react by calling `stop()` + `start()` again.
+    /// Without a settle window, that's an infinite feedback loop. Callers
+    /// should treat config-change notifications during `isInStartSettleWindow`
+    /// as our own setup churn, not real device-change events.
+    private(set) var lastStartAt: Date = .distantPast
+
+    /// `true` for ~1.5s after `start()`. AudioConfigWatchdog handlers consult
+    /// this to ignore notifications that originate from our own setVoice-
+    /// ProcessingEnabled / installTap rather than a USB hot-plug.
+    public var isInStartSettleWindow: Bool {
+        Date().timeIntervalSince(lastStartAt) < 1.5
+    }
+
     public init(onChunk: @escaping @Sendable (Data) -> Void,
                 onSamples: (@Sendable ([Float]) -> Void)? = nil) {
         self.onChunk = onChunk
@@ -55,6 +71,15 @@ public final class AudioCapture {
     }
 
     public func start() throws {
+        // Stamp settle window BEFORE we touch the engine. AVAudioEngine fires
+        // configuration-change notifications synchronously during
+        // setVoiceProcessingEnabled / installTap / engine.start, and the
+        // AudioConfigWatchdog's handler reads `isInStartSettleWindow` to know
+        // whether to ignore them. If we stamped after engine.start(), the
+        // first synchronous notification would see the old (.distantPast)
+        // timestamp and trigger the feedback loop.
+        lastStartAt = Date()
+
         let input = engine.inputNode
         do {
             try input.setVoiceProcessingEnabled(true)
@@ -73,6 +98,10 @@ public final class AudioCapture {
 
         engine.prepare()
         try engine.start()
+        // Refresh the timestamp — engine.start() can take tens of ms so the
+        // settle window measured from the original stamp would already be
+        // half-consumed.
+        lastStartAt = Date()
         Loggers.voice.info("audio capture started")
     }
 
