@@ -30,6 +30,8 @@ public final class AppCoordinator {
 
     private var rotation: RotationOrchestrator!
     private var effects: EffectLog!
+    private var tools: ToolRegistry!
+    private var memoryTools: MemoryTools!
 
     private var sessionTimer: Task<Void, Never>?
     private var receiveLoopTask: Task<Void, Never>?
@@ -52,6 +54,20 @@ public final class AppCoordinator {
         self.rotation = RotationOrchestrator(log: state.log, effects: effects)
         self.permission = PermissionWatchdog(log: state.log)
         self.supervisor = WatchdogSupervisor(log: state.log)
+        self.tools = ToolRegistry(effects: effects)
+        self.memoryTools = MemoryTools(log: state.log)
+        // Register Plan 2 MVP tools. Read-only — memory writes go to the
+        // event log directly, not through EffectLog (the effect-log discipline
+        // is for world-mutating actions in the macOS sense, not our own log).
+        let mt = self.memoryTools!
+        let ct = ClipboardTools()
+        let registry = self.tools!
+        Task {
+            await registry.register("remember",       mt.rememberToolImpl())
+            await registry.register("recall",         mt.recallToolImpl())
+            await registry.register("forget",         mt.forgetToolImpl())
+            await registry.register("clipboard_read", ct.readToolImpl())
+        }
 
         self.sleepWake = SleepWakeWatchdog(
             onSleep: { [weak self] in self?.handleSleep() },
@@ -102,7 +118,9 @@ public final class AppCoordinator {
             Loggers.app.warning("No API key in Keychain; staying offline.")
             return
         }
-        let cfg = LiveSessionConfig(apiKey: key)
+        var cfg = LiveSessionConfig(apiKey: key)
+        cfg.toolDeclarations = ToolDeclarations.mvp
+        cfg.systemPrompt = Persona.systemPrompt(mode: "default")
         let session = GeminiLiveSession(config: cfg)
         do {
             try await session.connect()
@@ -234,16 +252,31 @@ public final class AppCoordinator {
                 await log.append(kind: EventKind.turnAssistant,
                                  payload: .object(["text": .string(text)]))
 
-            case .toolCall(let id, let name, _):
-                // Plan 2 will dispatch to ToolRegistry. Plan 1: respond with "not implemented".
-                try? await session.send(.toolResult(
-                    callID: id,
-                    output: .object([
-                        "status": .string("failed"),
-                        "detail": .string("Tools not yet implemented in Plan 1"),
+            case .toolCall(let id, let name, let args):
+                // Amendment AH: thread geminiCallID through to EffectLog.
+                // Persist the request before dispatch so the log reflects what
+                // Gemini asked even if dispatch fails or the session is torn
+                // down mid-call.
+                let argsForLog = args
+                let log = state.log
+                await log.append(
+                    kind: EventKind.turnToolCall,
+                    geminiCallID: id,
+                    payload: .object([
+                        "name": .string(name),
+                        "args": argsForLog,
                     ])
-                ))
-                Loggers.action.warning("toolCall \(name, privacy: .public) ignored (Plan 1)")
+                )
+                let registry = self.tools!
+                let result = await registry.dispatch(name: name, args: args, geminiCallID: id)
+                let geminiResponse = result.toGeminiResponse()
+                try? await session.send(.toolResult(callID: id, output: geminiResponse))
+                await log.append(
+                    kind: EventKind.turnToolResult,
+                    geminiCallID: id,
+                    payload: geminiResponse
+                )
+                Loggers.action.info("tool \(name, privacy: .public) → \(result.status.rawValue, privacy: .public)")
 
             case .interrupted:
                 playback.flush()
