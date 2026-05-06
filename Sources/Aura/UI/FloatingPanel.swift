@@ -67,7 +67,7 @@ private struct PanelRoot: View {
             CarryingForwardStrip()
             Divider()
             HStack(spacing: 0) {
-                ConversationPlaceholder()
+                ConversationPane()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 MindPlaceholder()
@@ -77,12 +77,9 @@ private struct PanelRoot: View {
     }
 }
 
-private struct ConversationPlaceholder: View {
+private struct ConversationPane: View {
     var body: some View {
-        VStack {
-            Text("Conversation").foregroundStyle(.secondary).padding()
-            Spacer()
-        }
+        TranscriptView(log: AppState.shared.log)
     }
 }
 

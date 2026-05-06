@@ -118,9 +118,24 @@ public final class AppCoordinator {
             Loggers.app.warning("No API key in Keychain; staying offline.")
             return
         }
+
+        // Plan 3 MVP: assemble the system prompt via Context.swift — the one
+        // place model-context comes together. Reads the user-profile lens
+        // from the log; pure function from inputs.
+        let profile = (try? await Lenses.userProfile(log: state.log)) ?? []
+        let inputs = Context.Inputs(mode: "default", now: Date(), userProfile: profile)
+        let assembled = Context.sessionStartContext(inputs: inputs)
+        await state.log.append(kind: EventKind.contextAssembled, payload: .object([
+            "kind":             .string("sessionStart"),
+            "approx_tokens":    .number(Double(assembled.approxTokens)),
+            "dropped_sections": .array(assembled.droppedSections.map { .string($0) }),
+            "persona_hash":     .string(assembled.personaHash),
+            "facts_count":      .number(Double(profile.count)),
+        ]))
+
         var cfg = LiveSessionConfig(apiKey: key)
         cfg.toolDeclarations = ToolDeclarations.mvp
-        cfg.systemPrompt = Persona.systemPrompt(mode: "default")
+        cfg.systemPrompt = assembled.text
         let session = GeminiLiveSession(config: cfg)
         do {
             try await session.connect()
@@ -305,19 +320,35 @@ public final class AppCoordinator {
         state.setDotState(.rotating)
         let key = Config.apiKey() ?? ""
         let log = state.log
+
+        // Plan 3 MVP: build a real digest via Context.rotationDigest. Inputs
+        // are derived from the log (user profile lens). Goal stack is empty
+        // for now — Plan 3 follow-up adds goal events.
+        let profile = (try? await Lenses.userProfile(log: log)) ?? []
+        let digestInputs = Context.Inputs(mode: "default", now: Date(), userProfile: profile)
+        let digestText = Context.rotationDigest(inputs: digestInputs)
+        await log.append(kind: EventKind.contextAssembled, payload: .object([
+            "kind":         .string("rotationDigest"),
+            "approx_tokens": .number(Double(Context.approxTokens(digestText))),
+            "facts_count":   .number(Double(profile.count)),
+        ]))
+
         do {
             let new = try await rotation.rotate(
                 reason: reason,
                 currentSession: cur,
                 newSessionFactory: {
-                    let s = GeminiLiveSession(config: LiveSessionConfig(apiKey: key))
+                    var newCfg = LiveSessionConfig(apiKey: key)
+                    newCfg.toolDeclarations = ToolDeclarations.mvp
+                    newCfg.systemPrompt = Persona.systemPrompt(mode: "default")
+                    let s = GeminiLiveSession(config: newCfg)
                     try await s.connect()
                     return s
                 },
                 pendingEffectCorrelations: {
                     (try? await EffectLog.findOrphans(log: log)) ?? []
                 },
-                digest: "(Plan 1: minimal digest — full version in Plan 3 Context.swift)",
+                digest: digestText,
                 playback: self.playback,
                 captureMicPaused: { [weak self] in self?.capture?.pauseSending() },
                 captureMicResumed: { [weak self] in
