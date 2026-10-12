@@ -33,6 +33,8 @@ enum Prompt {
         Memory:
         - When the user shares a preference or a lasting fact, save it with remember. Use forget when \
         something is no longer true.
+        - Every conversation is kept. When the user refers to something from before ("what did I ask \
+        you yesterday?", "that article from last week"), search it with recall.
         """
         if !facts.isEmpty {
             text += "\n\nWhat you remember about the user:\n" + facts.map { "- \($0)" }.joined(separator: "\n")

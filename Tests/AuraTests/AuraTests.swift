@@ -104,6 +104,19 @@ final class AuraTests: XCTestCase {
         XCTAssertTrue(out44.dropFirst().allSatisfy { abs($0 - 0.5) < 1e-6 })
     }
 
+    func testHistorySearchMatchesAllWordsMostRecentFirst() {
+        let history = """
+            Oct 1, 2026 at 9:00 AM you: book a dentist appointment
+            Oct 2, 2026 at 9:00 AM aura: Your dentist is on Friday
+            Oct 3, 2026 at 9:00 AM you: open Safari
+            Oct 4, 2026 at 9:00 AM you: move the Dentist appointment
+            """
+        let found = Memory.search("dentist appointment", in: history, limit: 1)
+        XCTAssertEqual(found, ["Oct 4, 2026 at 9:00 AM you: move the Dentist appointment"])
+        XCTAssertEqual(Memory.search("dentist", in: history, limit: 10).count, 3)
+        XCTAssertTrue(Memory.search("piano", in: history, limit: 10).isEmpty)
+    }
+
     func testToolRejectsMissingArguments() async {
         let result = await Tools.run("open", [:])
         XCTAssertNotNil(result["error"])

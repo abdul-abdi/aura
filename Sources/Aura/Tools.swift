@@ -36,6 +36,8 @@ enum Tools {
         fn("remember", "Save a lasting fact about the user or their preferences.",
            ["fact": str("The fact, as one short sentence")], required: ["fact"]),
         fn("forget", "Delete remembered facts that contain this text.", ["text": str("Text to match")], required: ["text"]),
+        fn("recall", "Search past conversations with the user (most recent matches, with dates).",
+           ["query": str("Words to look for, e.g. \"dentist appointment\"")], required: ["query"]),
         fn("quit_aura", "Quit Aura. Only when the user asks you to quit or close Aura."),
     ]
 
@@ -134,6 +136,10 @@ enum Tools {
         case "forget":
             guard let text else { return missing("text") }
             return ["removed": Memory.forget(text)]
+        case "recall":
+            guard let query = args["query"] as? String else { return missing("query") }
+            let lines = Memory.recall(query)
+            return lines.isEmpty ? ["result": "Nothing found"] : ["matches": lines]
         default:
             return ["error": "Unknown tool \(name)"]
         }

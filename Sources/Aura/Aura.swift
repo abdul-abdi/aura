@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Network
 import os
 
 let log = Logger(subsystem: "com.aura.desktop", category: "aura")
@@ -35,6 +36,8 @@ final class Aura: ObservableObject, @unchecked Sendable {
     private var lastFrame = Data()
     private var speaking = false  // Live queue
     private var tools: Task<Void, Never>?  // Live queue: tools run one at a time
+    private let network = NWPathMonitor()
+    private var offline = false  // network queue
 
     init() {
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -44,6 +47,13 @@ final class Aura: ObservableObject, @unchecked Sendable {
             self.audio.restart()
             self.live?.reconnect()
         }
+        // Reconnect the moment the network comes back instead of waiting out the backoff.
+        network.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            if path.status == .satisfied, self.offline { self.live?.reconnect() }
+            self.offline = path.status != .satisfied
+        }
+        network.start(queue: DispatchQueue(label: "aura.network"))
         HotKey.register { [weak self] in self?.toggleMute() }
         if Config.apiKey != nil, Permissions.microphone {
             start()
@@ -94,8 +104,9 @@ final class Aura: ObservableObject, @unchecked Sendable {
     func send(_ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let live else { return }
+        finishOpenLine()
         lines.append(Line(kind: .user, text: text))
-        openLine = nil
+        Memory.record("you", text)
         live.sendText(text)
     }
 
@@ -142,7 +153,7 @@ final class Aura: ObservableObject, @unchecked Sendable {
             }
             if content["turnComplete"] as? Bool == true {
                 setSpeaking(false)
-                DispatchQueue.main.async { self.openLine = nil }
+                DispatchQueue.main.async { self.finishOpenLine() }
             }
         }
         let calls = (message["toolCall"] as? [String: Any])?["functionCalls"] as? [[String: Any]] ?? []
@@ -158,8 +169,10 @@ final class Aura: ObservableObject, @unchecked Sendable {
             await previous?.value
             guard let self, let live = self.live else { return }
             DispatchQueue.main.async {
-                self.lines.append(Line(kind: .action, text: Tools.describe(name, args)))
-                self.openLine = .action
+                let text = Tools.describe(name, args)
+                self.finishOpenLine()
+                self.lines.append(Line(kind: .action, text: text))
+                Memory.record("action", text)
             }
             if name == "quit_aura" {
                 live.sendToolResponse(id: id, name: name, response: ["ok": true])
@@ -222,10 +235,19 @@ final class Aura: ObservableObject, @unchecked Sendable {
         } else {
             let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return }
+            finishOpenLine()
             lines.append(Line(kind: kind, text: text))
             openLine = kind
         }
         if lines.count > 200 { lines.removeFirst(lines.count - 200) }
+    }
+
+    /// The streaming line is complete: save it to the conversation history.
+    private func finishOpenLine() {
+        if let kind = openLine, let last = lines.last, last.kind == kind {
+            Memory.record(kind == .user ? "you" : "aura", last.text)
+        }
+        openLine = nil
     }
 
     private func markLastActionFailed() {

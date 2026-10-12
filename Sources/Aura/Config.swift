@@ -78,6 +78,38 @@ enum Memory {
         save(kept)
         return facts.count - kept.count
     }
+
+    /// Every conversation line, one per line: "Oct 12, 2026 at 2:03 PM you: …".
+    static let history = file.deletingLastPathComponent().appendingPathComponent("history.txt")
+
+    static func record(_ who: String, _ text: String) {
+        let stamp = Date().formatted(date: .abbreviated, time: .shortened)
+        let line = "\(stamp) \(who): \(text.replacingOccurrences(of: "\n", with: " "))\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: history) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? FileManager.default.createDirectory(
+                at: history.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: history)
+        }
+    }
+
+    /// Most recent past-conversation lines containing every word of `query`.
+    static func recall(_ query: String, limit: Int = 20) -> [String] {
+        search(query, in: (try? String(contentsOf: history, encoding: .utf8)) ?? "", limit: limit)
+    }
+
+    static func search(_ query: String, in text: String, limit: Int) -> [String] {
+        let words = query.lowercased().split(whereSeparator: \.isWhitespace)
+        let matches = text.split(whereSeparator: \.isNewline).filter { line in
+            let lower = line.lowercased()
+            return words.allSatisfy { lower.contains($0) }
+        }
+        return matches.suffix(limit).map(String.init)
+    }
 }
 
 enum Permissions {

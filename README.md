@@ -24,7 +24,7 @@ api_key = "..."
 # voice = "Kore"
 ```
 
-Remembered facts are stored in `~/Library/Application Support/Aura/memory.json`.
+Memory lives in `~/Library/Application Support/Aura/`: `memory.json` holds facts you asked it to remember (included in every session), and `history.txt` holds every conversation, which Aura searches when you refer to something from before.
 
 ## When something's wrong
 
@@ -38,7 +38,7 @@ Remembered facts are stored in `~/Library/Application Support/Aura/memory.json`.
 | `Live.swift` | Gemini Live WebSocket. Reconnects forever and resumes the conversation. |
 | `Audio.swift` | Mic and speaker with Apple's echo cancellation, so it never hears itself. |
 | `Screen.swift` | Screen capture and 0–1000 coordinate mapping. |
-| `Tools.swift`, `AX.swift`, `Input.swift` | What Gemini can do: accessibility elements, clicks, keys, menus, AppleScript, browser JS, memory. |
+| `Tools.swift`, `AX.swift`, `Input.swift` | What Gemini can do: accessibility elements, clicks, keys, menus, AppleScript, browser JS, memory and recall. |
 | `Aura.swift`, `Panel.swift`, `AuraApp.swift` | Wiring, the menu bar panel and the hotkey. |
 | `Config.swift`, `Prompt.swift` | Settings, memory, permissions, instructions. |
 
