@@ -102,7 +102,13 @@ private struct Setup: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("1. Gemini API key").font(.headline)
-                SecureField("Paste your key", text: $key).textFieldStyle(.roundedBorder)
+                HStack {
+                    SecureField("Paste your key", text: $key).textFieldStyle(.roundedBorder)
+                    Button("Paste") {
+                        key = NSPasteboard.general.string(forType: .string)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? key
+                    }
+                }
                 Link("Get a free key at aistudio.google.com", destination: URL(string: "https://aistudio.google.com/apikey")!)
                     .font(.caption)
             }

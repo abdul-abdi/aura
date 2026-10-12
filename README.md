@@ -24,6 +24,8 @@ api_key = "..."
 # voice = "Kore"
 ```
 
+If your key can't use the newer model (e.g. a free-tier key), Aura falls back to `gemini-2.5-flash-native-audio-preview-12-2025` automatically.
+
 Remembered facts are stored in `~/Library/Application Support/Aura/memory.json`.
 
 ## When something's wrong

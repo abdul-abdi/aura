@@ -82,6 +82,28 @@ final class AuraTests: XCTestCase {
         XCTAssertFalse(Prompt.instructions(facts: []).contains("What you remember"))
     }
 
+    func testResamplerConvertsTo16kAcrossBuffers() {
+        // 48 kHz ramp split into uneven buffers must come out as one continuous 16 kHz ramp.
+        let input = (0..<4800).map { Float($0) / 4800 }
+        var resampler = Resampler(from: 48_000)
+        var output: [Float] = []
+        var start = 0
+        for size in [1000, 7, 1793, 2000] {
+            input[start..<(start + size)].withUnsafeBufferPointer { output += resampler.process($0) }
+            start += size
+        }
+        XCTAssertEqual(output.count, 1600, accuracy: 1)
+        for (i, value) in output.enumerated() {
+            XCTAssertEqual(value, Float(i * 3) / 4800, accuracy: 1e-4)
+        }
+
+        var resampler44 = Resampler(from: 44_100)
+        let ones = [Float](repeating: 0.5, count: 4410)
+        let out44 = ones.withUnsafeBufferPointer { resampler44.process($0) }
+        XCTAssertEqual(out44.count, 1600, accuracy: 1)
+        XCTAssertTrue(out44.dropFirst().allSatisfy { abs($0 - 0.5) < 1e-6 })
+    }
+
     func testToolRejectsMissingArguments() async {
         let result = await Tools.run("open", [:])
         XCTAssertNotNil(result["error"])

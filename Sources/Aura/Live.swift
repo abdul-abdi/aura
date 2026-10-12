@@ -12,7 +12,8 @@ final class Live: NSObject, URLSessionWebSocketDelegate {
     var onState: ((State) -> Void)?
 
     private let apiKey: String
-    private let makeSetup: (_ resumeHandle: String?) -> [String: Any]
+    private let models: [String]
+    private let makeSetup: (_ model: String, _ resumeHandle: String?) -> [String: Any]
     private let queue: OperationQueue = {
         let q = OperationQueue()
         q.maxConcurrentOperationCount = 1
@@ -27,13 +28,17 @@ final class Live: NSObject, URLSessionWebSocketDelegate {
 
     // Only touched on `queue`.
     private var resumeHandle: String?
+    private var modelIndex = 0
     private var readyAt = Date.distantPast
     private var failures = 0
     private var closeReason: String?
     private var connectToken = 0
 
-    init(apiKey: String, setup: @escaping (_ resumeHandle: String?) -> [String: Any]) {
+    /// `models` are tried in order: if the server rejects one during setup (e.g. it
+    /// isn't available on a free-tier key), the next one is used.
+    init(apiKey: String, models: [String], setup: @escaping (_ model: String, _ resumeHandle: String?) -> [String: Any]) {
         self.apiKey = apiKey
+        self.models = models
         self.makeSetup = setup
     }
 
@@ -62,10 +67,9 @@ final class Live: NSObject, URLSessionWebSocketDelegate {
     func sendImage(_ jpeg: Data) {
         sendRealtime(["video": ["mimeType": "image/jpeg", "data": jpeg.base64EncodedString()]])
     }
-    func sendText(_ text: String) { sendRealtime(["text": text]) }
-
-    /// Add context to the conversation and ask the model to respond.
-    func sendContext(_ text: String) {
+    /// A user turn as text (typed messages, and context such as the greeting cue).
+    func sendText(_ text: String) {
+        guard isReady else { return }
         send(["clientContent": ["turns": [["role": "user", "parts": [["text": text]]]], "turnComplete": true]])
     }
 
@@ -102,7 +106,7 @@ final class Live: NSObject, URLSessionWebSocketDelegate {
         task.maximumMessageSize = 32 << 20
         self.task = task
         task.resume()
-        send(makeSetup(resumeHandle), on: task)
+        send(makeSetup(models[modelIndex], resumeHandle), on: task)
         receive(task)
     }
 
@@ -129,6 +133,7 @@ final class Live: NSObject, URLSessionWebSocketDelegate {
 
     private func handle(_ json: [String: Any], _ task: URLSessionWebSocketTask) {
         if json["setupComplete"] != nil {
+            log.info("Connected to Gemini with \(self.models[self.modelIndex], privacy: .public)")
             readyAt = Date()
             locked { _ready = true }
             onState?(.ready)
@@ -160,6 +165,13 @@ final class Live: NSObject, URLSessionWebSocketDelegate {
             // A stale resumption handle can make every setup fail; start fresh.
             if failures >= 2 { resumeHandle = nil }
             onState?(.failed(closeReason ?? error))
+            // The server rejected this model (not just a network error): try the next one.
+            if let reason = closeReason, modelIndex + 1 < models.count {
+                log.error("\(self.models[self.modelIndex], privacy: .public) rejected (\(reason, privacy: .public)); trying \(self.models[self.modelIndex + 1], privacy: .public)")
+                modelIndex += 1
+                resumeHandle = nil
+                failures = 0
+            }
         }
         closeReason = nil
         scheduleConnect(after: healthy ? 0.2 : min(30, 0.5 * pow(2, Double(failures))))
