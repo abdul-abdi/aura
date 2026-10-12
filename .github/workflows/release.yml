@@ -34,8 +34,8 @@ jobs:
             # Triggered by tag push — extract version from tag
             VERSION="${GITHUB_REF#refs/tags/v}"
           else
-            # Triggered manually — read version from Cargo.toml
-            VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+            # Triggered manually — read version from VERSION
+            VERSION=$(cat VERSION)
           fi
           if [[ -z "$VERSION" ]]; then
             echo "::error::Could not determine version"
@@ -44,12 +44,12 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "### Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify Cargo.toml matches version
+      - name: Verify VERSION matches release
         run: |
-          CARGO_VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+          FILE_VERSION=$(cat VERSION)
           TAG_VERSION="${{ steps.version.outputs.version }}"
-          if [[ "$CARGO_VERSION" != "$TAG_VERSION" ]]; then
-            echo "::error::Cargo.toml version ($CARGO_VERSION) does not match release version (v$TAG_VERSION). Update Cargo.toml first."
+          if [[ "$FILE_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::VERSION ($FILE_VERSION) does not match release version (v$TAG_VERSION). Update VERSION first."
             exit 1
           fi
 
@@ -57,7 +57,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           if git tag -l "v${VERSION}" | grep -q .; then
-            echo "::error::Tag v${VERSION} already exists. Bump the version in Cargo.toml."
+            echo "::error::Tag v${VERSION} already exists. Bump VERSION."
             exit 1
           fi
 
@@ -68,51 +68,11 @@ jobs:
           git tag "v${VERSION}"
           git push origin "v${VERSION}"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-
-      - name: Cache Cargo registry and target
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      # objc/cocoa crates emit ~30 `unexpected_cfg` warnings on every build —
-      # these are upstream noise. Allow that lint so clippy exits cleanly.
-      - name: Clippy
-        run: cargo clippy --workspace --locked -- -D warnings -A unexpected_cfgs
-
       - name: Test
-        run: cargo test --workspace --locked
+        run: swift test
 
-      - name: Build Rust daemon (release)
-        run: cargo build --release --locked -p aura-daemon
-
-      - name: Bundle Aura.app
-        run: bash scripts/bundle.sh --strict
-
-      - name: Create DMG
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          DMG_DIR=$(mktemp -d)
-          trap 'rm -rf "$DMG_DIR"' EXIT
-          cp -r target/release/Aura.app "$DMG_DIR/Aura.app"
-          ln -s /Applications "$DMG_DIR/Applications"
-          hdiutil create \
-            -volname "Aura" \
-            -srcfolder "$DMG_DIR" \
-            -ov \
-            -format UDZO \
-            "target/release/Aura-${VERSION}.dmg"
+      - name: Build Aura.app and DMG
+        run: bash scripts/bundle.sh --dmg
 
       - name: Fetch tags for release notes
         run: git fetch --tags
@@ -130,5 +90,5 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           name: Aura v${{ steps.version.outputs.version }}
           body_path: /tmp/release-notes.md
-          files: target/release/Aura-${{ steps.version.outputs.version }}.dmg
+          files: build/Aura-${{ steps.version.outputs.version }}.dmg
 

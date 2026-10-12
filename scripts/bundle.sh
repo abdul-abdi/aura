@@ -1,209 +1,63 @@
 #!/usr/bin/env bash
-# bundle.sh — Build Aura.app (SwiftUI + Rust daemon) and optionally create a .dmg
+# bundle.sh — Build build/Aura.app (and optionally a .dmg)
 #
 # Usage:
-#   bash scripts/bundle.sh          # Build .app only
-#   bash scripts/bundle.sh --dmg    # Build .app + create .dmg installer
-#   bash scripts/bundle.sh --legacy # Build old Cocoa-only .app (no SwiftUI)
+#   bash scripts/bundle.sh          # build/Aura.app
+#   bash scripts/bundle.sh --dmg    # also build/Aura-<version>.dmg
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_NAME="Aura"
-VERSION=$(grep '^version' "${PROJECT_DIR}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
-BUNDLE_DIR="${PROJECT_DIR}/target/release/${APP_NAME}.app"
-DMG_PATH="${PROJECT_DIR}/target/release/${APP_NAME}-${VERSION}.dmg"
+VERSION=$(cat VERSION)
+APP=build/Aura.app
 
-BUILD_DMG=false
-LEGACY=false
-STRICT=false
-for arg in "$@"; do
-    case "$arg" in
-        --dmg) BUILD_DMG=true ;;
-        --legacy) LEGACY=true ;;
-        --strict) STRICT=true ;;
-    esac
-done
+echo "==> Building Aura ${VERSION} (release)..."
+swift build -c release
+BIN="$(swift build -c release --show-bin-path)/Aura"
 
-SIGN_IDENTITY="-"
+echo "==> Creating ${APP}..."
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN" "$APP/Contents/MacOS/Aura"
 
-# ── Step 1: Build Rust daemon ──────────────────────────────────────────────
-
-echo "==> Building Rust daemon (release)..."
-cargo build --release -p aura-daemon --manifest-path "${PROJECT_DIR}/Cargo.toml"
-
-DAEMON_BINARY="${PROJECT_DIR}/target/release/aura-daemon"
-if [[ ! -f "$DAEMON_BINARY" ]]; then
-    echo "ERROR: Daemon binary not found at ${DAEMON_BINARY}"
-    exit 1
-fi
-
-# ── Step 2: Build SwiftUI app (unless --legacy) ───────────────────────────
-
-if [[ "$LEGACY" == false ]]; then
-    SWIFTUI_DIR="${PROJECT_DIR}/AuraApp"
-    if [[ -d "$SWIFTUI_DIR" ]]; then
-        echo "==> Building SwiftUI app (release)..."
-        cd "$SWIFTUI_DIR"
-        swift build -c release 2>&1 | tail -3
-        cd "$PROJECT_DIR"
-
-        SWIFTUI_BINARY="${SWIFTUI_DIR}/.build/release/AuraApp"
-        if [[ ! -f "$SWIFTUI_BINARY" ]]; then
-            if [[ "$STRICT" == true ]]; then
-                echo "ERROR: SwiftUI binary not found. Failing (--strict mode)."
-                exit 1
-            fi
-            echo "WARNING: SwiftUI binary not found. Falling back to legacy build."
-            LEGACY=true
-        fi
-    else
-        echo "WARNING: AuraApp/ directory not found. Falling back to legacy build."
-        LEGACY=true
-    fi
-fi
-
-# ── Step 3: Create .app bundle ─────────────────────────────────────────────
-
-echo "==> Creating ${APP_NAME}.app bundle..."
-rm -rf "${BUNDLE_DIR}"
-mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
-mkdir -p "${BUNDLE_DIR}/Contents/Resources"
-
-if [[ "$LEGACY" == true ]]; then
-    # Legacy mode: daemon is the main executable (Cocoa menu bar)
-    MAIN_EXECUTABLE="aura-daemon"
-    cp "${DAEMON_BINARY}" "${BUNDLE_DIR}/Contents/MacOS/aura-daemon"
-else
-    # New mode: SwiftUI app is main executable, daemon is a helper
-    MAIN_EXECUTABLE="AuraApp"
-    cp "${SWIFTUI_BINARY}" "${BUNDLE_DIR}/Contents/MacOS/AuraApp"
-    cp "${DAEMON_BINARY}" "${BUNDLE_DIR}/Contents/MacOS/aura-daemon"
-fi
-
-# ── Step 4: Info.plist ─────────────────────────────────────────────────────
-
-cat > "${BUNDLE_DIR}/Contents/Info.plist" << PLIST
+cat > "$APP/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleDisplayName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.aura.desktop</string>
-    <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundleExecutable</key>
-    <string>${MAIN_EXECUTABLE}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Aura needs microphone access for voice interaction with your AI assistant.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Aura uses screen capture to understand what's on your screen when asked for help.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Aura uses AppleScript to automate macOS tasks on your behalf.</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026 Aura. All rights reserved.</string>
+    <key>CFBundleName</key><string>Aura</string>
+    <key>CFBundleDisplayName</key><string>Aura</string>
+    <key>CFBundleIdentifier</key><string>com.aura.desktop</string>
+    <key>CFBundleExecutable</key><string>Aura</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Aura listens so you can talk to it.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Aura controls apps for you when you ask it to.</string>
 </dict>
 </plist>
 PLIST
 
-# ── Step 5: Generate app icon ──────────────────────────────────────────────
+echo "==> Generating icon..."
+swift scripts/generate-icon.swift "$APP/Contents/Resources" > /dev/null 2>&1 \
+    || echo "WARNING: icon generation failed; the app will use the default icon"
 
-echo "==> Generating app icon..."
-swift "${SCRIPT_DIR}/generate-icon.swift" "${BUNDLE_DIR}/Contents/Resources" 2>/dev/null
+# Ad-hoc signature with a stable designated requirement, so macOS keeps the
+# Microphone, Screen Recording and Accessibility permissions across rebuilds.
+echo "==> Signing..."
+codesign --force --sign - -r='designated => identifier "com.aura.desktop"' "$APP"
 
-if [[ ! -f "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns" ]]; then
-    echo "WARNING: Icon generation failed. App will use default icon."
+if [[ "${1:-}" == "--dmg" ]]; then
+    DMG="build/Aura-${VERSION}.dmg"
+    STAGE=$(mktemp -d)
+    cp -R "$APP" "$STAGE/"
+    ln -s /Applications "$STAGE/Applications"
+    rm -f "$DMG"
+    hdiutil create -volname Aura -srcfolder "$STAGE" -ov -format UDZO "$DMG" > /dev/null
+    rm -rf "$STAGE"
+    echo "==> Created $DMG"
 fi
 
-# ── Step 6: Ad-hoc code sign with stable designated requirements ──────────
-# Override the default designated requirement (DR) so TCC grants persist
-# across rebuilds. Without -r, ad-hoc signing pins the DR to the CDHash
-# which changes every build, causing macOS to re-prompt for permissions.
-
-echo "==> Code signing (ad-hoc, stable DR)..."
-# Sign the daemon first with its own stable identifier
-codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.daemon \
-    -r='designated => identifier "com.aura.daemon"' \
-    "${BUNDLE_DIR}/Contents/MacOS/aura-daemon" 2>/dev/null || {
-    echo "WARNING: Code signing failed for aura-daemon."
-}
-# Sign the main app executable
-if [[ "$LEGACY" == false ]]; then
-    codesign --force --sign "$SIGN_IDENTITY" --identifier com.aura.desktop \
-        -r='designated => identifier "com.aura.desktop"' \
-        "${BUNDLE_DIR}/Contents/MacOS/AuraApp" 2>/dev/null || {
-        echo "WARNING: Code signing failed for AuraApp."
-    }
-fi
-# Sign the bundle as a whole (--deep skipped: inner binaries already signed)
-codesign --force --sign "$SIGN_IDENTITY" \
-    -r='designated => identifier "com.aura.desktop"' \
-    "${BUNDLE_DIR}" 2>/dev/null || {
-    echo "WARNING: Code signing failed for bundle. App may trigger Gatekeeper warnings."
-}
-
-# ── Step 7: Create .dmg installer (optional) ──────────────────────────────
-
-if [[ "$BUILD_DMG" == true ]]; then
-    echo "==> Creating DMG installer..."
-
-    # Staging directory with app + Applications symlink
-    DMG_STAGING=$(mktemp -d)
-    cp -R "${BUNDLE_DIR}" "${DMG_STAGING}/"
-    ln -s /Applications "${DMG_STAGING}/Applications"
-
-    # Remove old DMG if it exists
-    rm -f "${DMG_PATH}"
-
-    # Create compressed DMG
-    hdiutil create \
-        -volname "${APP_NAME}" \
-        -srcfolder "${DMG_STAGING}" \
-        -ov \
-        -format UDZO \
-        -imagekey zlib-level=9 \
-        "${DMG_PATH}" \
-        2>/dev/null
-
-    rm -rf "${DMG_STAGING}"
-
-    DMG_SIZE=$(du -h "${DMG_PATH}" | cut -f1 | tr -d ' ')
-    echo ""
-    echo "  DMG created: ${DMG_PATH} (${DMG_SIZE})"
-    echo "  Share this file — recipients drag Aura to Applications to install."
-fi
-
-# ── Done ───────────────────────────────────────────────────────────────────
-
-APP_SIZE=$(du -sh "${BUNDLE_DIR}" | cut -f1 | tr -d ' ')
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  ${APP_NAME}.app built successfully (${APP_SIZE})"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "  Install:  cp -r '${BUNDLE_DIR}' /Applications/"
-echo "  Run:      open /Applications/${APP_NAME}.app"
-echo ""
-if [[ "$LEGACY" == false ]]; then
-    echo "  Mode:     SwiftUI app + Rust daemon"
-    echo "  Hotkey:   Cmd+Shift+A to toggle floating panel"
-else
-    echo "  Mode:     Legacy (Cocoa menu bar only)"
-fi
-echo ""
-echo "  First run will prompt for your Gemini API key."
-echo ""
+echo "==> Built $APP"

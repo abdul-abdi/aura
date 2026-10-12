@@ -21,7 +21,7 @@ jobs:
       - name: Read version and create tag if missing
         id: tag
         run: |
-          VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' Cargo.toml | head -1)
+          VERSION=$(cat VERSION)
           TAG="v${VERSION}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"

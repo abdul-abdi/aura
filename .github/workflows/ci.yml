@@ -15,38 +15,24 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ── Fast checks (seconds) ──────────────────────────────────────────────
-  format:
-    name: Formatting
+  # ── Build, test, bundle ────────────────────────────────────────────────
+  build:
+    name: Build & Test
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  lint:
-    name: Clippy
-    runs-on: macos-15
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        with:
-          components: clippy
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-clippy-
-      # objc/cocoa crates emit ~30 `unexpected_cfg` warnings — upstream noise.
-      - run: cargo clippy --workspace --locked -- -D warnings -A unexpected_cfgs
+      - run: swift --version
+      - name: Test
+        run: swift test
+      - name: Bundle Aura.app
+        run: bash scripts/bundle.sh
+      - name: Verify bundle
+        run: |
+          test -x build/Aura.app/Contents/MacOS/Aura
+          plutil -lint build/Aura.app/Contents/Info.plist
+          codesign --verify --verbose build/Aura.app
+          echo "Aura.app: $(du -sh build/Aura.app | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
 
   # ── Commit message lint ────────────────────────────────────────────────
   commits:
@@ -84,142 +70,6 @@ jobs:
           fi
           echo "All commits follow conventional commit format"
 
-  # ── Tests (parallel with lint) ─────────────────────────────────────────
-  test:
-    name: Tests
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-test-
-      - name: Run tests
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test --workspace --locked 2>&1 | tee /tmp/test-output.txt
-      - name: Summarize results
-        if: always()
-        run: |
-          echo "## Test Results" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep '^test result:' /tmp/test-output.txt >> "$GITHUB_STEP_SUMMARY" || echo "No results found" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          PASSED=$(grep -oE '[0-9]+ passed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
-          FAILED=$(grep -oE '[0-9]+ failed' /tmp/test-output.txt | awk '{s+=$1} END {print s+0}')
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Total: ${PASSED} passed, ${FAILED} failed**" >> "$GITHUB_STEP_SUMMARY"
-
-  # ── Code coverage ──────────────────────────────────────────────────────
-  coverage:
-    name: Code Coverage
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        with:
-          components: llvm-tools-preview
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            ~/.cargo/bin/cargo-llvm-cov
-            target/
-          key: ${{ runner.os }}-cov-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cov-
-      - name: Install cargo-llvm-cov
-        run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked
-      - name: Generate coverage
-        run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee /tmp/cov-output.txt
-      - name: Coverage summary
-        if: always()
-        run: |
-          cargo llvm-cov report --workspace 2>&1 | tee /tmp/cov-report.txt
-          echo "## Code Coverage" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat /tmp/cov-report.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-  # ── Build verification ─────────────────────────────────────────────────
-  build:
-    name: Build
-    runs-on: macos-15
-    timeout-minutes: 30
-    needs: [format, lint]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-build-
-      - name: Build release binary
-        run: cargo build --release --locked -p aura-daemon
-      - name: Bundle Aura.app
-        run: bash scripts/bundle.sh --strict
-      - name: Verify binary
-        run: |
-          # Ensure the binary exists and is a valid Mach-O executable
-          file target/release/aura-daemon | grep -q "Mach-O"
-          echo "Binary: $(du -h target/release/aura-daemon | cut -f1)"
-
-          # Ensure the app bundle is valid
-          test -f target/release/Aura.app/Contents/MacOS/aura-daemon
-          echo "App bundle: $(du -sh target/release/Aura.app | cut -f1)"
-      - name: Summarize build
-        run: |
-          echo "## Build Artifacts" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Artifact | Size |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|----------|------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| aura-daemon | $(du -h target/release/aura-daemon | cut -f1) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Aura.app | $(du -sh target/release/Aura.app | cut -f1) |" >> "$GITHUB_STEP_SUMMARY"
-
-  # ── Security audit ─────────────────────────────────────────────────────
-  audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-v1
-      - name: Install cargo-audit
-        run: command -v cargo-audit || cargo install cargo-audit --locked
-      - name: Audit dependencies
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo audit 2>&1 | tee /tmp/audit-output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
-
-          echo "## Security Audit" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat /tmp/audit-output.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          exit $EXIT_CODE
-
   # ── PR size warning ────────────────────────────────────────────────────
   pr-size:
     name: PR Size
@@ -235,8 +85,8 @@ jobs:
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
 
-          ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' '*.py' | awk '{s+=$1} END {print s+0}')
-          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.rs' '*.toml' '*.yml' '*.yaml' '*.sh' '*.swift' '*.py' | awk '{s+=$2} END {print s+0}')
+          ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.swift' '*.yml' '*.yaml' '*.sh' | awk '{s+=$1} END {print s+0}')
+          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.swift' '*.yml' '*.yaml' '*.sh' | awk '{s+=$2} END {print s+0}')
           TOTAL=$((ADDITIONS + DELETIONS))
           FILES=$(git diff --name-only "${BASE}..${HEAD}" | wc -l | tr -d ' ')
 
@@ -271,30 +121,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [format, lint, test, build, audit, coverage, commits]
+    needs: [build, commits]
     steps:
       - name: Check required jobs
         run: |
-          echo "format:        ${{ needs.format.result }}"
-          echo "lint:          ${{ needs.lint.result }}"
-          echo "test:          ${{ needs.test.result }}"
-          echo "build:         ${{ needs.build.result }}"
-          echo "audit:         ${{ needs.audit.result }}"
-          echo "coverage:      ${{ needs.coverage.result }}"
-          echo "commits:       ${{ needs.commits.result }}"
-
-          # commits is skipped on push (only runs on PRs) — that's OK.
-          if [[ "${{ needs.format.result }}" != "success" ]] || \
-             [[ "${{ needs.lint.result }}" != "success" ]] || \
-             [[ "${{ needs.test.result }}" != "success" ]] || \
-             [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs.audit.result }}" != "success" ]] || \
-             [[ "${{ needs.coverage.result }}" != "success" ]]; then
-            echo "::error::One or more required checks failed"
+          echo "build:   ${{ needs.build.result }}"
+          echo "commits: ${{ needs.commits.result }}"
+          if [[ "${{ needs.build.result }}" != "success" ]]; then
+            echo "::error::Build & Test failed"
             exit 1
           fi
-          COMMITS="${{ needs.commits.result }}"
-          if [[ "$COMMITS" != "success" && "$COMMITS" != "skipped" ]]; then
+          # commits only runs on pull requests
+          if [[ "${{ needs.commits.result }}" != "success" && "${{ needs.commits.result }}" != "skipped" ]]; then
             echo "::error::Commit message validation failed"
             exit 1
           fi

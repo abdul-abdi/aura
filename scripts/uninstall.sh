@@ -1,95 +1,20 @@
 #!/usr/bin/env bash
-# uninstall.sh — Completely remove Aura and all its data
+# uninstall.sh — Remove Aura, its settings, memory and macOS permissions.
 set -euo pipefail
 
-APP_PATH="/Applications/Aura.app"
-DATA_DIR="$HOME/Library/Application Support/aura"
-CONFIG_DIR="$HOME/.config/aura"
+echo "This removes /Applications/Aura.app, ~/.config/aura (API key),"
+echo "~/Library/Application Support/Aura (memory) and Aura's macOS permissions."
+read -rp "Continue? [y/N] " confirm
+[[ "${confirm:-N}" == [yY] ]] || { echo "Cancelled."; exit 0; }
 
-echo ""
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║         Aura Uninstaller             ║"
-echo "  ╚══════════════════════════════════════╝"
-echo ""
-echo "  This will permanently remove:"
-echo ""
-echo "    • $APP_PATH"
-echo "    • $DATA_DIR"
-echo "      (SQLite database, logs, wake word models)"
-echo "    • $CONFIG_DIR"
-echo "      (config.toml, API key)"
-echo "    • All macOS TCC permissions (Mic, Screen, Accessibility, Automation)"
-echo ""
+pkill -x Aura 2>/dev/null || true
+pkill -x AuraApp 2>/dev/null || true
+pkill -x aura-daemon 2>/dev/null || true
 
-# Confirm
-read -rp "  Continue? [y/N] " confirm
-if [[ "${confirm:-N}" != [yY] ]]; then
-    echo ""
-    echo "  Cancelled. Aura is still installed."
-    echo ""
-    exit 0
-fi
-
-echo ""
-
-# Kill running instances
-if pgrep -x "aura-daemon" > /dev/null 2>&1 || pgrep -f "Aura.app" > /dev/null 2>&1; then
-    echo "  ==> Stopping Aura processes..."
-    pkill -x "aura-daemon" 2>/dev/null || true
-    pkill -f "Aura.app/Contents/MacOS" 2>/dev/null || true
-    sleep 1
-    echo "      Done."
-fi
-
-# Reset macOS TCC permissions so a reinstall requires fresh grants.
-# Both bundle IDs must be reset — the SwiftUI shell (com.aura.desktop) and
-# the Rust daemon (com.aura.daemon) each have independent TCC entries.
-echo "  ==> Resetting macOS permissions..."
 tccutil reset All com.aura.desktop 2>/dev/null || true
-tccutil reset All com.aura.daemon  2>/dev/null || true
-echo "      Done."
+tccutil reset All com.aura.daemon 2>/dev/null || true  # pre-2.0 helper
 
-# Remove app bundle (installed + build artifact)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BUILD_APP="$(dirname "$SCRIPT_DIR")/target/release/${APP_PATH##*/}"
-
-for bundle in "$APP_PATH" "$BUILD_APP"; do
-    if [[ -d "$bundle" ]]; then
-        echo "  ==> Removing $bundle..."
-        rm -rf "$bundle"
-        echo "      Done."
-    else
-        echo "  ==> $bundle not found (skipped)"
-    fi
-done
-
-# Remove data directory (SQLite DB, logs, models, socket)
-if [[ -d "$DATA_DIR" ]]; then
-    echo "  ==> Removing $DATA_DIR..."
-    rm -rf "$DATA_DIR"
-    echo "      Done."
-else
-    echo "  ==> $DATA_DIR not found (skipped)"
-fi
-
-# Remove config directory (API key, config.toml)
-if [[ -d "$CONFIG_DIR" ]]; then
-    echo "  ==> Removing $CONFIG_DIR..."
-    rm -rf "$CONFIG_DIR"
-    echo "      Done."
-else
-    echo "  ==> $CONFIG_DIR not found (skipped)"
-fi
-
-# Clear UserDefaults (onboarding state persists across reinstalls otherwise)
-echo "  ==> Clearing UserDefaults..."
+rm -rf /Applications/Aura.app "$HOME/.config/aura" "$HOME/Library/Application Support/Aura"
 defaults delete com.aura.desktop 2>/dev/null || true
-echo "      Done."
 
-echo ""
-echo "  ╔══════════════════════════════════════╗"
-echo "  ║   Aura has been completely removed.  ║"
-echo "  ╚══════════════════════════════════════╝"
-echo ""
-echo "  To reinstall:  bash scripts/install.sh"
-echo ""
+echo "Aura has been removed."

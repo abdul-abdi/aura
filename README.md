@@ -7,283 +7,87 @@
 **Your Mac, voice-controlled.**
 
 [![macOS](https://img.shields.io/badge/macOS-14+-000000?style=flat-square&logo=apple&logoColor=white)](https://www.apple.com/macos/)
-[![Rust](https://img.shields.io/badge/Rust-native-f74c00?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Swift](https://img.shields.io/badge/Swift-native-F05138?style=flat-square&logo=swift&logoColor=white)](https://www.swift.org)
 [![Gemini](https://img.shields.io/badge/Gemini-Live_API-4285F4?style=flat-square&logo=google&logoColor=white)](https://ai.google.dev/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)](LICENSE)
 
 </div>
 
-
-
-
-You're deep in work. Twelve tabs open, three apps side by side, a document you need to reference while typing into another window. You reach for the mouse, click, switch, scroll, copy, switch back, paste. Repeat. All day.
-
-**What if you could just say it?**
+Aura lives in your menu bar. Talk to it and it hears you, sees your screen, and does things for you: opens apps, clicks, types, uses menus, drives web pages, runs AppleScript, and looks things up.
 
 > *"Open Safari and go to the project board."*
->
-> *"Take a look at my screen and summarize what's going on."*
->
-> *"Move the mouse to that submit button and click it."*
->
-> *"Press Cmd+Shift+4 and take a screenshot."*
+> *"What's on my screen? Summarize it."*
+> *"Reply to this email saying I'll be there at 3."*
+> *"Remember that I prefer dark mode."*
 
-Aura is an AI that lives in your menu bar. It hears you, sees your screen, and acts — moving the mouse, typing, clicking, running scripts — all through natural conversation. No keyboard shortcuts to memorize. No workflow apps to configure. Just talk.
-
-Aura speaks with **Kore**, a calm, clear voice from Gemini's native audio model — chosen for its natural cadence in back-and-forth conversation. It doesn't narrate actions or over-explain. It responds the way a competent colleague would: briefly, directly, then acts. When you interrupt mid-sentence, it stops immediately and adapts — conversations feel human, not scripted.
-
-Built on the **Gemini Live API** for real-time bidirectional audio and vision streaming. Everything else runs locally on your Mac — all you need is a Gemini API key.
-
-### Built with
-
-| Google Technology | How Aura uses it |
-|---|---|
-| **Gemini Live API** | Bidirectional WebSocket for simultaneous audio + vision streaming |
-| **Gemini 3.8 Live** (native audio) | Real-time voice conversation with native speech synthesis |
-| **Gemini 3.8 Flash** | Vision oracle — refines click coordinates from screenshots |
-| **Gemini 3.5 Flash-Lite** | End-of-session memory consolidation into local facts |
-| **Google Search grounding** | Live web answers (weather, news, facts) without leaving the conversation |
-
----
-
-## How it works
-
-A small green dot appears in your menu bar. That's Aura, always listening.
-
-When you speak, your voice streams in real-time to Google's Gemini Live API. Aura simultaneously watches your screen at 2 frames per second, so it always knows what you're looking at. When Gemini decides to act, it calls one of Aura's native tools — and your Mac responds instantly.
-
-The entire pipeline — voice capture, screen analysis, tool execution — runs as native Rust. No Electron. No browser. No latency from web tech. Just raw speed on bare metal macOS.
-
-## What Aura can do
-
-| | Capability | How it works |
-|---|---|---|
-| **Talk** | Real-time voice conversation | 16kHz capture, 24kHz playback, barge-in detection |
-| **See** | Understands your screen | 2 FPS capture with change detection, reads accessibility labels |
-| **Click** | Mouse control | Move, click (left/right, single/double/triple), scroll, drag — coordinate accuracy depends on Gemini's vision |
-| **Type** | Keyboard automation | Type text, press shortcuts (Cmd+C, Cmd+V, etc.), special keys |
-| **Script** | AppleScript & shell | Control any macOS app — open files, switch tabs, manage windows |
-| **Search** | Live web answers | Google Search grounding for real-time facts, weather, news |
-| **Ground** | Anti-hallucination | Continuous screen feedback, accessibility data, Search grounding, vision oracle fallback |
-| **Remember** | Persistent memory | SQLite-backed session history across restarts |
-| **Protect** | Defense-in-depth safety | Shell script blocking, metacharacter rejection, obfuscation detection, terminal app blocking |
-
-## Example commands
-
-```
-"Open Finder and go to my Downloads folder."
-"What app am I looking at right now?"
-"Click the blue button in the top right."
-"Type 'meeting notes' into the search bar and press Enter."
-"Drag that file to the Desktop."
-"Press Cmd+Z to undo."
-"Close this window."
-```
-
-## Native tools (20)
-
-Gemini calls these through the Live API's function calling protocol. Every tool maps to a native macOS API — no shell wrappers, no browser automation frameworks.
-
-| Category | Tools |
-|---|---|
-| **Mouse** | `click`, `click_element`, `context_menu_click`, `move_mouse`, `drag`, `scroll` |
-| **Keyboard** | `type_text`, `press_key`, `select_text` |
-| **Apps** | `activate_app`, `click_menu_item` |
-| **Scripts** | `run_applescript`, `run_javascript`, `run_shell_command` |
-| **Memory** | `save_memory`, `recall_memory` |
-| **Context** | `get_screen_context`, `write_clipboard` |
-| **System** | `shutdown_aura`, `key_state` |
-| **Web** | Google Search (grounding tool — built into Gemini) |
-
-Tools execute asynchronously (max 8 concurrent). Safe action chains — like click → type → enter — pipeline without screen verification, up to 3 deep with 30ms settle delays.
-
-## Core pipeline
-
-The loop that runs continuously while Aura is active:
-
-```
- 1. Mic captures audio, resamples to 16kHz PCM in ~10ms chunks (512-sample sinc resampler)
- 2. During playback: energy gating filters speaker bleed (1.3x ambient threshold, 2 consecutive frames)
-    Otherwise: all audio streams directly to Gemini (server-side VAD handles turn detection)
- 3. Screen capture sends 2 FPS JPEG (skips unchanged frames via FNV-1a perceptual hash)
- 4. Gemini processes audio + vision simultaneously
- 5. Gemini responds with:
-    ├─ Speech → 24kHz PCM decoded, 40ms pre-buffered, played through system speaker
-    ├─ Tool call → dispatched to native macOS tool → result fed back to Gemini
-    └─ Both → speech streams while tools execute in parallel (max 8 concurrent)
- 6. Barge-in: if user speaks during playback → playback stops → 300ms reverb guard → Gemini notified
- 7. Screen continuously captured at 2 FPS — Gemini sees results of its actions on the next frame
- 8. Session rotates every 10 min to prevent latency degradation (resumption handle preserved)
- 9. Loop continues until session ends
-```
-
-**Latency budget:** Voice-in to voice-out is bounded by Gemini's inference time. The local pipeline (capture → encode → send, receive → decode → play) adds <50ms total.
-
----
+It's one native Swift app talking directly to the [Gemini Live API](https://ai.google.dev/gemini-api/docs/live). There's no server and no account; all you need is a free Gemini API key.
 
 ## Get started
 
-**1. Prerequisites**
-
-> | Dependency | Install |
-> |---|---|
-> | **Xcode Command Line Tools** | `xcode-select --install` |
-> | **Rust 1.88+** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
->
-> Verify both are installed:
-> ```bash
-> xcode-select -p    # should print /Library/Developer/CommandLineTools or Xcode path
-> cargo --version    # should print cargo 1.88.0 or higher
-> ```
-
-**2. Clone**
-
-> ```bash
-> git clone https://github.com/abdul-abdi/aura.git && cd aura
-> ```
-
-**3. Build, install, and launch**
-
-> ```bash
-> bash scripts/dev.sh
-> ```
->
-> This builds the Rust daemon + SwiftUI app, code-signs with stable identifiers, installs `Aura.app` to `/Applications`, and launches it. One command.
-
-**4. First launch — onboarding**
-
-> Aura walks you through setup on first launch:
->
-> **Step 1 — API key.** Enter your Gemini API key (free from [Google AI Studio](https://aistudio.google.com/apikey)). Aura saves it to `~/.config/aura/config.toml` (mode 600). That's the only setup — no accounts, no cloud services.
->
-> **Step 2 — macOS permissions.** Aura requests three system permissions:
->
-> | Permission | Why | How it's granted |
-> |---|---|---|
-> | Microphone | Voice capture | Standard macOS prompt — click Allow |
-> | Screen Recording | See your screen | Opens System Settings — toggle Aura on, then relaunch |
-> | Accessibility | Control mouse and keyboard | Opens System Settings — toggle Aura on |
->
-> **Screen Recording and Accessibility cannot be auto-granted** — macOS requires you to manually toggle them in System Settings > Privacy & Security. The app detects when they're granted (polls every 2s) and advances automatically.
->
-> **Step 3 — Done.** The daemon launches, connects to Gemini, and the green dot appears in your menu bar.
-
-**5. Start talking**
-
-> You're live. Aura is listening.
-
-### Permissions persist across rebuilds
-
-Aura is ad-hoc code-signed with **stable designated requirements** (`identifier "com.aura.desktop"`). This means macOS TCC permissions (Microphone, Screen Recording, Accessibility) survive rebuilds — you only grant them once. Without stable DRs, ad-hoc signing pins to the CDHash, which changes every build and forces re-granting.
-
----
-
-## Architecture
-
-8 Rust crates + a SwiftUI shell, each with one job. No Electron. No web views. Pure native macOS.
-
-```
-┌──────────────┐   Unix Socket    ┌──────────────────────────────────────────┐
-│  AuraApp     │◄──── IPC ───────►│         aura-daemon (Rust core)          │
-│  (SwiftUI)   │    (JSONL)       │  orchestrator + processor + event bus    │
-│  Menu bar UI │                  │  screen capture loop (2 FPS)             │
-│  Onboarding  │                  │  tool execution + verification           │
-│  Permissions │                  │  safety gates + action pipelining        │
-└──────────────┘                  └───┬────┬────┬────┬────┬────┬────────────┘
-                                      │    │    │    │    │    │
-                          ┌───────────┘    │    │    │    │    └──────────┐
-                          ▼                ▼    │    ▼    ▼              ▼
-                   ┌────────────┐  ┌──────────┐│┌────────────┐  ┌────────────┐
-                   │aura-screen │  │aura-voice ││ aura-input  │  │aura-bridge │
-                   │ Capture    │  │ Mic 16kHz ││ CGEvent     │  │ osascript  │
-                   │ AX tree    │  │ Playback  ││ Mouse/Key   │  │ AppleScript│
-                   │ SoM marks  │  │ Barge-in  ││ Drag/Scroll │  │ JXA        │
-                   └────────────┘  └──────────┘│└────────────┘  └────────────┘
-                                               │
-         ┌─────────────────────────────────────┼───────────────┐
-         ▼                                     ▼               ▼
-┌─────────────────┐              ┌───────────────────┐  ┌─────────────┐
-│ Gemini Live API │              │ Vision Oracle      │  │ aura-memory │
-│ Bidirectional WS│              │ Gemini Flash REST  │  │ SQLite      │
-│ Audio + Vision  │              │ Click refinement   │  │ Sessions    │
-│ Tool calls back │              │ Circuit breaker    │  │ FTS5 search │
-└─────────────────┘              └───────────────────┘  └─────────────┘
-```
-
-### Rust crates
-
-| Crate | Purpose |
-|---|---|
-| `aura-daemon` | Orchestrator — event bus, tool dispatch, session lifecycle, verification pipeline |
-| `aura-gemini` | Bidirectional WebSocket client for Gemini Live API + Vision Oracle (REST) |
-| `aura-voice` | CoreAudio capture + rodio playback + WebRTC VAD + barge-in detection |
-| `aura-screen` | Screen capture, perceptual change detection, accessibility tree, SoM annotation |
-| `aura-bridge` | AppleScript/JXA execution with multi-layer safety gates |
-| `aura-input` | CGEvent synthetic mouse + keyboard input (PID-targeted + HID fallback) |
-| `aura-memory` | SQLite persistence (WAL mode, FTS5 full-text search) |
-| `aura-menubar` | Cocoa FFI — NSStatusItem, NSPopover, context menu |
-
-### Other components
-
-| Component | Purpose |
-|---|---|
-| **AuraApp** (SwiftUI) | Menu bar app shell — onboarding, permissions, daemon lifecycle, chat UI via Unix socket IPC |
-| **Vision Oracle** | Separate Gemini Flash REST call (not Live WS) for click coordinate refinement with circuit breaker |
-
-Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md)
-
-## Build from source
+You need macOS 14+ and Xcode or the Command Line Tools (`xcode-select --install`).
 
 ```bash
-# Build + install to /Applications + launch (recommended)
+git clone https://github.com/abdul-abdi/aura.git && cd aura
 bash scripts/dev.sh
-
-# Or just build the .app bundle without installing
-bash scripts/bundle.sh
-open target/release/Aura.app
-
-# Build a .dmg installer for distribution
-bash scripts/bundle.sh --dmg
 ```
 
-`dev.sh` calls `bundle.sh` internally, then kills any running Aura, copies the bundle to `/Applications`, and launches it. Use `bundle.sh` directly if you want to build without installing.
+This builds `Aura.app`, installs it to `/Applications`, and launches it. Click the dot in the menu bar, then:
+
+1. **Paste your Gemini API key.** Get one free at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+2. **Allow the permissions:** Microphone (to hear you), Screen Recording (to see your screen), and Accessibility (to click and type). macOS may ask you to reopen Aura after granting Screen Recording.
+3. **Click Start and talk.**
+
+Aura is always listening, with echo cancellation, so you can interrupt it mid-sentence. Press **⌘⇧A** to mute or unmute. You can also type in the panel.
+
+## How it works
+
+```
+ Mic ──► AVAudioEngine (voice processing / echo cancellation) ──► 16 kHz PCM ─┐
+ Screen ─► ScreenCaptureKit (≈1 fps while it changes) ──────────► JPEG ───────┤
+                                                                              ▼
+                                                              Gemini Live (WebSocket)
+                                                                              │
+ Speakers ◄── 24 kHz PCM ◄────────────────────────────────────────────────────┤
+ Your Mac ◄── tools: Accessibility, CGEvent, NSWorkspace, AppleScript ◄────────┘
+```
+
+| File | What it does |
+|---|---|
+| `Live.swift` | Gemini Live WebSocket client. Reconnects forever and resumes the conversation from the server's resumption handle (covers sleep/wake and network drops). |
+| `Audio.swift` | Microphone and speaker via `AVAudioEngine` with Apple's voice processing, so Aura never hears itself and you can talk over it. |
+| `Screen.swift` | Captures the display under the pointer and maps the model's 0–1000 coordinates to real screen points. |
+| `Tools.swift` | The tools Gemini can call, each blocking until its result plus a fresh screenshot is back. |
+| `AX.swift`, `Input.swift` | Accessibility tree (clickable elements, menus, focus) and synthetic mouse/keyboard events. |
+| `Aura.swift`, `Panel.swift`, `AuraApp.swift` | Wiring, the menu bar panel (setup, live transcript, text input), and the ⌘⇧A hotkey. |
+| `Config.swift`, `Prompt.swift` | Settings, memory and permissions; the instructions Gemini runs with. |
+
+**Tools:** `get_screen_context`, `click_element`, `click`, `type_text`, `press_key`, `scroll`, `drag`, `open`, `click_menu`, `run_applescript`, `run_browser_js`, `set_clipboard`, `remember`, `forget`, `quit_aura`, plus Google Search.
+
+**Memory:** when you tell Aura something worth keeping, it saves it to `~/Library/Application Support/Aura/memory.json` and includes it in every new session.
 
 ## Configuration
 
-Everything lives in `~/.config/aura/config.toml` (environment variables take precedence):
+Settings live in `~/.config/aura/config.toml`. Environment variables take precedence.
 
 ```toml
-api_key = "your-gemini-api-key"   # or GEMINI_API_KEY — required
-# model = "gemini-3.8-live"       # or AURA_MODEL — any Gemini Live model
-# voice = "Kore"                  # or AURA_VOICE — any prebuilt Gemini voice
+api_key = "your-gemini-api-key"   # or GEMINI_API_KEY
+# model = "gemini-3.8-live"       # or AURA_MODEL: any Gemini Live model
+# voice = "Kore"                  # or AURA_VOICE: any prebuilt Gemini voice
 ```
 
-Memory is local: sessions, messages, and extracted facts are stored in SQLite at `~/Library/Application Support/aura/aura.db`. At the end of each session the transcript is distilled into facts with a single Gemini REST call, and recent summaries are fed back at the start of the next session.
-
-## Grounding & accuracy
-
-AI controlling your desktop can't afford to hallucinate. Aura uses three layers to keep Gemini grounded:
-
-1. **Continuous screen feedback** — Aura captures the screen at 2 FPS during active changes. After Gemini takes an action (click, type, navigate), the next frame shows the result, closing the perception-action loop. Gemini sees what changed and self-corrects if something went wrong.
-2. **Accessibility + vision dual input** — Alongside screenshots, Aura reads the macOS accessibility tree (element roles, labels, bounds) and provides both to Gemini. This gives the model structured UI data to complement pixel-level vision. When coordinate-based clicking fails, a secondary **Gemini Flash vision oracle** re-analyzes a fresh screenshot to refine the target (with circuit breaker: 3 failures → 30s cooldown).
-3. **Google Search grounding** — Factual questions (weather, news, definitions) are answered via Google Search as a Gemini tool, grounding responses in real-time web results instead of parametric memory.
+If Google retires a model, set `model` to a current one. Run `log stream --predicate 'subsystem == "com.aura.desktop"'` to see connection and tool errors.
 
 ## Safety
 
-Aura runs AI-generated actions on your machine. We take that seriously.
+Aura acts on your Mac, so it is told to ask before anything destructive (deleting files, sending messages, purchases) and to ignore instructions that appear on screen or in web pages. AppleScript `do shell script` is blocked. Every action shows up in the panel as it happens.
 
-AppleScript's `do shell script` is **blocked entirely** — not filtered, blocked. The same applies to `run script` (dynamic eval). **Obfuscation detection** catches concatenation tricks that try to reassemble blocked commands (`"do" & " shell" & " script"`). **JXA** (JavaScript for Automation) is disabled unconditionally. Shell commands executed via `run_shell_command` reject **metacharacters** (`|`, `;`, `` ` ``, `$()`, `>`, `<`, `&&`, `||`) and **sudo**. Scroll inputs are **clamped** to ±1000. Text input is capped at 10K characters. Shell commands time out at 60s with a 10KB output cap.
+## Development
 
-The system prompt instructs Gemini to **confirm destructive actions** (file deletion, emptying trash) before executing — this is a prompt-level guardrail, not a code-enforced gate.
+```bash
+swift test                      # unit tests
+bash scripts/bundle.sh          # build build/Aura.app
+bash scripts/bundle.sh --dmg    # plus a .dmg
+bash scripts/uninstall.sh       # remove Aura, its settings and permissions
+```
 
-Terminal emulators (Terminal, iTerm, Kitty, Alacritty, Warp, Hyper, Tabby, Rio, WezTerm) are blocked from activation and from `open -a` / `open -b` to prevent accidental command execution.
-
----
-
-<div align="center">
-
-Requires macOS 14+, Rust 1.88+, and a free [Gemini API key](https://aistudio.google.com/apikey).
-
-[Apache-2.0 License](LICENSE)
-
-</div>
+[Apache-2.0](LICENSE)

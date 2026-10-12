@@ -27,7 +27,7 @@ if [[ -n "$TARGET_TAG" ]]; then
   VERSION="${TARGET_TAG#v}"
   TARGET_REF="$TARGET_TAG"
 else
-  VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+  VERSION=$(cat VERSION)
   TARGET_TAG="v${VERSION}"
   TARGET_REF="HEAD"
 fi
