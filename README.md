@@ -128,12 +128,12 @@ The loop that runs continuously while Aura is active:
 > | Dependency | Install |
 > |---|---|
 > | **Xcode Command Line Tools** | `xcode-select --install` |
-> | **Rust 1.85+** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+> | **Rust 1.88+** | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
 >
 > Verify both are installed:
 > ```bash
 > xcode-select -p    # should print /Library/Developer/CommandLineTools or Xcode path
-> cargo --version    # should print cargo 1.85.0 or higher
+> cargo --version    # should print cargo 1.88.0 or higher
 > ```
 
 **2. Clone**
@@ -282,7 +282,7 @@ Terminal emulators (Terminal, iTerm, Kitty, Alacritty, Warp, Hyper, Tabby, Rio, 
 
 <div align="center">
 
-Requires macOS 14+, Rust 1.85+, and a free [Gemini API key](https://aistudio.google.com/apikey).
+Requires macOS 14+, Rust 1.88+, and a free [Gemini API key](https://aistudio.google.com/apikey).
 
 [Apache-2.0 License](LICENSE)
 

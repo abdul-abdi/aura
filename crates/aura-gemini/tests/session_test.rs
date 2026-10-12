@@ -384,11 +384,10 @@ async fn test_audio_encoding_roundtrip() {
     // Decode: base64 -> i16 LE bytes -> f32 (simulating what the session does on receive)
     let decoded_bytes = BASE64.decode(&encoded).unwrap();
     let decoded_samples: Vec<f32> = decoded_bytes
-        .chunks_exact(2)
-        .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            sample as f32 / 32768.0
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| i16::from_le_bytes(pair) as f32 / 32768.0)
         .collect();
 
     assert_eq!(decoded_samples.len(), original_samples.len());

@@ -851,11 +851,8 @@ pub async fn run_processor(ctx: DaemonContext) -> Result<()> {
                                 .await;
                             }
 
-                            // Decrement tools-in-flight counter (saturating to avoid underflow)
-                            let prev = tool_inflight.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                                Some(n.saturating_sub(1))
-                            }).unwrap_or(0);
-                            let remaining = prev.saturating_sub(1);
+                            // Decrement tools-in-flight counter (paired with the increment above)
+                            let remaining = tool_inflight.fetch_sub(1, Ordering::AcqRel) - 1;
                             if remaining == 0
                                 && let Some(ref tx) = tool_menubar_tx
                                 && !tool_permission_error.load(Ordering::Acquire)
