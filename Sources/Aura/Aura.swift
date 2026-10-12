@@ -6,7 +6,10 @@ let log = Logger(subsystem: "com.aura.desktop", category: "aura")
 
 /// Wires Gemini Live to the microphone, speakers, screen and tools, and
 /// publishes what's happening for the menu bar panel.
-final class Aura: ObservableObject {
+///
+/// Thread confinement instead of an actor: published state is only touched on
+/// the main thread, and session state (`speaking`, `tools`) only on Live's queue.
+final class Aura: ObservableObject, @unchecked Sendable {
     enum Dot { case off, connecting, listening, speaking, muted, problem }
 
     struct Line: Identifiable {
@@ -42,7 +45,17 @@ final class Aura: ObservableObject {
             self.live?.reconnect()
         }
         HotKey.register { [weak self] in self?.toggleMute() }
-        if Config.apiKey != nil, Permissions.microphone { start() }
+        if Config.apiKey != nil, Permissions.microphone {
+            start()
+        } else {
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Aura lives in your menu bar"
+                alert.informativeText = "Click the dot at the top right of your screen to finish setting up Aura."
+                alert.runModal()
+            }
+        }
     }
 
     func start() {
