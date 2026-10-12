@@ -98,8 +98,10 @@ enum Permissions {
     }
 
     static func requestAccessibility() {
-        let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        if !AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary) { openSettings("Privacy_Accessibility") }
+        // The value of kAXTrustedCheckOptionPrompt; its Swift import type differs between SDKs.
+        if !AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) {
+            openSettings("Privacy_Accessibility")
+        }
     }
 
     static func openSettings(_ pane: String) {

@@ -17,12 +17,23 @@ permissions:
 jobs:
   # ── Build, test, bundle ────────────────────────────────────────────────
   build:
-    name: Build & Test
-    runs-on: macos-15
+    name: Build & Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS 15, os: macos-15, xcode: default }
+          - { name: macOS 26 + newest Xcode, os: macos-26, xcode: newest }
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - run: swift --version
+      - name: Use the newest installed Xcode
+        if: matrix.xcode == 'newest'
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+      - run: xcodebuild -version && swift --version
       - name: Test
         run: swift test
       - name: Bundle Aura.app

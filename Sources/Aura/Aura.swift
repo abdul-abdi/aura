@@ -49,7 +49,7 @@ final class Aura: ObservableObject, @unchecked Sendable {
             start()
         } else {
             DispatchQueue.main.async {
-                NSApp.activate(ignoringOtherApps: true)
+                NSApp.activate()
                 let alert = NSAlert()
                 alert.messageText = "Aura lives in your menu bar"
                 alert.informativeText = "Click the dot at the top right of your screen to finish setting up Aura."
