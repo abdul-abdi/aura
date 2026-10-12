@@ -56,18 +56,11 @@ public final class AppCoordinator {
         self.supervisor = WatchdogSupervisor(log: state.log)
         self.tools = ToolRegistry(effects: effects)
         self.memoryTools = MemoryTools(log: state.log)
-        // Register Plan 2 MVP tools. Read-only — memory writes go to the
-        // event log directly, not through EffectLog (the effect-log discipline
-        // is for world-mutating actions in the macOS sense, not our own log).
-        let mt = self.memoryTools!
-        let ct = ClipboardTools()
-        let registry = self.tools!
-        Task {
-            await registry.register("remember",       mt.rememberToolImpl())
-            await registry.register("recall",         mt.recallToolImpl())
-            await registry.register("forget",         mt.forgetToolImpl())
-            await registry.register("clipboard_read", ct.readToolImpl())
-        }
+        // Tool registration moved to startSession() — registering from a
+        // detached Task in init() raced the WS handshake; if Gemini connected
+        // before the four register awaits landed on the actor, the first
+        // toolCall would return unknown_tool. startSession runs registration
+        // synchronously-on-actor before connect(), eliminating the race.
 
         self.sleepWake = SleepWakeWatchdog(
             onSleep: { [weak self] in self?.handleSleep() },
@@ -118,6 +111,19 @@ public final class AppCoordinator {
             Loggers.app.warning("No API key in Keychain; staying offline.")
             return
         }
+
+        // Register the MVP tools BEFORE connect(). ToolRegistry actor
+        // serializes these; awaiting all four guarantees the first toolCall
+        // hitting the receive loop finds them registered. Re-registration
+        // is idempotent (dictionary write) — startSession is called on
+        // every connect/reconnect/wake path, so we just write through.
+        let registry = self.tools!
+        let mt = self.memoryTools!
+        let ct = ClipboardTools()
+        await registry.register("remember",       mt.rememberToolImpl())
+        await registry.register("recall",         mt.recallToolImpl())
+        await registry.register("forget",         mt.forgetToolImpl())
+        await registry.register("clipboard_read", ct.readToolImpl())
 
         // Plan 3 MVP: assemble the system prompt via Context.swift — the one
         // place model-context comes together. Reads the user-profile lens
