@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The window that drops down from the menu bar dot.
