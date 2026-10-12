@@ -60,11 +60,8 @@ final class Aura: ObservableObject, @unchecked Sendable {
 
     func start() {
         guard !running, let key = Config.apiKey else { return }
-        let voice = Config.voice
-        // Newest model first; the 2.5 native-audio model also works on free-tier keys.
-        let models = [Config.model, "gemini-2.5-flash-native-audio-preview-12-2025"]
-            .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-        let live = Live(apiKey: key, models: models) { model, handle in
+        let model = Config.model, voice = Config.voice
+        let live = Live(apiKey: key) { handle in
             Live.setupMessage(
                 model: model, voice: voice, instructions: Prompt.instructions(facts: Memory.load()),
                 tools: Tools.declarations, resumeHandle: handle)
