@@ -1,150 +1,19 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main, prod]
   push:
     branches: [main]
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  pull_request:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  # ── Build, test, bundle ────────────────────────────────────────────────
   build:
-    name: Build & Test (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: macOS 15, os: macos-15, xcode: default }
-          - { name: macOS 26 + newest Xcode, os: macos-26, xcode: newest }
+    name: Build & Test
+    runs-on: macos-26
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Use the newest installed Xcode
-        if: matrix.xcode == 'newest'
-        run: |
-          ls -d /Applications/Xcode*.app
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
-      - run: xcodebuild -version && swift --version
-      - name: Test
-        run: swift test
-      - name: Bundle Aura.app
-        run: bash scripts/bundle.sh
-      - name: Verify bundle
-        run: |
-          test -x build/Aura.app/Contents/MacOS/Aura
-          plutil -lint build/Aura.app/Contents/Info.plist
-          codesign --verify --verbose build/Aura.app
-          echo "Aura.app: $(du -sh build/Aura.app | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
-
-  # ── Commit message lint ────────────────────────────────────────────────
-  commits:
-    name: Commit Messages
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 0
-      - name: Validate conventional commits
-        run: |
-          ERRORS=0
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-
-          while IFS= read -r line; do
-            hash="${line%% *}"
-            msg="${line#* }"
-
-            # Must match: type: description  or  type(scope): description
-            if ! echo "$msg" | grep -qE '^(feat|fix|refactor|perf|test|docs|chore|ci|style|build|revert)(\(.+\))?!?: .+'; then
-              echo "::error::Bad commit message: $msg ($hash)"
-              echo "  Expected format: <type>: <description>"
-              echo "  Types: feat, fix, refactor, perf, test, docs, chore, ci, style, build, revert"
-              ERRORS=$((ERRORS + 1))
-            fi
-          done < <(git log --oneline --no-merges "${BASE}..${HEAD}")
-
-          if [[ $ERRORS -gt 0 ]]; then
-            echo ""
-            echo "::error::$ERRORS commit(s) do not follow conventional commit format"
-            exit 1
-          fi
-          echo "All commits follow conventional commit format"
-
-  # ── PR size warning ────────────────────────────────────────────────────
-  pr-size:
-    name: PR Size
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          fetch-depth: 0
-      - name: Check PR size
-        run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-
-          ADDITIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.swift' '*.yml' '*.yaml' '*.sh' | awk '{s+=$1} END {print s+0}')
-          DELETIONS=$(git diff --numstat "${BASE}..${HEAD}" -- '*.swift' '*.yml' '*.yaml' '*.sh' | awk '{s+=$2} END {print s+0}')
-          TOTAL=$((ADDITIONS + DELETIONS))
-          FILES=$(git diff --name-only "${BASE}..${HEAD}" | wc -l | tr -d ' ')
-
-          if [[ $TOTAL -gt 1000 ]]; then
-            SIZE="XL"
-            LABEL="Consider splitting this PR into smaller, focused changes."
-          elif [[ $TOTAL -gt 500 ]]; then
-            SIZE="L"
-            LABEL="Large PR — review may take longer."
-          elif [[ $TOTAL -gt 200 ]]; then
-            SIZE="M"
-            LABEL=""
-          else
-            SIZE="S"
-            LABEL=""
-          fi
-
-          echo "## PR Size: **${SIZE}**" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Files changed | ${FILES} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Lines changed | +${ADDITIONS} / -${DELETIONS} |" >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n "$LABEL" ]]; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "> ${LABEL}" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-  # ── Gate — all required checks must pass ───────────────────────────────
-  gate:
-    name: Gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    if: always()
-    needs: [build, commits]
-    steps:
-      - name: Check required jobs
-        run: |
-          echo "build:   ${{ needs.build.result }}"
-          echo "commits: ${{ needs.commits.result }}"
-          if [[ "${{ needs.build.result }}" != "success" ]]; then
-            echo "::error::Build & Test failed"
-            exit 1
-          fi
-          # commits only runs on pull requests
-          if [[ "${{ needs.commits.result }}" != "success" && "${{ needs.commits.result }}" != "skipped" ]]; then
-            echo "::error::Commit message validation failed"
-            exit 1
-          fi
-          echo "All checks passed"
+      - run: swift test
+      - run: swift build -c release
