@@ -32,19 +32,17 @@ Aura is an AI that lives in your menu bar. It hears you, sees your screen, and a
 
 Aura speaks with **Kore**, a calm, clear voice from Gemini's native audio model — chosen for its natural cadence in back-and-forth conversation. It doesn't narrate actions or over-explain. It responds the way a competent colleague would: briefly, directly, then acts. When you interrupt mid-sentence, it stops immediately and adapts — conversations feel human, not scripted.
 
-Built on the **Gemini Live API** for real-time bidirectional audio and vision streaming, with **Google Cloud Run** and **Firestore** for persistent cross-session memory.
+Built on the **Gemini Live API** for real-time bidirectional audio and vision streaming. Everything else runs locally on your Mac — all you need is a Gemini API key.
 
 ### Built with
 
 | Google Technology | How Aura uses it |
 |---|---|
 | **Gemini Live API** | Bidirectional WebSocket for simultaneous audio + vision streaming |
-| **Gemini 2.5 Flash** (native audio) | Real-time voice conversation with native speech synthesis |
-| **Gemini 3 Flash** | Vision oracle — refines click coordinates from screenshots |
+| **Gemini 3.8 Live** (native audio) | Real-time voice conversation with native speech synthesis |
+| **Gemini 3.8 Flash** | Vision oracle — refines click coordinates from screenshots |
+| **Gemini 3.5 Flash-Lite** | End-of-session memory consolidation into local facts |
 | **Google Search grounding** | Live web answers (weather, news, facts) without leaving the conversation |
-| **Cloud Run** | WebSocket proxy relay + memory consolidation agent |
-| **Firestore** | Cross-device persistent memory (facts, session summaries) |
-| **Gemini ADK** | Powers the memory agent's session consolidation pipeline |
 
 ---
 
@@ -156,7 +154,7 @@ The loop that runs continuously while Aura is active:
 
 > Aura walks you through setup on first launch:
 >
-> **Step 1 — API key.** Enter your Gemini API key (free from [Google AI Studio](https://aistudio.google.com/apikey)). Aura saves it to `~/.config/aura/config.toml` and generates a device ID. If a Cloud Run proxy is configured, device registration happens in the background — the auth token is stored in the macOS Keychain (not in config files).
+> **Step 1 — API key.** Enter your Gemini API key (free from [Google AI Studio](https://aistudio.google.com/apikey)). Aura saves it to `~/.config/aura/config.toml` (mode 600). That's the only setup — no accounts, no cloud services.
 >
 > **Step 2 — macOS permissions.** Aura requests three system permissions:
 >
@@ -178,15 +176,11 @@ The loop that runs continuously while Aura is active:
 
 Aura is ad-hoc code-signed with **stable designated requirements** (`identifier "com.aura.desktop"`). This means macOS TCC permissions (Microphone, Screen Recording, Accessibility) survive rebuilds — you only grant them once. Without stable DRs, ad-hoc signing pins to the CDHash, which changes every build and forces re-granting.
 
-### Keychain & device auth
-
-The device token for Cloud Run proxy authentication is stored in the **macOS login Keychain** under service `com.aura.desktop`, not in plaintext config files. Both the SwiftUI app and Rust daemon access it via the `security` CLI (not Security.framework) to avoid per-app ACL prompts that occur when multiple ad-hoc signed binaries share a Keychain item. If registration fails on first launch, the daemon retries in the background on subsequent starts.
-
 ---
 
 ## Architecture
 
-10 Rust crates + a SwiftUI shell + cloud infrastructure, each with one job. No Electron. No web views. Pure native macOS.
+8 Rust crates + a SwiftUI shell, each with one job. No Electron. No web views. Pure native macOS.
 
 ```
 ┌──────────────┐   Unix Socket    ┌──────────────────────────────────────────┐
@@ -210,18 +204,10 @@ The device token for Cloud Run proxy authentication is stored in the **macOS log
          ▼                                     ▼               ▼
 ┌─────────────────┐              ┌───────────────────┐  ┌─────────────┐
 │ Gemini Live API │              │ Vision Oracle      │  │ aura-memory │
-│ Bidirectional WS│              │ Gemini 3 Flash REST│  │ SQLite      │
+│ Bidirectional WS│              │ Gemini Flash REST  │  │ SQLite      │
 │ Audio + Vision  │              │ Click refinement   │  │ Sessions    │
 │ Tool calls back │              │ Circuit breaker    │  │ FTS5 search │
-└────────┬────────┘              └───────────────────┘  └─────────────┘
-         │
-         ▼
-┌─────────────────┐       ┌───────────────┐
-│ Cloud Run       │──────►│ Firestore     │
-│ aura-proxy      │       │ Cross-session │
-│ memory-agent    │       │ Device auth   │
-│ (Python ADK)    │       │ Facts         │
-└─────────────────┘       └───────────────┘
+└─────────────────┘              └───────────────────┘  └─────────────┘
 ```
 
 ### Rust crates
@@ -236,17 +222,13 @@ The device token for Cloud Run proxy authentication is stored in the **macOS log
 | `aura-input` | CGEvent synthetic mouse + keyboard input (PID-targeted + HID fallback) |
 | `aura-memory` | SQLite persistence (WAL mode, FTS5 full-text search) |
 | `aura-menubar` | Cocoa FFI — NSStatusItem, NSPopover, context menu |
-| `aura-proxy` | Cloud Run WebSocket relay with per-device auth |
-| `aura-firestore` | Firestore REST client for cross-device memory sync |
 
 ### Other components
 
 | Component | Purpose |
 |---|---|
 | **AuraApp** (SwiftUI) | Menu bar app shell — onboarding, permissions, daemon lifecycle, chat UI via Unix socket IPC |
-| **memory-agent** (Python) | Cloud Run FastAPI service — Gemini ADK agent for session consolidation and fact extraction |
-| **consolidation** (Rust) | Batch tool for memory summarization across Firestore documents |
-| **Vision Oracle** | Separate Gemini 3 Flash REST call (not Live WS) for click coordinate refinement with circuit breaker |
+| **Vision Oracle** | Separate Gemini Flash REST call (not Live WS) for click coordinate refinement with circuit breaker |
 
 Deep dive: [ARCHITECTURE.md](ARCHITECTURE.md)
 
@@ -266,52 +248,24 @@ bash scripts/bundle.sh --dmg
 
 `dev.sh` calls `bundle.sh` internally, then kills any running Aura, copies the bundle to `/Applications`, and launches it. Use `bundle.sh` directly if you want to build without installing.
 
-## Deploy to Google Cloud
+## Configuration
 
-Aura works fully offline with just a Gemini API key — but cloud services unlock **persistent cross-session memory**. Without them, Aura forgets everything when the session ends. With them, conversations are distilled into structured facts via a Gemini ADK agent, stored in Firestore, and recalled at the start of every future session. Aura remembers who you are, what you were working on, and what you asked it before.
-
-The cloud backend deploys with a single script. Infrastructure-as-code — no manual console steps.
-
-**Automated (one command):**
-
-```bash
-export GEMINI_API_KEY="your-key"
-bash scripts/deploy-gcp.sh --project your-gcp-project-id
-```
-
-This enables Firestore, creates Secret Manager entries, deploys the memory agent to Cloud Run, and configures IAM — fully automated.
-
-**What gets deployed:**
-
-| Service | Platform | Purpose |
-|---|---|---|
-| `aura-memory-agent` | Cloud Run | Session consolidation via Gemini ADK — distills conversations into persistent facts |
-| `aura-proxy` | Cloud Run | WebSocket relay to Gemini Live API with per-device token auth |
-| Firestore | Native mode | Document store for cross-device facts and session summaries |
-| Secret Manager | GCP | Stores API keys and auth tokens (never in code or env vars) |
-
-**CI/CD:** Push to `main` triggers automatic deployment via GitHub Actions with Workload Identity Federation (no service account keys). See `.github/workflows/deploy-cloud.yml`.
-
-**Connecting Aura to cloud services:**
-
-After deploying, add the URLs to `~/.config/aura/config.toml`:
+Everything lives in `~/.config/aura/config.toml` (environment variables take precedence):
 
 ```toml
-# Cloud services (optional — without these, Aura runs local-only)
-proxy_url = "wss://your-proxy.run.app/ws"
-cloud_run_url = "https://your-memory-agent.run.app"
-firestore_project_id = "your-gcp-project-id"
-firebase_api_key = "your-firebase-web-api-key"
+api_key = "your-gemini-api-key"   # or GEMINI_API_KEY — required
+# model = "gemini-3.8-live"       # or AURA_MODEL — any Gemini Live model
+# voice = "Kore"                  # or AURA_VOICE — any prebuilt Gemini voice
 ```
 
-The device token is stored in the macOS Keychain automatically during onboarding — it never goes in config files. If all four values are set, Aura will query past session context on startup, ingest conversations to the memory agent on session end, and sync facts to Firestore. If any are missing, Aura falls back to local-only mode with no errors.
+Memory is local: sessions, messages, and extracted facts are stored in SQLite at `~/Library/Application Support/aura/aura.db`. At the end of each session the transcript is distilled into facts with a single Gemini REST call, and recent summaries are fed back at the start of the next session.
 
 ## Grounding & accuracy
 
 AI controlling your desktop can't afford to hallucinate. Aura uses three layers to keep Gemini grounded:
 
 1. **Continuous screen feedback** — Aura captures the screen at 2 FPS during active changes. After Gemini takes an action (click, type, navigate), the next frame shows the result, closing the perception-action loop. Gemini sees what changed and self-corrects if something went wrong.
-2. **Accessibility + vision dual input** — Alongside screenshots, Aura reads the macOS accessibility tree (element roles, labels, bounds) and provides both to Gemini. This gives the model structured UI data to complement pixel-level vision. When coordinate-based clicking fails, a secondary **Gemini 3 Flash vision oracle** re-analyzes a fresh screenshot to refine the target (with circuit breaker: 3 failures → 30s cooldown).
+2. **Accessibility + vision dual input** — Alongside screenshots, Aura reads the macOS accessibility tree (element roles, labels, bounds) and provides both to Gemini. This gives the model structured UI data to complement pixel-level vision. When coordinate-based clicking fails, a secondary **Gemini Flash vision oracle** re-analyzes a fresh screenshot to refine the target (with circuit breaker: 3 failures → 30s cooldown).
 3. **Google Search grounding** — Factual questions (weather, news, definitions) are answered via Google Search as a Gemini tool, grounding responses in real-time web results instead of parametric memory.
 
 ## Safety

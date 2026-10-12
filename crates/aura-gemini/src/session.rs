@@ -7,7 +7,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::config::GeminiConfig;
 use crate::protocol::*;
@@ -497,25 +496,9 @@ async fn connect_and_stream_inner(
     let url = state.config.ws_url();
     tracing::info!(url = %state.config.ws_url_redacted(), "Connecting to Gemini WebSocket");
 
-    // Build an HTTP request so we can attach custom headers (proxy mode sends
-    // credentials as headers instead of query parameters).
-    let mut request = url
-        .parse::<tokio_tungstenite::tungstenite::http::Uri>()
-        .context("Invalid WebSocket URL")?
-        .into_client_request()
-        .context("Failed to build WebSocket request")?;
-    for (name, value) in state.config.ws_headers() {
-        request.headers_mut().insert(
-            tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(name.as_bytes())
-                .context("Invalid header name")?,
-            tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
-                .context("Invalid header value")?,
-        );
-    }
-
     let (ws_stream, _) = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async(request),
+        tokio_tungstenite::connect_async(url),
     )
     .await
     .context("WebSocket connection timed out (10s)")?
@@ -735,6 +718,7 @@ async fn connect_and_stream_inner(
 }
 
 /// Handle a server message. Returns `true` if the caller should reconnect (goAway).
+/// A single message may carry several fields, so every field is handled.
 async fn handle_server_message(
     msg: ServerMessage,
     event_tx: &broadcast::Sender<GeminiEvent>,
@@ -755,15 +739,16 @@ async fn handle_server_message(
                 handle: String::new(),
             });
         }
-        return false;
     }
 
-    // Server content (audio response, interruption, turn complete)
+    // Server content (audio response, interruption, transcript, turn complete)
     if let Some(content) = msg.server_content {
         if content.interrupted == Some(true) {
             let _ = event_tx.send(GeminiEvent::Interrupted);
         }
 
+        // Only audio is used from model parts — text parts on native-audio
+        // models are internal reasoning, not what was said.
         if let Some(model_turn) = content.model_turn {
             for part in model_turn.parts {
                 if let Some(blob) = part.inline_data
@@ -779,16 +764,18 @@ async fn handle_server_message(
                         }
                     }
                 }
-                if let Some(text) = part.text {
-                    let _ = event_tx.send(GeminiEvent::Transcription { text });
-                }
             }
+        }
+
+        if let Some(t) = content.output_transcription
+            && !t.text.is_empty()
+        {
+            let _ = event_tx.send(GeminiEvent::Transcription { text: t.text });
         }
 
         if content.turn_complete == Some(true) {
             let _ = event_tx.send(GeminiEvent::TurnComplete);
         }
-        return false;
     }
 
     // Tool call
@@ -800,7 +787,6 @@ async fn handle_server_message(
                 args: fc.args,
             });
         }
-        return false;
     }
 
     // Tool call cancellation
@@ -808,7 +794,6 @@ async fn handle_server_message(
         let _ = event_tx.send(GeminiEvent::ToolCallCancellation {
             ids: cancellation.ids,
         });
-        return false;
     }
 
     // Go away — server requesting reconnection
@@ -825,7 +810,6 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
         setup: Setup {
             model: config.model.clone(),
             generation_config: Some(GenerationConfig {
-                temperature: Some(config.temperature),
                 response_modalities: Some(vec!["AUDIO".into()]),
                 speech_config: Some(SpeechConfig {
                     voice_config: VoiceConfig {
@@ -847,11 +831,14 @@ fn build_setup_message(config: &GeminiConfig, resumption_handle: Option<String>)
             session_resumption: Some(SessionResumptionConfig {
                 handle: resumption_handle,
             }),
+            // Server-default sliding window: required for audio+video sessions
+            // (capped at ~2 min without compression).
             context_window_compression: Some(ContextWindowCompression {
                 sliding_window: SlidingWindow {
-                    target_tokens: Some(500_000),
+                    target_tokens: None,
                 },
             }),
+            output_audio_transcription: Some(AudioTranscriptionConfig {}),
         },
     }
 }
@@ -928,42 +915,23 @@ mod tests {
 
     #[test]
     fn build_setup_message_includes_tools() {
-        let config = GeminiConfig {
-            api_key: "test".into(),
-            model: "models/gemini-2.5-flash-native-audio-preview-12-2025".into(),
-            voice: "Kore".into(),
-            system_prompt: "Test prompt".into(),
-            temperature: 0.9,
-            proxy_url: None,
-            firestore_project_id: None,
-            firebase_api_key: None,
-            device_id: None,
-            cloud_run_url: None,
-            device_token: None,
-        };
+        let config = GeminiConfig::from_env_inner("test");
         let msg = build_setup_message(&config, None);
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("run_applescript"));
         assert!(json.contains("get_screen_context"));
         assert!(json.contains("slidingWindow"));
         assert!(json.contains("sessionResumption"));
+        assert!(json.contains("outputAudioTranscription"));
+        assert!(json.contains("models/gemini-3.8-live"));
+        // Not accepted by current Live models
+        assert!(!json.contains("temperature"));
+        assert!(!json.contains("thinkingConfig"));
     }
 
     #[test]
     fn build_setup_message_with_resumption() {
-        let config = GeminiConfig {
-            api_key: "test".into(),
-            model: "models/gemini-2.5-flash-native-audio-preview-12-2025".into(),
-            voice: "Kore".into(),
-            system_prompt: "Test prompt".into(),
-            temperature: 0.9,
-            proxy_url: None,
-            firestore_project_id: None,
-            firebase_api_key: None,
-            device_id: None,
-            cloud_run_url: None,
-            device_token: None,
-        };
+        let config = GeminiConfig::from_env_inner("test");
         let msg = build_setup_message(&config, Some("tok_resume_123".into()));
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("tok_resume_123"));

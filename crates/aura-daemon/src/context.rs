@@ -11,17 +11,6 @@ use aura_voice::playback::AudioPlayer;
 use crate::bus::EventBus;
 use crate::protocol::DaemonEvent;
 
-/// Cloud service configuration.
-#[derive(Clone, Default)]
-pub struct CloudConfig {
-    pub gemini_api_key: String,
-    pub cloud_run_url: Option<String>,
-    pub device_token: Option<String>,
-    pub cloud_run_device_id: Option<String>,
-    pub firestore_project_id: Option<String>,
-    pub firebase_api_key: Option<String>,
-}
-
 /// Shared atomic flags for cross-task coordination.
 #[derive(Clone)]
 pub struct SharedFlags {
@@ -56,6 +45,7 @@ pub struct DaemonContext {
     pub menubar_tx: Option<mpsc::Sender<MenuBarMessage>>,
     pub ipc_tx: broadcast::Sender<DaemonEvent>,
     pub player: Option<AudioPlayer>,
-    pub cloud: CloudConfig,
+    /// Gemini API key, used for end-of-session memory consolidation.
+    pub api_key: String,
     pub flags: SharedFlags,
 }

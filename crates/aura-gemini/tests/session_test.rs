@@ -16,17 +16,9 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn test_config(url: String) -> GeminiConfig {
     GeminiConfig {
-        api_key: "test-key".into(),
+        endpoint: format!("{url}/"),
         model: "models/gemini-test".into(),
-        voice: "Kore".into(),
-        system_prompt: "Test prompt".into(),
-        temperature: 0.7,
-        proxy_url: Some(format!("{url}/")),
-        firestore_project_id: None,
-        firebase_api_key: None,
-        device_id: None,
-        cloud_run_url: None,
-        device_token: None,
+        ..GeminiConfig::from_env_inner("test-key")
     }
 }
 
@@ -463,9 +455,7 @@ async fn test_session_transcription() {
 
         let msg = json!({
             "serverContent": {
-                "modelTurn": {
-                    "parts": [{"text": "Hello there"}]
-                }
+                "outputTranscription": {"text": "Hello there"}
             }
         });
         ws.send(Message::Text(msg.to_string())).await.unwrap();
@@ -670,9 +660,7 @@ async fn test_binary_frame_handled_like_text() {
         // Send a server message as a Binary frame instead of Text
         let msg = json!({
             "serverContent": {
-                "modelTurn": {
-                    "parts": [{"text": "Hello from binary"}]
-                }
+                "outputTranscription": {"text": "Hello from binary"}
             }
         });
         ws.send(Message::Binary(msg.to_string().into_bytes()))
@@ -743,6 +731,48 @@ async fn test_setup_timeout_triggers_reconnect() {
         matches!(event, GeminiEvent::Reconnecting { attempt: 1 }),
         "Expected attempt 1, got: {event:?}"
     );
+
+    session.disconnect();
+}
+
+#[tokio::test]
+async fn test_combined_message_handles_every_field() {
+    let url = start_mock_server(|mut ws| async move {
+        complete_setup(&mut ws).await;
+
+        // One message carrying a resumption update AND audio content.
+        let pcm = BASE64.encode([0u8, 0, 0, 64]);
+        let msg = json!({
+            "sessionResumptionUpdate": {"newHandle": "h1", "resumable": true},
+            "serverContent": {
+                "modelTurn": {
+                    "parts": [{"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": pcm}}]
+                }
+            }
+        });
+        ws.send(Message::Text(msg.to_string())).await.unwrap();
+
+        while ws.next().await.is_some() {}
+    })
+    .await;
+
+    let session = GeminiLiveSession::connect(test_config(url), None)
+        .await
+        .unwrap();
+    let mut rx = session.subscribe();
+
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::SessionHandle { handle } if handle == "h1"),
+        "SessionHandle",
+    )
+    .await;
+    expect_event(
+        &mut rx,
+        |e| matches!(e, GeminiEvent::AudioResponse { .. }),
+        "AudioResponse from the same message",
+    )
+    .await;
 
     session.disconnect();
 }

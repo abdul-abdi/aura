@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use aura_daemon::bus::EventBus;
-use aura_daemon::context::{CloudConfig, DaemonContext, SharedFlags};
+use aura_daemon::context::{DaemonContext, SharedFlags};
 use aura_daemon::event::AuraEvent;
 use aura_daemon::ipc;
 use aura_daemon::protocol::{DaemonEvent, DotColorName, UICommand};
@@ -19,7 +19,6 @@ use aura_menubar::status_item::DotColor;
 use aura_voice::audio::AudioCapture;
 use aura_voice::playback::AudioPlayer;
 
-use crate::cloud;
 use crate::processor;
 
 /// Default RMS energy threshold for mic gating while Aura is speaking.
@@ -100,15 +99,6 @@ pub(crate) async fn run_daemon(
             .push_str(DESTRUCTIVE_ACTION_GUARDRAIL);
     }
 
-    // Flush any pending Firestore syncs from previous sessions that failed.
-    if let (Some(project_id), Some(device_id)) = (
-        &gemini_config.firestore_project_id,
-        &gemini_config.device_id,
-    ) && let Some(firebase_api_key) = &gemini_config.firebase_api_key
-    {
-        cloud::flush_pending_syncs(project_id, device_id, firebase_api_key).await;
-    }
-
     // Start IPC server for UI clients (SwiftUI panel)
     let mut ipc_cmd_rx = ipc::start_ipc_server(ipc_tx.clone(), cancel.clone());
 
@@ -143,13 +133,8 @@ pub(crate) async fn run_daemon(
         }
     };
 
-    // Save API key and Cloud Run fields before gemini_config is moved into the session
+    // Save API key before gemini_config is moved into the session
     let gemini_api_key = gemini_config.api_key.clone();
-    let gemini_cloud_run_url = gemini_config.cloud_run_url.clone();
-    let gemini_cloud_run_auth_token = gemini_config.device_token.clone();
-    let gemini_device_id = gemini_config.device_id.clone();
-    let gemini_firestore_project_id = gemini_config.firestore_project_id.clone();
-    let gemini_firebase_api_key = gemini_config.firebase_api_key.clone();
 
     let session = GeminiLiveSession::connect(gemini_config, resumption_handle)
         .await
@@ -429,14 +414,7 @@ pub(crate) async fn run_daemon(
         menubar_tx,
         ipc_tx: ipc_tx.clone(),
         player,
-        cloud: CloudConfig {
-            gemini_api_key,
-            cloud_run_url: gemini_cloud_run_url,
-            device_token: gemini_cloud_run_auth_token,
-            cloud_run_device_id: gemini_device_id,
-            firestore_project_id: gemini_firestore_project_id,
-            firebase_api_key: gemini_firebase_api_key,
-        },
+        api_key: gemini_api_key,
         flags: SharedFlags {
             is_speaking: Arc::clone(&is_speaking),
             is_interrupted: Arc::clone(&is_interrupted),
@@ -616,7 +594,7 @@ pub(crate) async fn run_reconnect_loop(
         // Determine session mode: Resume if handle exists AND not poisoned.
         let session_mode = {
             let handle: Option<String> =
-                cloud::memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
+                processor::memory_op(&memory, |mem| mem.get_setting("resumption_handle"))
                     .await
                     .flatten()
                     .filter(|h| !h.is_empty());
@@ -662,9 +640,10 @@ pub(crate) async fn run_reconnect_loop(
                 );
                 if poison_counter >= 2 {
                     tracing::warn!("Poison counter reached — clearing stale resumption handle");
-                    let _ =
-                        cloud::memory_op(&memory, |mem| mem.set_setting("resumption_handle", ""))
-                            .await;
+                    let _ = processor::memory_op(&memory, |mem| {
+                        mem.set_setting("resumption_handle", "")
+                    })
+                    .await;
                     poison_counter = 0;
                     reconnect_counter = 0;
                 }

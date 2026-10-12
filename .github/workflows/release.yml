@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
   release:
@@ -96,9 +95,6 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build Rust daemon (release)
-        env:
-          AURA_PROD_PROXY_URL: ${{ secrets.AURA_PROD_PROXY_URL }}
-          AURA_PROD_CLOUD_RUN_URL: ${{ secrets.AURA_PROD_CLOUD_RUN_URL }}
         run: cargo build --release --locked -p aura-daemon
 
       - name: Bundle Aura.app
@@ -136,19 +132,3 @@ jobs:
           body_path: /tmp/release-notes.md
           files: target/release/Aura-${{ steps.version.outputs.version }}.dmg
 
-      # After GitHub Release creation, trigger cloud deploy to production
-      - name: Deploy cloud services
-        if: success()
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'deploy-cloud.yml',
-              ref: 'prod',
-              inputs: {
-                service: 'all',
-                environment: 'production'
-              }
-            });

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-pub const DEFAULT_MODEL: &str = "models/gemini-2.5-flash-native-audio-preview-12-2025";
+pub const DEFAULT_MODEL: &str = "models/gemini-3.8-live";
 pub const DEFAULT_VOICE: &str = "Kore";
 pub const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Aura — a fully autonomous macOS desktop companion with complete computer control. You can see the user's screen in real-time and control their Mac — mouse, keyboard, scrolling, everything.
 
@@ -234,35 +234,14 @@ Limitations:
 
 const WS_BASE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
-/// Production cloud service defaults injected at build time via environment
-/// variables (set in CI from GCP Secret Manager). Uses `option_env!()` so
-/// local dev builds compile fine without them — they just get `None`.
-mod prod_defaults {
-    pub const PROXY_URL: Option<&str> = option_env!("AURA_PROD_PROXY_URL");
-    pub const CLOUD_RUN_URL: Option<&str> = option_env!("AURA_PROD_CLOUD_RUN_URL");
-}
-
-/// Return the compiled-in prod default if present and non-empty.
-fn prod_default(value: Option<&str>) -> Option<String> {
-    value.filter(|s| !s.is_empty()).map(String::from)
-}
-
 #[derive(Clone)]
 pub struct GeminiConfig {
     pub api_key: String,
+    /// Live API WebSocket endpoint (overridable for tests).
+    pub endpoint: String,
     pub model: String,
     pub voice: String,
     pub system_prompt: String,
-    pub temperature: f64,
-    pub proxy_url: Option<String>,
-    pub firestore_project_id: Option<String>,
-    /// Firebase Web API key for anonymous auth (different from Gemini API key).
-    pub firebase_api_key: Option<String>,
-    pub device_id: Option<String>,
-    pub cloud_run_url: Option<String>,
-    /// Per-device token read from macOS Keychain (service: com.aura.desktop, account: device_token).
-    /// Used as Bearer auth for proxy WebSocket and cloud memory agent requests.
-    pub device_token: Option<String>,
 }
 
 impl std::fmt::Debug for GeminiConfig {
@@ -271,129 +250,55 @@ impl std::fmt::Debug for GeminiConfig {
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
             .field("voice", &self.voice)
-            .field("temperature", &self.temperature)
-            .field("proxy_url", &self.proxy_url)
-            .field("firestore_project_id", &self.firestore_project_id)
-            .field(
-                "firebase_api_key",
-                &self.firebase_api_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field("device_id", &self.device_id)
-            .field("cloud_run_url", &self.cloud_run_url)
-            .field(
-                "device_token",
-                &self.device_token.as_ref().map(|_| "[REDACTED]"),
-            )
             .finish()
     }
 }
 
 impl GeminiConfig {
+    /// Load config. Priority for each value: env var > `~/.config/aura/config.toml` > default.
     pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(read_config_file_key)
-            .context(
-                "No API key found. Set GEMINI_API_KEY env var or add api_key to ~/.config/aura/config.toml",
-            )?;
-
+        let api_key = env_or_config("GEMINI_API_KEY", "api_key").context(
+            "No API key found. Set GEMINI_API_KEY env var or add api_key to ~/.config/aura/config.toml",
+        )?;
         let mut config = Self::from_env_inner(&api_key);
-        // Priority: env var > config.toml > compiled-in prod default (release only)
-        config.proxy_url = std::env::var("AURA_PROXY_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(read_config_file_proxy_url)
-            .or_else(|| prod_default(prod_defaults::PROXY_URL));
-        config.firestore_project_id = std::env::var("AURA_FIRESTORE_PROJECT_ID")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("firestore_project_id"));
-        config.device_id = std::env::var("AURA_DEVICE_ID")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("device_id"));
-        config.cloud_run_url = std::env::var("AURA_CLOUD_RUN_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("cloud_run_url"))
-            .or_else(|| prod_default(prod_defaults::CLOUD_RUN_URL));
-        // Device token: env var > Keychain (NOT from config.toml — tokens don't belong in plaintext files)
-        config.device_token = std::env::var("AURA_DEVICE_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(read_keychain_token);
-        config.firebase_api_key = std::env::var("AURA_FIREBASE_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| read_config_value("firebase_api_key"));
+        if let Some(model) = env_or_config("AURA_MODEL", "model") {
+            config.model = if model.starts_with("models/") {
+                model
+            } else {
+                format!("models/{model}")
+            };
+        }
+        if let Some(voice) = env_or_config("AURA_VOICE", "voice") {
+            config.voice = voice;
+        }
         Ok(config)
     }
 
     pub fn from_env_inner(api_key: &str) -> Self {
         Self {
             api_key: api_key.to_string(),
+            endpoint: WS_BASE.to_string(),
             model: DEFAULT_MODEL.to_string(),
             voice: DEFAULT_VOICE.to_string(),
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            temperature: 0.7,
-            proxy_url: None,
-            firestore_project_id: None,
-            firebase_api_key: None,
-            device_id: None,
-            cloud_run_url: None,
-            device_token: None,
         }
     }
 
-    /// Build the WebSocket URL.
-    ///
-    /// - **Direct mode**: `wss://...googleapis.com/...?key=<API_KEY>` (Google requirement).
-    /// - **Proxy mode**: bare proxy URL — credentials are sent via HTTP headers
-    ///   (see [`ws_headers`]).
+    /// WebSocket URL for the Gemini Live API (Google requires the key as a query param).
     pub fn ws_url(&self) -> String {
-        if let Some(ref proxy) = self.proxy_url {
-            proxy.clone()
-        } else {
-            format!("{WS_BASE}?key={}", self.api_key)
-        }
+        format!("{}?key={}", self.endpoint, self.api_key)
     }
 
     pub fn ws_url_redacted(&self) -> String {
-        if self.proxy_url.is_some() {
-            // Proxy mode: URL contains no secrets
-            self.ws_url()
-        } else {
-            format!("{WS_BASE}?key=REDACTED")
-        }
-    }
-
-    /// Return custom HTTP headers for the WebSocket upgrade request.
-    ///
-    /// In proxy mode, the API key and auth token are sent as headers instead of
-    /// query parameters so they are not logged by intermediaries.
-    /// In direct mode, returns an empty vec (credentials are in the URL per Google's API).
-    pub fn ws_headers(&self) -> Vec<(String, String)> {
-        if self.proxy_url.is_none() {
-            return Vec::new();
-        }
-        let mut headers = vec![("x-gemini-key".to_string(), self.api_key.clone())];
-        if let Some(ref id) = self.device_id {
-            headers.push(("x-device-id".to_string(), id.clone()));
-        }
-        if let Some(ref token) = self.device_token {
-            headers.push(("x-device-token".to_string(), token.clone()));
-        }
-        headers
+        format!("{}?key=REDACTED", self.endpoint)
     }
 }
 
-fn read_config_file_key() -> Option<String> {
-    read_config_value("api_key")
-}
-
-fn read_config_file_proxy_url() -> Option<String> {
-    read_config_value("proxy_url")
+fn env_or_config(env: &str, key: &str) -> Option<String> {
+    std::env::var(env)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| read_config_value(key))
 }
 
 fn read_config_value(key: &str) -> Option<String> {
@@ -417,33 +322,6 @@ fn read_config_value_from_path(path: &std::path::Path, key: &str) -> Option<Stri
     let content = std::fs::read_to_string(path).ok()?;
     let table: toml::Table = content.parse().ok()?;
     table.get(key)?.as_str().map(String::from)
-}
-
-/// Read the per-device token from the macOS Keychain via the `security` CLI.
-/// Uses `security find-generic-password` which reads from the data protection
-/// keychain without per-app ACL prompts.
-fn read_keychain_token() -> Option<String> {
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "com.aura.desktop",
-            "-a",
-            "device_token",
-            "-w",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let token = String::from_utf8(output.stdout).ok()?;
-    let token = token.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -478,9 +356,8 @@ mod tests {
     }
 
     #[test]
-    fn test_no_proxy_uses_direct_gemini_url() {
+    fn test_ws_url_is_direct_gemini_url() {
         let config = GeminiConfig::from_env_inner("test-key-123");
-        assert!(config.proxy_url.is_none());
         let url = config.ws_url();
         assert!(url.starts_with("wss://"), "URL should use wss://");
         assert!(
@@ -495,46 +372,6 @@ mod tests {
             url.contains("key=test-key-123"),
             "URL should contain the API key"
         );
-    }
-
-    #[test]
-    fn test_proxy_url_no_query_params() {
-        let mut config = GeminiConfig::from_env_inner("test-key-123");
-        config.proxy_url = Some("wss://aura-proxy-xyz.run.app/ws".into());
-        let url = config.ws_url();
-        // Proxy URL should NOT contain API key in query params
-        assert_eq!(url, "wss://aura-proxy-xyz.run.app/ws");
-        assert!(!url.contains("api_key="));
-        assert!(!url.contains("auth_token="));
-    }
-
-    #[test]
-    fn test_ws_headers_proxy_mode() {
-        let mut config = GeminiConfig::from_env_inner("test-key-123");
-        config.proxy_url = Some("wss://proxy.example.com/ws".into());
-        config.device_id = Some("dev-abc".into());
-        config.device_token = Some("secret-token".into());
-        let headers = config.ws_headers();
-        assert_eq!(headers.len(), 3);
-        assert!(headers.contains(&("x-gemini-key".to_string(), "test-key-123".to_string())));
-        assert!(headers.contains(&("x-device-id".to_string(), "dev-abc".to_string())));
-        assert!(headers.contains(&("x-device-token".to_string(), "secret-token".to_string())));
-    }
-
-    #[test]
-    fn test_ws_headers_proxy_mode_no_device_token() {
-        let mut config = GeminiConfig::from_env_inner("test-key-123");
-        config.proxy_url = Some("wss://proxy.example.com/ws".into());
-        let headers = config.ws_headers();
-        assert_eq!(headers.len(), 1);
-        assert!(headers.contains(&("x-gemini-key".to_string(), "test-key-123".to_string())));
-    }
-
-    #[test]
-    fn test_ws_headers_direct_mode_empty() {
-        let config = GeminiConfig::from_env_inner("test-key-123");
-        let headers = config.ws_headers();
-        assert!(headers.is_empty());
     }
 
     #[test]
@@ -568,16 +405,6 @@ mod tests {
         let redacted = config.ws_url_redacted();
         assert!(!redacted.contains("secret-key-123"));
         assert!(redacted.contains("REDACTED"));
-    }
-
-    #[test]
-    fn ws_url_redacted_proxy_is_clean_url() {
-        let mut config = GeminiConfig::from_env_inner("secret-key-123");
-        config.proxy_url = Some("wss://proxy.example.com/ws".into());
-        let redacted = config.ws_url_redacted();
-        // Proxy mode: redacted URL is just the proxy URL (no secrets in URL)
-        assert_eq!(redacted, "wss://proxy.example.com/ws");
-        assert!(!redacted.contains("secret-key-123"));
     }
 
     #[test]
@@ -772,19 +599,6 @@ mod tests {
             prompt.contains("unmistakably"),
             "Prompt should use 'unmistakably' precision technique in guardrails"
         );
-    }
-
-    #[test]
-    fn test_read_config_file_device_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            "api_key = \"AItest1234567890abc\"\ndevice_id = \"dev-abc123\"\n",
-        )
-        .unwrap();
-        let val = read_config_value_from_path(&config_path, "device_id");
-        assert_eq!(val, Some("dev-abc123".to_string()));
     }
 
     #[test]

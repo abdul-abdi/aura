@@ -12,7 +12,7 @@ This is only possible because of the Gemini Live API's native audio streaming an
 
 ## System overview
 
-Native Rust (10 crates) + SwiftUI shell + cloud infrastructure. No Electron, no web views. CoreAudio for sound, CoreGraphics for input, Cocoa for UI, and a direct bidirectional WebSocket to Gemini.
+Native Rust (8 crates) + SwiftUI shell, running entirely on your Mac. No Electron, no web views. CoreAudio for sound, CoreGraphics for input, Cocoa for UI, and a direct bidirectional WebSocket to Gemini.
 
 ### Complete component map
 
@@ -27,9 +27,9 @@ Native Rust (10 crates) + SwiftUI shell + cloud infrastructure. No Electron, no 
 │  Onboarding  │  ToolStatus,     │  tools.rs         — 20 tool handlers     │
 │  Permissions │  Shutdown        │  tool_helpers.rs  — click fallbacks,     │
 │  Chat UI     │                  │                    coordinate mapping     │
-│  Keychain    │  UI → Daemon:    │  bus.rs           — event bus             │
+│              │  UI → Daemon:    │  bus.rs           — event bus             │
 │              │  SendText,       │  ipc.rs           — Unix socket server    │
-│              │  ToggleMic,      │  cloud.rs         — memory agent client   │
+│              │  ToggleMic,      │                                          │
 │              │  Reconnect       │  pipeline.rs      — safe continuation     │
 └──────────────┘                  └───┬────┬────┬────┬────┬────┬────────────┘
                                       │    │    │    │    │    │
@@ -66,7 +66,7 @@ Native Rust (10 crates) + SwiftUI shell + cloud infrastructure. No Electron, no 
 │                 │             │ (in aura-gemini)   │  │             │
 │ Bidirectional WS│             │                    │  │store.rs     │
 │ v1beta.Bidi     │             │vision_oracle.rs    │  │ SQLite WAL  │
-│ GenerateContent │             │ Gemini 3 Flash REST│  │ FTS5 search │
+│ GenerateContent │             │ Gemini Flash REST  │  │ FTS5 search │
 │                 │             │ 2560px Q92 capture │  │ sessions    │
 │ Audio + Vision  │             │ 0-1000 normalized  │  │ facts       │
 │ up simultaneously│            │ 150px delta guard  │  │ settings    │
@@ -78,44 +78,15 @@ Native Rust (10 crates) + SwiftUI shell + cloud infrastructure. No Electron, no 
 │ config.rs       │
 │ protocol.rs     │
 │ tools.rs (defs) │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐       ┌───────────────────┐
-│ Cloud Run       │──────►│ Firestore         │
-│                 │       │                   │
-│ aura-proxy      │       │ facts collection  │
-│  relay.rs       │       │  per-device scope │
-│  WebSocket      │       │  deterministic IDs│
-│  bridge         │       │                   │
-│  device auth    │       │ sessions          │
-│                 │       │  summaries        │
-│ memory-agent    │       │                   │
-│  Python FastAPI │       │ Anonymous Firebase│
-│  Gemini ADK     │       │  auth + token     │
-│  /ingest        │       │  cache            │
-│  /query         │       │                   │
-│  /consolidate   │       └───────────────────┘
-│  rate limited   │
 └─────────────────┘
 
-Infrastructure:
-┌──────────────────────────┐    ┌─────────────────────────┐
-│ infrastructure/          │    │ scripts/                │
-│  consolidation/ (Rust)   │    │  dev.sh     — build+run │
-│   batch memory summarize │    │  bundle.sh  — .app pack │
-│                          │    │  deploy-gcp.sh — cloud  │
-│  memory-agent/ (Python)  │    │  deploy-proxy.sh        │
-│   server.py — FastAPI    │    │  uninstall.sh           │
-│   agent.py  — ADK agent  │    └─────────────────────────┘
-│   tools.py  — Firestore  │
-│   config.py              │    ┌─────────────────────────┐
-└──────────────────────────┘    │ .github/workflows/      │
-                                │  ci.yml      — test/lint│
-                                │  release.yml — sign/dist│
-                                │  deploy-cloud.yml       │
-                                │  auto-tag.yml           │
-                                └─────────────────────────┘
+Repo layout:
+┌─────────────────────────┐    ┌─────────────────────────┐
+│ scripts/                │    │ .github/workflows/      │
+│  dev.sh     — build+run │    │  ci.yml      — test/lint│
+│  bundle.sh  — .app pack │    │  release.yml — sign/dist│
+│  uninstall.sh           │    │  auto-tag.yml           │
+└─────────────────────────┘    └─────────────────────────┘
 ```
 
 ### Crate summary
@@ -130,16 +101,12 @@ Infrastructure:
 | `aura-input` | Synthetic mouse + keyboard via CoreGraphics CGEvents (PID-targeted + HID) | mouse.rs, keyboard.rs, accessibility.rs |
 | `aura-memory` | SQLite persistence with WAL mode and FTS5 full-text search | store.rs, consolidate.rs |
 | `aura-menubar` | Native Cocoa menu bar UI (status dot + popover chat) | app.rs, status_item.rs, popover.rs |
-| `aura-proxy` | Cloud Run WebSocket relay with per-device auth | lib.rs, relay.rs, firestore.rs |
-| `aura-firestore` | Firestore REST client for cross-device memory sync | lib.rs, auth.rs, client.rs |
 
 ### Non-Rust components
 
 | Component | Language | Location | Purpose |
 |---|---|---|---|
-| **AuraApp** | Swift (SwiftUI) | `AuraApp/Sources/` (15 files) | Menu bar app shell — onboarding, permissions, daemon lifecycle, chat UI, Keychain access. Communicates with daemon over Unix domain socket (JSONL protocol). |
-| **memory-agent** | Python (FastAPI) | `infrastructure/memory-agent/` | Cloud Run service — ingests session transcripts, extracts structured facts via Gemini ADK agent, serves cross-session context queries. Rate-limited, HMAC auth. |
-| **consolidation** | Rust | `infrastructure/consolidation/` | Batch CLI tool — processes Firestore memories for summarization across documents. |
+| **AuraApp** | Swift (SwiftUI) | `AuraApp/Sources/` (14 files) | Menu bar app shell — onboarding, permissions, daemon lifecycle, chat UI. Communicates with daemon over Unix domain socket (JSONL protocol). |
 
 ## Click targeting pipeline
 
@@ -155,7 +122,7 @@ COORDINATE SCALING (< 1ms)
   │
   ▼
 VISION ORACLE (500ms–3s)                         ┌─ axis-swap detection
-  Fresh 2560px Q92 screenshot ──► Gemini 3 Flash ─┤  (discard if swapped)
+  Fresh 2560px Q92 screenshot ──► Gemini Flash ───┤  (discard if swapped)
   + target description           REST API         ├─ 150px delta guard
   + hint coordinates (0–1000)                     │  (discard if too far)
   Returns refined coordinates ◄──────────────────┘
@@ -208,12 +175,12 @@ Aura uses the **Gemini Live API via bidirectional WebSocket** (`v1beta.BidiGener
 ```
 WebSocket connect (TLS)
   → Send BidiGenerateContentSetup:
-      model:       gemini-2.5-flash-native-audio-preview
-      modalities:  [AUDIO]
+      model:       gemini-3.8-live (override: `model` in config.toml / AURA_MODEL)
+      modalities:  [AUDIO] + output audio transcription (for the chat UI)
       voice:       Kore
-      tools:       20 function declarations + Google Search
+      tools:       20 function declarations (non-blocking) + Google Search
       resumption:  session handle (if reconnecting)
-      compression: sliding window @ 500K tokens
+      compression: sliding window (server-default target)
   → Receive setupComplete
   → Begin streaming
 ```
@@ -229,7 +196,7 @@ WebSocket connect (TLS)
 - Exponential backoff on disconnect: 200ms → 30s, max 5 attempts, ±25% jitter
 - Session resumption via server-provided handles for seamless reconnection
 - Poison counter detects stale handles (2 consecutive short-lived sessions → fresh start)
-- Context window compression at 500K tokens — Gemini manages pruning server-side
+- Sliding-window context compression — Gemini manages pruning server-side
 
 **Interruption handling (barge-in):**
 Aura supports natural conversation interruption. When the user speaks while Gemini is responding, Aura detects sustained energy above an ambient-calibrated threshold, immediately stops playback, and signals the interruption to Gemini — all within a single audio frame (~30ms). This is core to the Live Agent experience: conversations feel natural, not turn-based.
@@ -267,7 +234,7 @@ Aura watches the screen continuously, giving Gemini real-time visual context of 
 - **Format:** JPEG (1920px max width, Q80) streamed as base64 via the Live API's video input
 - **Coordinate mapping:** Retina-aware scaling from image pixels to logical screen points
 - **Accessibility tree:** Reads UI element roles, labels, bounds, and states for precise targeting
-- **Vision oracle:** Secondary Gemini 3 Flash model refines click coordinates when accessibility targeting fails (with circuit breaker: 3 failures → 30s cooldown)
+- **Vision oracle:** Secondary Gemini Flash model refines click coordinates when accessibility targeting fails (with circuit breaker: 3 failures → 30s cooldown)
 
 This dual approach — pixel-level vision + structured accessibility data — gives Gemini both the "what does it look like" and the "what are the interactive elements" simultaneously.
 
@@ -327,7 +294,6 @@ The user-facing macOS app — 15 Swift source files in `AuraApp/Sources/`. This 
 | `WelcomeView.swift` | First-run onboarding — API key entry, config write |
 | `PermissionsView.swift` | Permission checklist UI (mic, screen recording, accessibility) |
 | `PermissionChecker.swift` | Polls macOS TCC status every 2s, auto-advances when granted |
-| `KeychainHelper.swift` | Read/write device token in macOS login Keychain |
 | `Protocol.swift` | `DaemonEvent` enum codec — mirrors Rust daemon's IPC messages |
 
 **Lifecycle:** AuraApp starts → writes config → launches `aura-daemon` as a subprocess → connects via Unix socket at `~/Library/Application Support/aura/daemon.sock` → relays events bidirectionally.
@@ -350,24 +316,17 @@ Aura is designed to stay alive through network instability, API hiccups, and edg
 | **Session resumption** | Server-provided handles allow seamless reconnection without losing conversation context. |
 | **Poison counter** | Detects stale resumption handles — 2 consecutive short-lived sessions (<30s) triggers a fresh start. |
 | **Proactive rotation** | Sessions rotate every 10 minutes to prevent server-side context staleness before it causes errors. |
-| **Vision oracle circuit breaker** | After 3 consecutive failures, the Gemini 3 Flash vision fallback disables for 30s to avoid cascading timeouts. |
+| **Vision oracle circuit breaker** | After 3 consecutive failures, the Gemini Flash vision fallback disables for 30s to avoid cascading timeouts. |
 | **Stale frame draining** | Before reconnect, buffered audio/video frames are drained to prevent protocol violations. Tool responses are never drained. |
-| **Firestore retry queue** | Failed cloud syncs are queued to `~/Library/Application Support/aura/pending_sync/` and retried on next session start. |
-| **Graceful degradation** | Missing permissions, unavailable mic/speaker, or cloud config are warned — never fatal. Aura runs with whatever is available. |
+| **Graceful degradation** | Missing permissions or an unavailable mic/speaker are warned — never fatal. Aura runs with whatever is available. |
 
 ## Google Search grounding
 
 Aura includes Google Search as a Gemini tool, enabling live web answers mid-conversation. When you ask "what's the weather" or "who won the game last night," Gemini grounds its response in real-time search results — no browser needed, no tab switching. The answer comes back as speech, naturally woven into the conversation.
 
-## Google Cloud integration
+## Memory
 
-Aura uses Google Cloud for persistent memory and network resilience:
-
-- **Proxy relay (Cloud Run):** WebSocket bridge to Gemini Live API for restricted networks. Handles per-device registration, token-based auth (constant-time comparison), and concurrent connection limiting. Bidirectional frame relay with 1 MiB message limits.
-
-- **Memory agent (Cloud Run):** Python FastAPI service using Gemini for session consolidation. After each conversation, transcripts are distilled into structured facts (category, entities, importance). On session start, relevant facts are queried and injected as context — giving Aura memory that persists across sessions and devices.
-
-- **Firestore:** Document store for facts and session summaries, scoped per device ID. Deterministic document IDs enable idempotent writes. Anonymous Firebase auth with token caching and proactive refresh.
+All memory is local. `aura-memory` stores sessions, messages, facts, and settings in SQLite (WAL, FTS5) at `~/Library/Application Support/aura/aura.db`. When a session ends, user turns and tool calls are distilled into a summary plus categorized facts by one Gemini Flash-Lite REST call (`consolidate.rs`). Recent summaries are injected at the start of the next session, and `recall_memory` searches facts and summaries on demand.
 
 ## What makes this different
 

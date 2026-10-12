@@ -8,9 +8,7 @@ members = [
     "crates/aura-gemini",
     "crates/aura-memory",
     "crates/aura-menubar",
-    "crates/aura-proxy",
     "crates/aura-input",
-    "crates/aura-firestore",
 ]
 
 [workspace.package]

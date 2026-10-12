@@ -1,4 +1,4 @@
-//! Vision Oracle: uses Gemini 3 Flash to extract precise click coordinates
+//! Vision Oracle: uses Gemini Flash to extract precise click coordinates
 //! from full-resolution screenshots when the Accessibility API cannot find
 //! the target element.
 
@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
+const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
 const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -43,7 +43,7 @@ impl VisionOracle {
         }
     }
 
-    /// Send a full-resolution screenshot to Gemini 3 Flash and get back
+    /// Send a full-resolution screenshot to Gemini Flash and get back
     /// precise logical coordinates for the click target nearest (hint_x, hint_y).
     ///
     /// - `screenshot_b64`: base64-encoded JPEG from CapturedFrame.jpeg_base64
@@ -108,9 +108,8 @@ impl VisionOracle {
                 ]
             }],
             "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 100,
-                "mediaResolution": "MEDIA_RESOLUTION_ULTRA_HIGH"
+                "thinkingConfig": { "thinkingLevel": "low" },
+                "mediaResolution": "MEDIA_RESOLUTION_HIGH"
             }
         });
 

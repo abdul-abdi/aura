@@ -10,7 +10,6 @@ aura-screen = { path = "../aura-screen" }
 aura-bridge = { path = "../aura-bridge" }
 aura-gemini = { path = "../aura-gemini" }
 aura-memory = { path = "../aura-memory" }
-aura-firestore = { path = "../aura-firestore" }
 aura-input = { path = "../aura-input" }
 serde.workspace = true
 serde_json.workspace = true
@@ -24,12 +23,9 @@ dirs = "6"
 which = "7"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-dialoguer = "0.12"
 toml = "0.8"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-security-framework = "3"
 
 [dev-dependencies]
 tempfile = "3"

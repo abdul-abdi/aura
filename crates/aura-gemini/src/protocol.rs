@@ -36,14 +36,18 @@ pub struct Setup {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_compression: Option<ContextWindowCompression>,
+
+    /// Ask the server to transcribe the model's spoken output (shown in the UI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_audio_transcription: Option<AudioTranscriptionConfig>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct AudioTranscriptionConfig {}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_modalities: Option<Vec<String>>,
 
@@ -270,6 +274,15 @@ pub struct ServerContent {
 
     #[serde(default)]
     pub interrupted: Option<bool>,
+
+    #[serde(default)]
+    pub output_transcription: Option<Transcription>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Transcription {
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,7 +335,6 @@ mod tests {
             setup: Setup {
                 model: "models/gemini-2.0-flash-exp".into(),
                 generation_config: Some(GenerationConfig {
-                    temperature: Some(0.7),
                     response_modalities: Some(vec!["AUDIO".into()]),
                     speech_config: Some(SpeechConfig {
                         voice_config: VoiceConfig {
@@ -343,13 +355,13 @@ mod tests {
                 tools: None,
                 session_resumption: None,
                 context_window_compression: None,
+                output_audio_transcription: None,
             },
         };
 
         let value = serde_json::to_value(&msg).unwrap();
 
         assert_eq!(value["setup"]["model"], "models/gemini-2.0-flash-exp");
-        assert_eq!(value["setup"]["generationConfig"]["temperature"], 0.7);
         assert_eq!(
             value["setup"]["generationConfig"]["responseModalities"][0],
             "AUDIO"

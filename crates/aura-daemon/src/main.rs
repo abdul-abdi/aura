@@ -14,8 +14,6 @@ use aura_memory::SessionMemory;
 use aura_menubar::app::MenuBarApp;
 use tracing_subscriber::EnvFilter;
 
-mod cloud;
-mod deploy;
 mod orchestrator;
 mod pipeline;
 mod processor;
@@ -28,32 +26,6 @@ use orchestrator::SessionMode;
 const EVENT_BUS_CAPACITY: usize = 256;
 const IPC_BROADCAST_CAPACITY: usize = 256;
 
-/// Save device token to the macOS Keychain via the `security` CLI.
-/// Uses `security add-generic-password` with `-U` (update if exists)
-/// which writes to the data protection keychain without ACL issues.
-fn save_keychain_token(token: &str) -> Result<(), String> {
-    let status = std::process::Command::new("security")
-        .args([
-            "add-generic-password",
-            "-s",
-            "com.aura.desktop",
-            "-a",
-            "device_token",
-            "-w",
-            token,
-            "-U", // Update if exists
-        ])
-        .status()
-        .map_err(|e| format!("Failed to run security command: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "security add-generic-password failed with {status}"
-        ))
-    }
-}
-
 #[derive(Parser)]
 #[command(name = "aura", about = "Voice-first AI desktop companion")]
 struct Cli {
@@ -64,19 +36,6 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
-
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(clap::Subcommand)]
-enum Command {
-    /// Deploy aura-proxy to Google Cloud Run
-    Deploy {
-        /// Accept all defaults without prompting (for non-interactive use)
-        #[arg(short, long)]
-        yes: bool,
-    },
 }
 
 fn main() -> Result<()> {
@@ -89,11 +48,6 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(filter)),
         )
         .init();
-
-    // Handle subcommands
-    if let Some(Command::Deploy { yes }) = cli.command {
-        return deploy::run_deploy(yes);
-    }
 
     // Validate GEMINI_API_KEY — prompt user if missing.
     // In headless mode (launched by SwiftUI app), never show an AppleScript dialog —
@@ -124,78 +78,6 @@ fn main() -> Result<()> {
         }
     };
     tracing::info!("Gemini API key validated");
-
-    // Background registration retry: if we have a device_id but no token yet,
-    // attempt registration against the proxy and store the result in Keychain.
-    if gemini_config.device_id.is_some()
-        && gemini_config.device_token.is_none()
-        && let Some(ref proxy_url) = gemini_config.proxy_url
-    {
-        let api_key = gemini_config.api_key.clone();
-        let device_id = gemini_config.device_id.clone().unwrap();
-        let proxy_base = proxy_url.replace("/ws", "").replace("wss://", "https://");
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::warn!("Background registration: failed to build runtime: {e}");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                tracing::info!("Device token missing, attempting background registration");
-                let client = match reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!("Background registration: failed to build client: {e}");
-                        return;
-                    }
-                };
-                let resp = match client
-                    .post(format!("{proxy_base}/register"))
-                    .json(&serde_json::json!({
-                        "device_id": device_id,
-                        "gemini_api_key": api_key,
-                    }))
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!("Background registration failed: {e}");
-                        return;
-                    }
-                };
-                if !resp.status().is_success() {
-                    tracing::warn!("Background registration returned {}", resp.status());
-                    return;
-                }
-                let json: serde_json::Value = match resp.json().await {
-                    Ok(j) => j,
-                    Err(e) => {
-                        tracing::warn!("Background registration bad response: {e}");
-                        return;
-                    }
-                };
-                if let Some(token) = json.get("device_token").and_then(|v| v.as_str()) {
-                    match save_keychain_token(token) {
-                        Ok(_) => {
-                            tracing::info!("Device registered and token stored in Keychain")
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to store device token in Keychain: {e}")
-                        }
-                    }
-                }
-            });
-        });
-    }
 
     // First-run setup
     let data_dir = AuraSetup::default_data_dir();
