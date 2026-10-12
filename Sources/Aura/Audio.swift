@@ -2,15 +2,17 @@ import AVFoundation
 
 /// Microphone → 16 kHz PCM for Gemini, Gemini's 24 kHz PCM → speakers.
 ///
-/// Uses Apple's voice processing (the echo canceller FaceTime uses). Playback
-/// runs through the same engine so the canceller knows what Aura is saying:
-/// Aura never hears itself and the user can talk over it at any time.
+/// Mic and speaker run on separate engines, the layout v2 proved on this Mac:
+/// the mic engine uses Apple's voice processing (echo cancellation) so Aura
+/// doesn't hear itself; putting playback in that same engine fails to start
+/// on some Macs (error -10875).
 final class Audio {
     /// Called on the audio thread with 16-bit little-endian mono PCM at 16 kHz.
     var onMicrophone: ((Data) -> Void)?
     var muted = false
 
-    private var engine = AVAudioEngine()
+    private var mic = AVAudioEngine()
+    private var speaker = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private var observer: NSObjectProtocol?
     private var startedAt = Date.distantPast
@@ -20,42 +22,50 @@ final class Audio {
 
     func start() throws {
         startedAt = Date()
-        engine = AVAudioEngine()
-        player = AVAudioPlayerNode()
-
-        let input = engine.inputNode
+        mic = AVAudioEngine()
+        let input = mic.inputNode
+        var echoCancellation = true
         do {
             try input.setVoiceProcessingEnabled(true)
             // Don't turn other apps' audio way down while Aura listens.
             input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
         } catch {
+            echoCancellation = false
             log.warning("Echo cancellation unavailable: \(error.localizedDescription, privacy: .public)")
         }
 
-        // With voice processing on, tap at the input-side hardware format and read
-        // channel 0 (the processed voice); the output-side format is wrong here.
-        let format = input.inputFormat(forBus: 0)
+        // Read the format after enabling voice processing (it changes it) and tap at that
+        // native format; channel 0 is the processed voice.
+        let format = input.outputFormat(forBus: 0)
+        log.info("Mic: \(format.sampleRate, privacy: .public) Hz × \(format.channelCount, privacy: .public) ch, echo cancellation \(echoCancellation ? "on" : "off", privacy: .public)")
         guard format.channelCount > 0, format.sampleRate > 0 else {
             throw AuraError("No usable microphone (check the Microphone permission)")
         }
         resampler = Resampler(from: format.sampleRate)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
             self?.forward(buffer)
         }
+        mic.prepare()
+        try mic.start()
 
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: speakerFormat)
-        engine.prepare()
-        try engine.start()
+        speaker = AVAudioEngine()
+        player = AVAudioPlayerNode()
+        speaker.attach(player)
+        speaker.connect(player, to: speaker.mainMixerNode, format: speakerFormat)
+        speaker.prepare()
+        try speaker.start()
         player.play()
         startedAt = Date()
 
         observer = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
+            forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
+        ) { [weak self] note in
             // Turning on voice processing posts this itself; restarting on that loops forever.
             // Only react to real changes (headphones, AirPods) once things have settled.
-            guard let self, Date().timeIntervalSince(self.startedAt) > 2 else { return }
+            guard let self, let engine = note.object as? AVAudioEngine,
+                  engine === self.mic || engine === self.speaker,
+                  Date().timeIntervalSince(self.startedAt) > 2
+            else { return }
             self.restart()
         }
     }
@@ -63,8 +73,10 @@ final class Audio {
     func stop() {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        mic.inputNode.removeTap(onBus: 0)
+        mic.stop()
+        player.stop()
+        speaker.stop()
     }
 
     func restart() {

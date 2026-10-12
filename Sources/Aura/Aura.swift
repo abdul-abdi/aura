@@ -83,8 +83,10 @@ final class Aura: ObservableObject, @unchecked Sendable {
         do {
             try audio.start()
         } catch {
+            audio.stop()
             self.live = nil
-            show(.problem, error.localizedDescription)
+            log.error("Audio failed to start: \(error.localizedDescription, privacy: .public)")
+            show(.problem, "Audio failed to start: \(error.localizedDescription)")
             return
         }
         running = true
